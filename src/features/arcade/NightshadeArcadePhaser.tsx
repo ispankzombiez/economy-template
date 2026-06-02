@@ -6,13 +6,12 @@ import VirtualJoystickPlugin from "phaser3-rex-plugins/plugins/virtualjoystick-p
 import { Preloader } from "features/world/scenes/Preloader";
 import { NightshadeArcadeScene } from "./NightshadeArcadeScene";
 import { useMinigameSession } from "lib/portal";
-import { createDefaultGuestBumpkin } from "lib/mmo/defaultGuestBumpkin";
 import type { GuestBumpkinJoin } from "lib/mmo/types";
 import { tokenUriBuilder, type BumpkinParts } from "lib/utils/tokenUriBuilder";
 
 export const NightshadeArcadePhaser: React.FC = () => {
   const { farmId, farm, playerData } = useMinigameSession();
-  const username = playerData.resolvedProfile.username ?? undefined;
+  const username = playerData?.resolvedProfile?.username ?? undefined;
   const game = useRef<Game>(undefined);
 
   const scene = "nightshade-arcade";
@@ -22,55 +21,17 @@ export const NightshadeArcadePhaser: React.FC = () => {
       | { equipped?: Record<string, string>; experience?: number; id?: number }
       | undefined;
 
-    const equipped = b?.equipped;
+    const equipped = b?.equipped ?? {};
 
-    if (!equipped) {
-      return createDefaultGuestBumpkin();
-    }
+    // Only include slots that have a real item name; omit empty/missing values
+    const cleanEquipped = Object.fromEntries(
+      Object.entries(equipped).filter(([, v]) => !!v)
+    ) as GuestBumpkinJoin["equipped"];
 
-    // Build BumpkinParts from the equipped record
-    const parts: BumpkinParts = {
-      background: (equipped.background || undefined) as BumpkinParts["background"],
-      body: (equipped.body || undefined) as BumpkinParts["body"],
-      hair: (equipped.hair || undefined) as BumpkinParts["hair"],
-      shirt: (equipped.shirt || undefined) as BumpkinParts["shirt"],
-      pants: (equipped.pants || undefined) as BumpkinParts["pants"],
-      shoes: (equipped.shoes || undefined) as BumpkinParts["shoes"],
-      tool: (equipped.tool || undefined) as BumpkinParts["tool"],
-      hat: (equipped.hat || undefined) as BumpkinParts["hat"],
-      necklace: (equipped.necklace || undefined) as BumpkinParts["necklace"],
-      secondaryTool: (equipped.secondaryTool || undefined) as BumpkinParts["secondaryTool"],
-      coat: (equipped.coat || undefined) as BumpkinParts["coat"],
-      onesie: (equipped.onesie || undefined) as BumpkinParts["onesie"],
-      suit: (equipped.suit || undefined) as BumpkinParts["suit"],
-      wings: (equipped.wings || undefined) as BumpkinParts["wings"],
-      dress: (equipped.dress || undefined) as BumpkinParts["dress"],
-      beard: (equipped.beard || undefined) as BumpkinParts["beard"],
-      aura: (equipped.aura || undefined) as BumpkinParts["aura"],
-    };
-
-    const tokenParts = tokenUriBuilder(parts);
+    const tokenParts = tokenUriBuilder(cleanEquipped as unknown as BumpkinParts);
 
     return {
-      equipped: {
-        background: equipped.background ?? "",
-        body: equipped.body ?? "",
-        hair: equipped.hair ?? "",
-        shoes: equipped.shoes ?? "",
-        pants: equipped.pants ?? "",
-        tool: equipped.tool ?? "",
-        shirt: equipped.shirt ?? "",
-        coat: equipped.coat ?? "",
-        onesie: equipped.onesie ?? "",
-        suit: equipped.suit ?? "",
-        dress: equipped.dress ?? "",
-        hat: equipped.hat ?? "",
-        necklace: equipped.necklace ?? "",
-        secondaryTool: equipped.secondaryTool ?? "",
-        wings: equipped.wings ?? "",
-        beard: equipped.beard ?? "",
-        aura: equipped.aura ?? "",
-      },
+      equipped: cleanEquipped,
       experience: b?.experience ?? 0,
       id: b?.id ?? 0,
       skills: {},
