@@ -349,6 +349,11 @@ export const MinigamePortalProvider: React.FC<
           0;
 
         const portalFarm = asRecord(portalProfile);
+        const resolvedFarmBumpkin =
+          portalFarm?.bumpkin ??
+          session?.farm.bumpkin ??
+          playerData.resolvedProfile.bumpkin;
+
         const ctx: BootstrapContext = {
           id: resolvedFarmId,
           jwt,
@@ -369,10 +374,7 @@ export const MinigamePortalProvider: React.FC<
                 portalFarm?.displayName,
                 portalFarm?.name,
               ) ?? undefined,
-            bumpkin:
-              session?.farm.bumpkin ??
-              playerData.resolvedProfile.bumpkin ??
-              portalFarm?.bumpkin,
+            bumpkin: resolvedFarmBumpkin,
           },
           playerEconomy,
           actions: session?.actions ?? cfg.offlineActions,
@@ -381,6 +383,11 @@ export const MinigamePortalProvider: React.FC<
             : cfg.offlineEconomyMeta,
           playerData,
         };
+        // eslint-disable-next-line no-console
+        console.log(
+          "[BumpkinDiag] resolved farm.bumpkin equipped:",
+          JSON.stringify((ctx.farm.bumpkin as any)?.equipped),
+        );
         if (!cancelled) {
           // eslint-disable-next-line no-console
           console.log("[BumpkinDiag] bootstrap.farm.bumpkin:", JSON.stringify(ctx.farm.bumpkin));
