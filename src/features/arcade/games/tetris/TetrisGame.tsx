@@ -11,19 +11,12 @@ import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
+import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import {
   getTetrisDifficulty,
   isTetrisRewardRunAvailable,
@@ -551,12 +544,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     () => isTetrisRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () => getRemainingPaidAttemptsForMinigame(portalGameState, "tetris" as any),
-    [portalGameState],
-  );
 
   const todaysDifficulty = useMemo(() => getTetrisDifficulty(), []);
 
@@ -625,6 +612,17 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     },
     [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between. `hasRewardRun` is kept as the availability check so
+  // the button and the store can never disagree.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "tetris",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   const tryMove = useCallback((dx: number, dy: number, onLock?: () => void) => {
     setRuntime((previous) => {
@@ -945,7 +943,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -955,13 +953,13 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Tetris today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today&apos;s Tetris reward run has already been used."
-                  : "Today&apos;s arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Tetris today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -975,20 +973,12 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (
@@ -1179,16 +1169,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             {mode === "practice" && (
               <Button onClick={() => startSession("practice")}>
                 Restart Practice Run
-              </Button>
-            )}
-            {runtime.gameOver && !hasRewardRun && paidAttemptsRemaining > 0 && (
-              <Button
-                onClick={() =>
-                  purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-                }
-                disabled={!hasEnoughFlower}
-              >
-                Buy Another Attempt ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
               </Button>
             )}
             {onClose && <Button onClick={handleInGameExit}>Exit</Button>}

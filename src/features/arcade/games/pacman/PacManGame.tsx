@@ -13,20 +13,13 @@ import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { NPCIcon } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useRewardRun } from "../adapters/rewardRun";
 import {
   getPacManDifficulty,
   isPacManRewardRunAvailable,
@@ -436,13 +429,6 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     () => isPacManRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () =>
-      getRemainingPaidAttemptsForMinigame(portalGameState, "pac-man" as any),
-    [portalGameState],
-  );
 
   const todaysDifficulty = useMemo(() => getPacManDifficulty(), []);
 
@@ -498,6 +484,16 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     },
     [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "pac-man",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   // ── Key handling ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1015,7 +1011,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -1025,13 +1021,13 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Bumpkin-Man today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today's Bumpkin-Man reward run has already been used."
-                  : "Today's arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Bumpkin-Man today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -1045,20 +1041,12 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (

@@ -19,9 +19,18 @@ export const NIGHTSHADE_ARCADE_MINIGAMES: MinigameName[] = [
 export const POKER_STARTING_CHIPS = 100;
 export const POKER_MAX_HANDS = 5;
 export const POKER_RAVEN_COIN_REWARD = 1;
+/**
+ * FLOWER price of the legacy "+1 reward attempt" button.
+ *
+ * Superseded: extra reward runs are now paid for with a **Play Ticket**
+ * (`Mint-Play-Ticket` burns one), bought from the economy's `purchases`
+ * (`ticket_1`…`ticket_4`). Kept only so old saves/imports that reference the
+ * constant still compile.
+ */
 export const EXTRA_REWARD_ATTEMPT_FLOWER_COST = 5;
 export const MAX_PAID_REWARD_ATTEMPTS_PER_DAY = 2;
-export const MAX_REWARD_ATTEMPTS_PER_DAY = 3;
+/** Free reward runs per day: one for everyone (arcade-wide), VIP per machine. */
+export const FREE_REWARD_RUNS_PER_DAY = 1;
 
 export type PokerMode = "reward" | "practice";
 export type PokerDifficultyName = "easy" | "medium" | "hard" | "expert";
@@ -125,6 +134,43 @@ export const getRemainingPaidAttemptsForMinigame = (
   return Math.max(0, MAX_PAID_REWARD_ATTEMPTS_PER_DAY - purchasesUsed);
 };
 
+/**
+ * Is today's **free** reward run still available?
+ *
+ * Free runs are counted separately from paid ones because they are what the
+ * server's `dailyCap` on `Mint-Raven-Coin` enforces:
+ *
+ *  - **non-VIP** — one for the whole arcade, so the tally is the arcade-wide
+ *    sum (`getArcadeAttemptsUsedToday`, written to the `roulette` slot);
+ *  - **VIP** — one per machine, so only this cabinet's own history counts.
+ */
+export const isFreeRewardRunAvailableForMinigame = ({
+  game,
+  minigame,
+  isVip,
+  now = Date.now(),
+}: {
+  game: GameState;
+  minigame: MinigameName;
+  isVip: boolean;
+  now?: Date | number;
+}): boolean => {
+  if (isVip) {
+    return (
+      getMinigameAttemptsUsedToday(game, minigame, now) <
+      FREE_REWARD_RUNS_PER_DAY
+    );
+  }
+
+  return getArcadeAttemptsUsedToday(game, now) < FREE_REWARD_RUNS_PER_DAY;
+};
+
+/**
+ * Can the player start a reward run on this machine right now?
+ *
+ * Either today's free run is still going, or they are holding a Play Ticket —
+ * which is exactly the rule: free first, then 1 burned ticket per attempt.
+ */
 export const isRewardRunAvailableForMinigame = ({
   game,
   minigame,
@@ -136,22 +182,11 @@ export const isRewardRunAvailableForMinigame = ({
   isVip: boolean;
   now?: Date | number;
 }): boolean => {
-  const purchasedAttempts = Math.min(
-    getMinigamePurchasesUsedToday(game, minigame, now),
-    MAX_PAID_REWARD_ATTEMPTS_PER_DAY,
-  );
-  const totalAvailableRuns = Math.min(
-    MAX_REWARD_ATTEMPTS_PER_DAY,
-    1 + purchasedAttempts,
-  );
-
-  if (isVip) {
-    return (
-      getMinigameAttemptsUsedToday(game, minigame, now) < totalAvailableRuns
-    );
+  if (isFreeRewardRunAvailableForMinigame({ game, minigame, isVip, now })) {
+    return true;
   }
 
-  return getArcadeAttemptsUsedToday(game, now) < totalAvailableRuns;
+  return (game.playTickets ?? 0) > 0;
 };
 
 export const getPokerMode = ({

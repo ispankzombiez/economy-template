@@ -1,52 +1,58 @@
-import type { InventoryItemName } from "./gameTypes";
-
 /**
- * Faithful port of `features/portal/lib/portalUtil.ts` from the original
- * arcade (`source-portal`).
+ * Legacy portal helpers from the original arcade (`source-portal`
+ * `features/portal/lib/portalUtil.ts`) — now inert.
  *
- * These are **postMessage** calls to the hosting portal frame, not HTTP
- * requests — `startAttempt` / `submitScore` / `purchase` never touch the
- * Minigames API, so they are safe to run in an offline/local build. Outside an
- * iframe (the arcade running standalone) they degrade exactly as they did
- * before: attempts and scores are dropped, purchases self-confirm.
+ * ## Why they no longer talk to the host page
  *
- * Only the three helpers the ten games import are kept.
+ * These were `postMessage` calls to the Sunflower Land frame that embeds the
+ * arcade. The host reacted by looking the portal up in its minigame registry,
+ * and a hosted *economy* (`Nightshade-Arcade`) is not a registered minigame, so
+ * every reward run and every score produced an uncaught error in the **host**
+ * page:
+ *
+ * ```
+ * Uncaught Error: Nightshade-Arcade is not a valid minigame
+ *   at startMinigameAttempt (...)
+ *   at submitMinigameScore (...)
+ * ```
+ *
+ * That is the `Uncaught Error` beta testers saw mid-hand in Blackjack. The
+ * events are also redundant now — this arcade records both itself:
+ *
+ *  - **attempts** — `portalService.send({ type: "arcadeMinigame.started" })`,
+ *    persisted through the economy's `dailyMinted` ledger;
+ *  - **scores** — `submitScore` in `lib/portal/api`, from `handleWin`.
+ *
+ * The functions are kept (rather than deleted) so the ten ported games, which
+ * were copied verbatim and still import them, keep compiling. They are
+ * deliberately no-ops.
  */
 
 const isInIframe = window.self !== window.top;
 
 /**
- * Allow a player to spend FLOWER or items in your game.
+ * Kept for the ported games' import list only.
  *
- * The arcade uses this for the "+1 reward attempt" button. Without a parent
- * frame it self-confirms (the original also posted a `purchased` event to
- * itself), but the arcade's local GameState has no FLOWER to deduct, so the
- * button stays disabled until a live session supplies a balance.
+ * The "+1 reward attempt" purchase that used this was replaced by the Play
+ * Ticket flow (`Mint-Play-Ticket` burns one, dispatched by the portal store),
+ * so nothing calls it any more.
  */
 export function purchase({
   sfl,
   items,
 }: {
   sfl: number;
-  items: Partial<Record<InventoryItemName, number>>;
+  items: Record<string, number>;
 }) {
-  if (!isInIframe) {
-    window.postMessage({ event: "purchased", sfl, items }, "*");
-  } else {
-    window.parent.postMessage({ event: "purchase", sfl, items }, "*");
-  }
+  void sfl;
+  void items;
+  void isInIframe;
 }
 
-/** Starts a minigame attempt (the parent frame records it). */
-export function startAttempt() {
-  if (isInIframe) {
-    window.parent.postMessage({ event: "attemptStarted" }, "*");
-  }
-}
+/** Attempt recording now goes through `portalService` and the economy ledger. */
+export function startAttempt() {}
 
-/** Submits a minigame score (the parent frame records it). */
+/** Leaderboard submission now goes through `submitScore` in `lib/portal/api`. */
 export function submitScore({ score }: { score: number }) {
-  if (isInIframe) {
-    window.parent.postMessage({ event: "scoreSubmitted", score }, "*");
-  }
+  void score;
 }

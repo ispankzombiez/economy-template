@@ -17,6 +17,12 @@
       "description": "A special ticket from the Nightshade Arcade. Also functions as a coupon!",
       "tradeable": false
     },
+    "Play Ticket": {
+      "name": "Play Ticket",
+      "description": "Use for 1 reward run on any arcade game",
+      "tradeable": false,
+      "initialBalance": 3
+    },
     "Apple Pie": {
       "name": "Apple Pie",
       "description": "A delicious homemade apple pie from the Nightshade Arcade.",
@@ -139,6 +145,71 @@
     }
   },
   "actions": {
+    "Mint-Raven-Coin": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Poker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Blackjack": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Gofish": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Uno": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Solitaire": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-GoblinInvaders": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Tetris": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-BarleyBreaker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-PacMan": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Frogger": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+    },
+    "Mint-Raven-Coin-Ticket": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "RavenCoin": { "amount": 1 } }
+    },
+    "Mint-Play-Ticket": {
+      "type": "custom",
+      "showInShop": false,
+      "burn": { "Play Ticket": { "amount": 1 } }
+    },
     "buy_nightshade_ticket": {
       "type": "shop",
       "showInShop": true,

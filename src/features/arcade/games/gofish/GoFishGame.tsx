@@ -5,21 +5,14 @@ import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import { SquareIcon } from "components/ui/SquareIcon";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
+import { useRewardRun } from "../adapters/rewardRun";
 import { useVipAccess } from "../adapters/useVipAccess";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import { Card, CardRank } from "../poker/types";
 import { PokerDeck } from "../poker/deck";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import {
   GO_FISH_RAVEN_COIN_REWARD,
   GoFishMode,
@@ -256,12 +249,6 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
     () => isGoFishRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () => getRemainingPaidAttemptsForMinigame(portalGameState, "gofish"),
-    [portalGameState],
-  );
 
   const startSession = useCallback(
     (mode: GoFishMode) => {
@@ -278,6 +265,17 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
     },
     [portalService, rewardRunStarted],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between. `isGoFishRewardRunAvailable` is kept as the
+  // availability check so the button and the store can never disagree.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "gofish",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   const playerDrawIfNeeded = useCallback(
     (nextState: GoFishState): GoFishState => {
@@ -595,7 +593,7 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -605,13 +603,13 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Go Fish today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today's Go Fish reward run has already been used."
-                  : "Today's arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Go Fish today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -625,20 +623,12 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (

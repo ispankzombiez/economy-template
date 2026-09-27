@@ -40,6 +40,15 @@ export type Minigame = {
 export type GameState = {
   /** FLOWER balance — gates the paid "+1 reward attempt" button. */
   balance?: string | number;
+  /**
+   * Play Tickets held by the player.
+   *
+   * One is burned to open a reward run once today's free run is spent. It sits
+   * here rather than in `inventory` because the games read everything else
+   * through this state, and `withArcadeProps` is the only thing that fills it
+   * in (straight from `playerEconomy.balances`).
+   */
+  playTickets?: number;
   /** Current bumpkin; only `equipped` is read (for the in-game NPC portrait). */
   bumpkin?: { equipped?: Equipped } | null;
   inventory?: Record<string, string | number>;

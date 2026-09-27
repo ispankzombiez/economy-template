@@ -50,7 +50,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(PokerGame),
+    component: withArcadeProps(PokerGame, "poker"),
   },
   {
     id: "blackjack",
@@ -59,7 +59,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(BlackjackGame),
+    component: withArcadeProps(BlackjackGame, "blackjack"),
   },
   {
     id: "gofish",
@@ -68,7 +68,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(GoFishGame),
+    component: withArcadeProps(GoFishGame, "gofish"),
   },
   {
     id: "uno",
@@ -77,7 +77,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(UnoGame),
+    component: withArcadeProps(UnoGame, "uno"),
   },
   {
     id: "solitaire",
@@ -86,7 +86,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(SolitaireGame),
+    component: withArcadeProps(SolitaireGame, "solitaire"),
   },
   {
     id: "goblin-invaders",
@@ -95,7 +95,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(GoblinInvadersGame),
+    component: withArcadeProps(GoblinInvadersGame, "goblin-invaders"),
   },
   {
     id: "tetris",
@@ -104,7 +104,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(TetrisGame),
+    component: withArcadeProps(TetrisGame, "tetris"),
   },
   {
     id: "barley-breaker",
@@ -113,7 +113,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(BarleyBreakerGame),
+    component: withArcadeProps(BarleyBreakerGame, "barley-breaker"),
   },
   {
     id: "pac-man",
@@ -122,7 +122,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(PacManGame),
+    component: withArcadeProps(PacManGame, "pac-man"),
   },
   {
     id: "frogger",
@@ -131,7 +131,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: withArcadeProps(FroggerGame),
+    component: withArcadeProps(FroggerGame, "frogger"),
   },
 ];
 

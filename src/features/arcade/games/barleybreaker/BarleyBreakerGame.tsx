@@ -12,16 +12,9 @@ import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
+import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import {
@@ -298,16 +291,6 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
     () => isBarleyBreakerRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () =>
-      getRemainingPaidAttemptsForMinigame(
-        portalGameState,
-        "barley-breaker" as any,
-      ),
-    [portalGameState],
-  );
 
   const todaysDifficulty = useMemo(() => getBarleyBreakerDifficulty(), []);
 
@@ -367,6 +350,17 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
     },
     [hasRewardRun, practiceDifficultyName, portalService, todaysDifficulty],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between. `hasRewardRun` is kept as the availability check so
+  // the button and the store can never disagree.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "barley-breaker",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   const launchBall = useCallback(() => {
     setRuntime((previous) => {
@@ -829,7 +823,7 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -839,13 +833,13 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Barley Breaker today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today&apos;s Barley Breaker reward run has already been used."
-                  : "Today&apos;s arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Barley Breaker today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -859,20 +853,12 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (

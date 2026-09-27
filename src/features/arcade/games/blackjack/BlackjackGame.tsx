@@ -11,19 +11,13 @@ import { Card } from "../poker/types";
 import { BlackjackDeck } from "./deck";
 import { OuterPanel, InnerPanel } from "components/ui/Panel";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useRewardRun } from "../adapters/rewardRun";
+import { ConfirmPanel } from "../adapters/ConfirmPanel";
 import { useVipAccess } from "../adapters/useVipAccess";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import {
   BLACKJACK_BET_AMOUNTS,
   BlackjackBetAmount,
@@ -188,6 +182,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
   const [selectedBet, setSelectedBet] = useState<BlackjackBetAmount>(10);
   const [sessionMode, setSessionMode] = useState<BlackjackMode | null>(null);
   const [showRules, setShowRules] = useState(false);
+  const [confirmExit, setConfirmExit] = useState(false);
   const [rewardRunStarted, setRewardRunStarted] = useState(false);
   const [rewardGranted, setRewardGranted] = useState(false);
 
@@ -201,12 +196,6 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
   const hasRewardRun = useMemo(
     () => isBlackjackRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
-  );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () => getRemainingPaidAttemptsForMinigame(portalGameState, "blackjack"),
-    [portalGameState],
   );
 
   const realChips = initialChips || BLACKJACK_STARTING_CHIPS;
@@ -231,18 +220,15 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
   const canPlayNextHand = gameState.status === "gameover" && !sessionComplete;
 
   const handleSessionExit = () => {
+    // Finished: leave the arcade outright. A half-finished run asks first —
+    // in-game, because `window.confirm` is auto-dismissed in this iframe.
     if (sessionComplete) {
       setShowRules(false);
-      setSessionMode(null);
+      onClose?.();
       return;
     }
 
-    const confirmed = window.confirm(
-      "Exit Blackjack? Current game progress will be lost.",
-    );
-    if (!confirmed) return;
-
-    onClose?.();
+    setConfirmExit(true);
   };
 
   // ─── Card suit images (same assets as poker) ────────────────────────────────
@@ -310,6 +296,17 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [selectedBet, gameState, realChips, rewardRunStarted],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between. `isBlackjackRewardRunAvailable` is kept as the
+  // availability check so the button and the store can never disagree.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "blackjack",
+    isVip,
+    portalService,
+    startRewardRun: () => startHand("reward"),
+  });
 
   const resolveHand = useCallback(
     (
@@ -663,7 +660,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           </div>
 
           <button
-            onClick={() => startHand("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun || realChips < selectedBet}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun && realChips >= selectedBet
@@ -673,13 +670,13 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           >
             <div>🎯 START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for blackjack today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today's blackjack reward run has already been used."
-                  : "Today's arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for blackjack today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -694,20 +691,12 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (
@@ -1036,6 +1025,20 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
                 >
                   {sessionComplete ? "EXIT BLACKJACK" : "BACK TO ARCADE"}
                 </button>
+              )}
+
+              {confirmExit && (
+                <ConfirmPanel
+                  title="EXIT BLACKJACK?"
+                  body="Your current hand and chips in this session will be lost. This cannot be undone."
+                  confirmLabel="CONFIRM — EXIT"
+                  onCancel={() => setConfirmExit(false)}
+                  onConfirm={() => {
+                    setConfirmExit(false);
+                    setShowRules(false);
+                    onClose?.();
+                  }}
+                />
               )}
             </div>
           )}

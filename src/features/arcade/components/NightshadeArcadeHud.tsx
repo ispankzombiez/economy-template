@@ -1,11 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { HudContainer } from "components/ui/HudContainer";
 import { useMinigameSession } from "lib/portal";
 import { Modal } from "components/ui/Modal";
 import { Panel } from "components/ui/Panel";
 import ravenCoinIcon from "../assets/RavenCoin.webp";
-import coinsIcon from "../assets/coins.webp";
-import gemsIcon from "../assets/gem.webp";
+import { resolveRavenCoinTokenKey } from "../lib/ravenCoin";
 import flowerIcon from "../assets/flower_token.webp";
 import { PortalBasketButton } from "./PortalBasketButton";
 import { requestClosePortal } from "lib/portal/closePortal";
@@ -19,46 +18,48 @@ type NightshadeArcadeHudProps = {
 
 const formatter = new Intl.NumberFormat();
 
+/** How long the full FLOWER balance stays on screen after a click. */
+const FULL_BALANCE_HOLD_MS = 4000;
+
 const NightshadeArcadeBalances: React.FC<{
-  coins: number;
   flowers: number;
-  gems: number;
   ravenCoins: number;
-}> = ({ coins, flowers, gems, ravenCoins }) => {
+}> = ({ flowers, ravenCoins }) => {
+  // FLOWER is a long decimal; the arcade shows the whole number and only
+  // reveals the exact figure on click, for a few seconds.
   const [showFullBalance, setShowFullBalance] = useState(false);
 
+  useEffect(() => {
+    if (!showFullBalance) return;
+    const timer = window.setTimeout(
+      () => setShowFullBalance(false),
+      FULL_BALANCE_HOLD_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [showFullBalance]);
+
   return (
-    <div className="flex flex-col space-y-1 items-end !text-[28px] text-stroke">
-      <div className="flex cursor-pointer items-center space-x-3 relative">
-        <div className="h-9 w-full bg-black opacity-30 absolute coins-bb-hud-backdrop" />
-        <div className="flex items-center space-x-2">
-          <span className="balance-text mt-0.5">{formatter.format(coins)}</span>
-          <img alt="Coins" src={coinsIcon} style={{ width: 25 }} />
-        </div>
-        <div className="flex items-center space-x-2">
-          <span className="balance-text mt-0.5">{formatter.format(gems)}</span>
-          <img alt="Gems" src={gemsIcon} style={{ marginTop: 2, width: 28 }} />
-        </div>
-      </div>
-      <div
-        className="flex items-center space-x-2 relative cursor-pointer"
-        onClick={() => setShowFullBalance((value) => !value)}
-      >
-        <div className="h-9 w-full bg-black opacity-25 absolute sfl-hud-backdrop -z-10" />
-        <span className="balance-text">
-          {flowers.toLocaleString(undefined, {
-            maximumFractionDigits: showFullBalance ? 8 : 4,
-          })}
+    <div
+      className="relative flex items-center space-x-2 cursor-pointer !text-[28px] text-stroke"
+      onClick={() => setShowFullBalance(true)}
+      title="Click to show the exact FLOWER balance"
+    >
+      <div className="h-9 w-full bg-black opacity-25 absolute sfl-hud-backdrop -z-10" />
+      <span className="balance-text">
+        {flowers.toLocaleString(undefined, {
+          maximumFractionDigits: showFullBalance ? 8 : 0,
+        })}
+      </span>
+      <img alt="FLOWER" src={flowerIcon} style={{ width: 26 }} />
+      <div className="flex items-center space-x-2">
+        <span className="balance-text mt-0.5">
+          {formatter.format(ravenCoins)}
         </span>
-        <img alt="FLOWER" src={flowerIcon} style={{ width: 26 }} />
-        <div className="flex items-center space-x-2">
-          <span className="balance-text mt-0.5">{formatter.format(ravenCoins)}</span>
-          <img
-            alt="RavenCoins"
-            src={ravenCoinIcon}
-            style={{ width: 25, height: 25 }}
-          />
-        </div>
+        <img
+          alt="RavenCoins"
+          src={ravenCoinIcon}
+          style={{ width: 25, height: 25 }}
+        />
       </div>
     </div>
   );
@@ -67,7 +68,8 @@ const NightshadeArcadeBalances: React.FC<{
 export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
   extraRavenCoins,
 }) => {
-  const { farmId, playerEconomy, farm, playerData } = useMinigameSession();
+  const { farmId, playerEconomy, farm, playerData, economyMeta } =
+    useMinigameSession();
   const profileInventory = playerData.resolvedProfile.inventory;
   const readAmount = (value: unknown) => {
     const amount = Number(value ?? 0);
@@ -76,18 +78,21 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
   const readInventoryAmount = (token: string) =>
     readAmount(profileInventory?.[token]);
 
+  // Hosted builds key this currency `mainCurrencyToken` (`"0"`), the offline
+  // sample keys it `RavenCoin` — reading a hard-coded name shows 0 either way.
+  const ravenCoinToken = resolveRavenCoinTokenKey({
+    economyMeta,
+    items: playerEconomy?.items,
+    balances: playerEconomy?.balances,
+  });
+
   const baseRavenCoins = readAmount(
-    playerEconomy.balances?.RavenCoin ?? readInventoryAmount("RavenCoin"),
+    playerEconomy.balances?.[ravenCoinToken] ??
+      readInventoryAmount(ravenCoinToken),
   );
   const totalRavenCoins = Math.max(0, baseRavenCoins + extraRavenCoins);
-  const flowers = readAmount(playerData.resolvedProfile.balance ?? farm.balance);
-  const coins = readAmount(
-    playerData.resolvedProfile.coins ??
-      playerEconomy.balances?.Coin ??
-      readInventoryAmount("Coin"),
-  );
-  const gems = readAmount(
-    playerEconomy.balances?.Gem ?? readInventoryAmount("Gem"),
+  const flowers = readAmount(
+    playerData.resolvedProfile.balance ?? farm.balance,
   );
   const [showInventory, setShowInventory] = useState(false);
   const visibleInventoryEntries = useMemo(() => {
@@ -104,8 +109,19 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
     appendEntries(playerData.resolvedProfile.inventory);
     appendEntries(playerEconomy.balances);
 
-    return Array.from(merged.entries()).sort((a, b) => b[1] - a[1]);
-  }, [playerData.resolvedProfile.inventory, playerEconomy.balances]);
+    // Hosted configs key items numerically (`"0"`), so a raw key in the list
+    // would read "0" instead of "Raven Coin".
+    const labelFor = (token: string) =>
+      economyMeta?.items?.[token]?.name ?? token;
+
+    return Array.from(merged.entries())
+      .map(([token, amount]) => ({ token, label: labelFor(token), amount }))
+      .sort((a, b) => b.amount - a.amount);
+  }, [
+    playerData.resolvedProfile.inventory,
+    playerEconomy.balances,
+    economyMeta?.items,
+  ]);
 
   return (
     <>
@@ -151,8 +167,6 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
         <div className="absolute right-0 top-0 p-2.5">
           <NightshadeArcadeBalances
             flowers={flowers}
-            coins={coins}
-            gems={gems}
             ravenCoins={totalRavenCoins}
           />
         </div>
@@ -168,9 +182,12 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
             <div className="mb-2 text-sm font-bold">Inventory</div>
             {visibleInventoryEntries.length ? (
               <div className="max-h-72 overflow-y-auto space-y-1 text-xs">
-                {visibleInventoryEntries.map(([token, amount]) => (
-                  <div className="flex items-center justify-between" key={token}>
-                    <span>{token}</span>
+                {visibleInventoryEntries.map(({ token, label, amount }) => (
+                  <div
+                    className="flex items-center justify-between"
+                    key={token}
+                  >
+                    <span>{label}</span>
                     <span>{formatter.format(amount)}</span>
                   </div>
                 ))}

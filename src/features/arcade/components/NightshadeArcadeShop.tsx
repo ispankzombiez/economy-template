@@ -7,7 +7,10 @@ type EconomyAction = {
   type?: string;
   showInShop?: boolean;
   mint?: Record<string, { amount?: number } | number>;
-  burn?: Record<string, { amount?: number; min?: number; max?: number } | number>;
+  burn?: Record<
+    string,
+    { amount?: number; min?: number; max?: number } | number
+  >;
 };
 
 type NightshadeArcadeShopProps = {
@@ -26,7 +29,8 @@ function toAmount(rule: unknown): number | null {
 export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
   onClose,
 }) => {
-  const { actions, dispatchAction, apiError, economyMeta } = useMinigameSession();
+  const { actions, dispatchAction, apiError, economyMeta } =
+    useMinigameSession();
   const [localError, setLocalError] = useState<string | null>(null);
 
   const shopItems = useMemo(
@@ -44,6 +48,16 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
    * same here; otherwise every row would be titled with its raw action id
    * (`buy_nightshade_ticket` instead of `Nightshade Ticket`).
    */
+  /**
+   * Display name for an economy token.
+   *
+   * Hosted configs key items numerically (`"0"`, `"1"`), so printing the raw key
+   * would show "Cost: 50 0" instead of "Cost: 50 Raven Coins". An offline sample
+   * keys its items by name, in which case the token already reads correctly.
+   */
+  const labelFor = (token: string) =>
+    economyMeta?.items?.[token]?.name ?? token;
+
   const displayFor = (id: string, action: EconomyAction) => {
     const mintedToken = Object.keys(action.mint ?? {})[0];
     const meta = mintedToken ? economyMeta?.items?.[mintedToken] : undefined;
@@ -71,26 +85,39 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
           {shopItems.map(([id, action]) => {
             const burn = Object.entries(action.burn ?? {});
             const mint = Object.entries(action.mint ?? {});
-            const hasRangedCost = burn.some(([, value]) => toAmount(value) == null);
+            const hasRangedCost = burn.some(
+              ([, value]) => toAmount(value) == null,
+            );
             const { name, description, image } = displayFor(id, action);
 
             return (
-              <div key={id} className="rounded border border-white/15 bg-black/30 p-3">
+              <div
+                key={id}
+                className="rounded border border-white/15 bg-black/30 p-3"
+              >
                 <div className="flex items-center gap-2">
                   {image ? (
-                    <img src={image} alt="" className="h-6 w-6 object-contain" />
+                    <img
+                      src={image}
+                      alt=""
+                      className="h-6 w-6 object-contain"
+                    />
                   ) : null}
                   <div className="text-xs font-semibold">{name}</div>
                 </div>
                 {description ? (
-                  <div className="mt-1 text-[11px] text-[#dfc7f1]">{description}</div>
+                  <div className="mt-1 text-[11px] text-[#dfc7f1]">
+                    {description}
+                  </div>
                 ) : null}
                 {burn.length > 0 ? (
                   <div className="mt-2 text-[11px] text-[#f7d2dd]">
                     Cost:{" "}
                     {burn
                       .map(([token, value]) =>
-                        toAmount(value) == null ? `${token} (variable)` : `${toAmount(value)} ${token}`,
+                        toAmount(value) == null
+                          ? `${labelFor(token)} (variable)`
+                          : `${toAmount(value)} ${labelFor(token)}`,
                       )
                       .join(" + ")}
                   </div>
@@ -100,7 +127,9 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
                     Reward:{" "}
                     {mint
                       .map(([token, value]) =>
-                        toAmount(value) == null ? token : `${toAmount(value)} ${token}`,
+                        toAmount(value) == null
+                          ? labelFor(token)
+                          : `${toAmount(value)} ${labelFor(token)}`,
                       )
                       .join(", ")}
                   </div>
@@ -125,8 +154,12 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
         </div>
       )}
 
-      {localError ? <div className="mt-3 text-xs text-red-300">{localError}</div> : null}
-      {apiError ? <div className="mt-2 text-xs text-red-300">{apiError}</div> : null}
+      {localError ? (
+        <div className="mt-3 text-xs text-red-300">{localError}</div>
+      ) : null}
+      {apiError ? (
+        <div className="mt-2 text-xs text-red-300">{apiError}</div>
+      ) : null}
     </div>
   );
 };

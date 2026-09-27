@@ -15,14 +15,12 @@ import { OuterPanel, InnerPanel } from "components/ui/Panel";
 import { Label } from "components/ui/Label";
 import { SquareIcon } from "components/ui/SquareIcon";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useRewardRun } from "../adapters/rewardRun";
+import { ConfirmPanel } from "../adapters/ConfirmPanel";
 import { useVipAccess } from "../adapters/useVipAccess";
 import {
   getPokerDifficulty,
@@ -30,8 +28,6 @@ import {
   POKER_RAVEN_COIN_REWARD,
   POKER_STARTING_CHIPS,
   PokerMode,
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
   isRewardRunAvailable,
 } from "./session";
 
@@ -267,16 +263,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
   const [rewardGranted, setRewardGranted] = useState(false);
   const [sessionMode, setSessionMode] = useState<PokerMode | null>(null);
   const [showRules, setShowRules] = useState(false);
-  const hasRewardRun = useMemo(
-    () => isRewardRunAvailable({ game: portalGameState, isVip }),
-    [portalGameState, isVip],
-  );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () => getRemainingPaidAttemptsForMinigame(portalGameState, "poker"),
-    [portalGameState],
-  );
+  const [confirmExit, setConfirmExit] = useState(false);
   const pokerDifficulty = useMemo(() => getPokerDifficulty(), []);
   const targetChips = pokerDifficulty.targetChips;
 
@@ -300,18 +287,15 @@ export const PokerGame: React.FC<PokerGameProps> = ({
     gameState.status === "gameover" && !sessionComplete;
 
   const handleSessionExit = () => {
+    // Finished: leave the arcade outright. A half-finished run asks first —
+    // in-game, because `window.confirm` is auto-dismissed in this iframe.
     if (sessionComplete) {
       setShowRules(false);
-      setSessionMode(null);
+      onClose?.();
       return;
     }
 
-    const confirmed = window.confirm(
-      "Exit Poker? Current game progress will be lost.",
-    );
-    if (!confirmed) return;
-
-    onClose?.();
+    setConfirmExit(true);
   };
 
   const startHand = (startingChips: number) => {
@@ -324,6 +308,21 @@ export const PokerGame: React.FC<PokerGameProps> = ({
     setSessionMode(mode);
     startHand(realChips);
   };
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between. `isRewardRunAvailable` is kept as the availability
+  // check so the button and the store can never disagree.
+  const hasRewardRun = useMemo(
+    () => isRewardRunAvailable({ game: portalGameState, isVip }),
+    [portalGameState, isVip],
+  );
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "poker",
+    isVip,
+    portalService,
+    startRewardRun: () => startGame("reward"),
+  });
 
   const startPracticeSession = () => {
     setRewardRunStarted(false);
@@ -602,7 +601,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
           </InnerPanel>
 
           <button
-            onClick={() => startGame("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -612,13 +611,13 @@ export const PokerGame: React.FC<PokerGameProps> = ({
           >
             <div>🎯 START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for poker today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today's poker reward run has already been used."
-                  : "Today's arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for poker today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -632,20 +631,12 @@ export const PokerGame: React.FC<PokerGameProps> = ({
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (
@@ -1065,6 +1056,20 @@ export const PokerGame: React.FC<PokerGameProps> = ({
                 >
                   {sessionComplete ? "EXIT POKER" : "BACK TO ARCADE"}
                 </button>
+              )}
+
+              {confirmExit && (
+                <ConfirmPanel
+                  title="EXIT POKER?"
+                  body="Your current hand and chips in this session will be lost. This cannot be undone."
+                  confirmLabel="CONFIRM — EXIT"
+                  onCancel={() => setConfirmExit(false)}
+                  onConfirm={() => {
+                    setConfirmExit(false);
+                    setShowRules(false);
+                    onClose?.();
+                  }}
+                />
               )}
             </div>
           )}

@@ -11,21 +11,14 @@ import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { NPCIcon } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
 import { SUNNYSIDE } from "example-assets/sunnyside";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useRewardRun } from "../adapters/rewardRun";
 import {
   FROGGER_DIFFICULTIES,
   FROGGER_RAVEN_COIN_REWARD,
@@ -42,7 +35,21 @@ import {
 // the home row (row 0) to earn a phase bonus, then resets for more phases.
 const COLS = 14;
 const CELL = 54; // px per tile â€” bigger for better visibility
-const PLAYER_SIZE = 42; // rendered player square (slightly smaller than CELL)
+const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
+
+/**
+ * How big the bumpkin is *drawn*.
+ *
+ * `PLAYER_SIZE` is the collision box, not the sprite: the animation sheet is
+ * 96x64, so a square box only ever shows a 96x64 letterboxed bumpkin — 2/3 of
+ * the box's height — which made the player read as much smaller than the
+ * character you walk around as on the arcade floor.
+ *
+ * Decoupling the two lets the sprite be drawn larger (and still bottom-aligned
+ * to its collision box, so it stands on the same lane) without touching the
+ * lanes, logs or hitboxes. One number to tune.
+ */
+const PLAYER_RENDER_SIZE = 63;
 const VIEWPORT_ROWS = 11; // rows visible at once
 const WORLD_ROWS = 30; // total world rows (row 0 = home, row 29 = start)
 
@@ -409,13 +416,6 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     () => isFroggerRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () =>
-      getRemainingPaidAttemptsForMinigame(portalGameState, "frogger" as any),
-    [portalGameState],
-  );
 
   const todaysDifficulty = useMemo(() => getFroggerDifficulty(), []);
 
@@ -474,6 +474,16 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     },
     [hasRewardRun, practiceDifficultyName, portalService, todaysDifficulty],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "frogger",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   // â”€â”€ Tick â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const tick = useCallback(
@@ -915,7 +925,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -925,13 +935,13 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Frogger today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today's Frogger reward run has already been used."
-                  : "Today's arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Frogger today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -945,20 +955,12 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (
@@ -1260,15 +1262,21 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
               <div
                 className="absolute"
                 style={{
-                  left: runtime.playerCX - PLAYER_SIZE / 2,
-                  top: runtime.playerCY - camY - PLAYER_SIZE / 2,
-                  width: PLAYER_SIZE,
-                  height: PLAYER_SIZE,
+                  // Drawn larger than the collision box, but centred on it and
+                  // bottom-aligned so the bumpkin stands on the same lane.
+                  left: runtime.playerCX - PLAYER_RENDER_SIZE / 2,
+                  top:
+                    runtime.playerCY -
+                    camY +
+                    PLAYER_SIZE / 2 -
+                    PLAYER_RENDER_SIZE,
+                  width: PLAYER_RENDER_SIZE,
+                  height: PLAYER_RENDER_SIZE,
                   zIndex: 20,
                   filter: "drop-shadow(0 3px 6px rgba(0,0,0,0.7))",
                 }}
               >
-                <NPCIcon parts={playerParts} width={PLAYER_SIZE} />
+                <NPCIcon parts={playerParts} width={PLAYER_RENDER_SIZE} />
               </div>
             )}
 

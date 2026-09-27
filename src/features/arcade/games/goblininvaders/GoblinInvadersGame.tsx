@@ -15,20 +15,13 @@ import { ITEM_DETAILS } from "../adapters/itemDetails";
 import spaceInvaderMap from "../../assets/space-invader-map.json";
 import arcadeTilesheet from "../../assets/nightshade-arcade-tilesheet.png";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
-import {
-  purchase,
-  startAttempt,
-  submitScore,
-} from "../adapters/portalUtil";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { NPCIcon } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
-import {
-  EXTRA_REWARD_ATTEMPT_FLOWER_COST,
-  getRemainingPaidAttemptsForMinigame,
-} from "../poker/session";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useRewardRun } from "../adapters/rewardRun";
 import {
   getGoblinInvadersDifficulty,
   isGoblinInvadersRewardRunAvailable,
@@ -45,7 +38,21 @@ const ARENA_WIDTH = 760;
 const ARENA_HEIGHT = 560;
 const PLAYER_Y = ARENA_HEIGHT - 48;
 const PLAYER_SPEED = 420;
-const PLAYER_SIZE = 42;
+const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
+
+/**
+ * How big the bumpkin is *drawn*.
+ *
+ * `PLAYER_SIZE` is the collision box, not the sprite: the animation sheet is
+ * 96x64, so a square box only ever shows a 96x64 letterboxed bumpkin — 2/3 of
+ * the box's height — which made the player read as much smaller than the
+ * character you walk around as on the arcade floor.
+ *
+ * Decoupling the two lets the sprite be drawn larger (and still bottom-aligned
+ * to its collision box, so it sits on the same line) without touching the
+ * invaders, shots or hitboxes. One number to tune.
+ */
+const PLAYER_RENDER_SIZE = 63;
 const PLAYER_SHOT_SPEED = 620;
 const ENEMY_SHOT_SPEED = 260;
 const ENEMY_ROWS = 5;
@@ -353,13 +360,6 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     () => isGoblinInvadersRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
-  const hasEnoughFlower =
-    Number(portalGameState.balance ?? 0) >= EXTRA_REWARD_ATTEMPT_FLOWER_COST;
-  const paidAttemptsRemaining = useMemo(
-    () =>
-      getRemainingPaidAttemptsForMinigame(portalGameState, "goblin-invaders"),
-    [portalGameState],
-  );
 
   const todaysDifficulty = useMemo(() => getGoblinInvadersDifficulty(), []);
 
@@ -431,6 +431,16 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     },
     [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
   );
+
+  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
+  // sure?" box in between.
+  const rewardRun = useRewardRun({
+    game: portalGameState,
+    minigame: "goblin-invaders",
+    isVip,
+    portalService,
+    startRewardRun: () => startSession("reward"),
+  });
 
   const handleShoot = useCallback(() => {
     setRuntime((previous) => {
@@ -1014,7 +1024,7 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
           </InnerPanel>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun
@@ -1024,13 +1034,13 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
           >
             <div>START REWARD RUN</div>
             <div className="mt-2 text-xs opacity-90">
-              {hasRewardRun
-                ? isVip
-                  ? "VIP: reward run available for Goblin Invaders today."
-                  : "Reward run available for the arcade today."
-                : isVip
-                  ? "VIP: today&apos;s Goblin Invaders reward run has already been used."
-                  : "Today&apos;s arcade reward run has already been used."}
+              {!hasRewardRun
+                ? "No reward runs left today — buy Play Tickets in the shop."
+                : rewardRun.freeAvailable
+                  ? isVip
+                    ? "VIP: reward run available for Goblin Invaders today."
+                    : "Reward run available for the arcade today."
+                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -1044,20 +1054,12 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </button>
 
-          {!hasRewardRun && paidAttemptsRemaining > 0 && (
-            <button
-              onClick={() =>
-                purchase({ sfl: EXTRA_REWARD_ATTEMPT_FLOWER_COST, items: {} })
-              }
-              disabled={!hasEnoughFlower}
-              className={`w-full px-6 py-3 rounded-lg font-bold transition-all shadow-lg text-sm ${
-                hasEnoughFlower
-                  ? "bg-amber-500 text-white hover:bg-amber-600 active:scale-95"
-                  : "bg-gray-300 text-gray-500 cursor-not-allowed"
-              }`}
-            >
-              BUY +1 REWARD ATTEMPT ({EXTRA_REWARD_ATTEMPT_FLOWER_COST} FLOWER)
-            </button>
+          {rewardRun.dialog}
+
+          {rewardRun.error && (
+            <p className="text-center text-xs font-semibold text-red-600">
+              {rewardRun.error}
+            </p>
           )}
 
           {onClose && (
@@ -1247,14 +1249,16 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             <div
               className="absolute"
               style={{
-                width: `${PLAYER_SIZE}px`,
-                height: `${PLAYER_SIZE}px`,
-                left: `${runtime.playerX}px`,
-                top: `${PLAYER_Y}px`,
+                // Drawn larger than the collision box, but centred on it and
+                // bottom-aligned so the bumpkin sits on the same line.
+                width: `${PLAYER_RENDER_SIZE}px`,
+                height: `${PLAYER_RENDER_SIZE}px`,
+                left: `${runtime.playerX + PLAYER_SIZE / 2 - PLAYER_RENDER_SIZE / 2}px`,
+                top: `${PLAYER_Y + PLAYER_SIZE - PLAYER_RENDER_SIZE}px`,
               }}
             >
               {isPlayerVisible && (
-                <NPCIcon parts={playerParts} width={PLAYER_SIZE} />
+                <NPCIcon parts={playerParts} width={PLAYER_RENDER_SIZE} />
               )}
             </div>
 

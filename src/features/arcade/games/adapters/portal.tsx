@@ -6,6 +6,7 @@ import React, {
   useRef,
 } from "react";
 import type { GameState, Minigame, MinigameName } from "./gameTypes";
+import { isFreeRewardRunAvailableForMinigame } from "../poker/session";
 
 /**
  * Replacement for the original arcade's xstate portal machine
@@ -30,10 +31,38 @@ export type PortalMachineState = {
 
 export type PortalEvent =
   | { type: "arcadeMinigame.started"; name: MinigameName }
+  | { type: "arcadeMinigame.rewardRunConfirmed"; name: MinigameName }
   | { type: "arcadeMinigame.ravenCoinWon"; amount: number };
 
+/** How a reward run is paid for.
+ *
+ *  - `"free"` — today's free allowance. For a non-VIP that is one arcade-wide;
+ *    for VIP it is one per machine, which is why the payout also needs the
+ *    cabinet's registry id.
+ *  - `"ticket"` — the player burned a Play Ticket to start it, so the payout
+ *    has to go through the uncapped `Mint-Raven-Coin-Ticket` action.
+ */
+export type RewardRunFunding = "free" | "ticket";
+
+/** What a payout needs to know about the run that produced it. */
+export type RewardWinMeta = {
+  fundedBy?: RewardRunFunding;
+  /** Registry id of the cabinet, so a VIP free run mints its own action. */
+  machine?: string;
+  /**
+   * Whether the store considered this player VIP, captured at the moment of the
+   * win. Which published action pays out depends on it (a VIP's free run is per
+   * machine), and taking it from here keeps that decision in the one place that
+   * already knows both the run and the player's status.
+   */
+  isVip?: boolean;
+};
+
+export type PortalSendResult =
+  { ok: true; funding?: RewardRunFunding } | { ok: false; error: string };
+
 export type PortalService = {
-  send: (event: PortalEvent) => void;
+  send: (event: PortalEvent) => PortalSendResult;
   subscribe: (listener: () => void) => () => void;
   getSnapshot: () => PortalMachineState;
 };
@@ -57,7 +86,7 @@ const EMPTY_SNAPSHOT: PortalMachineState = { context: { state: EMPTY_STATE } };
 
 /** Safe default so the context is never `undefined` outside the provider. */
 const noopService: PortalService = {
-  send: () => {},
+  send: () => ({ ok: false, error: "Portal service is not mounted." }),
   subscribe: () => () => {},
   getSnapshot: () => EMPTY_SNAPSHOT,
 };
@@ -75,7 +104,28 @@ class ArcadePortalStore implements PortalService {
   private snapshot: PortalMachineState;
 
   /** Latest `onWin` — swapped in by the provider whenever it changes. */
-  private onWin: (amount: number) => void = () => {};
+  private onWin: (amount: number, meta?: RewardWinMeta) => void = () => {};
+
+  /** Burns one Play Ticket. Swapped in by the provider (see `withArcadeProps`). */
+  private onSpendTicket: () => PortalSendResult = () => ({
+    ok: false,
+    error: "Play Tickets are not available in this session.",
+  });
+
+  /** Mirrors the provider's `isVip` so the funding decision lives in one place. */
+  private isVip = false;
+
+  /** How the run currently in progress is paid for; read when it pays out. */
+  private runFunding: RewardRunFunding = "free";
+
+  /**
+   * Registry id of the cabinet the run in progress belongs to.
+   *
+   * A VIP's free run is capped *per machine*, so the payout has to know which
+   * one — remembered here because the game's own win event only carries an
+   * amount.
+   */
+  private runMachine: string | undefined;
 
   constructor(base: GameState) {
     this.base = base;
@@ -100,13 +150,23 @@ class ArcadePortalStore implements PortalService {
     this.listeners.forEach((listener) => listener());
   }
 
-  setOnWin(onWin: (amount: number) => void) {
+  setOnWin(onWin: (amount: number, meta?: RewardWinMeta) => void) {
     this.onWin = onWin;
+  }
+
+  setOnSpendTicket(onSpendTicket: () => PortalSendResult) {
+    this.onSpendTicket = onSpendTicket;
+  }
+
+  setIsVip(isVip: boolean) {
+    if (isVip === this.isVip) return;
+    this.isVip = isVip;
   }
 
   setBase(base: GameState) {
     const changed =
       base.balance !== this.base.balance ||
+      base.playTickets !== this.base.playTickets ||
       base.bumpkin !== this.base.bumpkin ||
       base.minigames !== this.base.minigames;
     if (!changed) return;
@@ -114,10 +174,22 @@ class ArcadePortalStore implements PortalService {
     this.commit();
   }
 
-  send = (event: PortalEvent) => {
+  /** Today's free allowance is still open on this machine. */
+  private freeRunAvailable(name: MinigameName): boolean {
+    return isFreeRewardRunAvailableForMinigame({
+      game: this.compose(),
+      minigame: name,
+      isVip: this.isVip,
+    });
+  }
+
+  send = (event: PortalEvent): PortalSendResult => {
     switch (event.type) {
       case "arcadeMinigame.started": {
         const name = event.name;
+        // Fallback for a run that never sent `rewardRunConfirmed`, so a win can
+        // still be attributed to the right cabinet.
+        this.runMachine = name;
         const previous = this.localGames[name] ?? {
           history: {},
           purchases: [],
@@ -136,12 +208,40 @@ class ArcadePortalStore implements PortalService {
           },
         };
         this.commit();
-        return;
+        return { ok: true, funding: this.runFunding };
+      }
+      case "arcadeMinigame.rewardRunConfirmed": {
+        // Sent from the "are you sure?" box, i.e. *before* the run begins, so
+        // a player can never open a reward run they have not paid for.
+        this.runMachine = event.name;
+
+        if (this.freeRunAvailable(event.name)) {
+          this.runFunding = "free";
+          return { ok: true, funding: "free" };
+        }
+
+        if ((this.compose().playTickets ?? 0) <= 0) {
+          return {
+            ok: false,
+            error: "No free reward runs left today and no Play Tickets.",
+          };
+        }
+
+        const spent = this.onSpendTicket();
+        if (!spent.ok) return spent;
+
+        this.runFunding = "ticket";
+        return { ok: true, funding: "ticket" };
       }
       case "arcadeMinigame.ravenCoinWon": {
         // The arcade HUD credits RavenCoins from `onWin`.
-        this.onWin(event.amount ?? 0);
-        return;
+        const fundedBy = this.runFunding;
+        const machine = this.runMachine;
+        const isVip = this.isVip;
+        this.runFunding = "free";
+        this.runMachine = undefined;
+        this.onWin(event.amount ?? 0, { fundedBy, machine, isVip });
+        return { ok: true, funding: fundedBy };
       }
     }
   };
@@ -161,12 +261,14 @@ class ArcadePortalStore implements PortalService {
  * is how every `GAME_REGISTRY` component gets its arcade wiring.
  */
 export const ArcadePortalProvider: React.FC<{
-  /** Session-derived GameState (FLOWER balance, bumpkin, …). */
+  /** Session-derived GameState (FLOWER balance, Play Tickets, bumpkin, …). */
   baseState: GameState;
   isVip: boolean;
-  onWin: (amount: number) => void;
+  onWin: (amount: number, meta?: RewardWinMeta) => void;
+  /** Burns one Play Ticket (published as `Mint-Play-Ticket`). */
+  onSpendTicket: () => PortalSendResult;
   children: React.ReactNode;
-}> = ({ baseState, isVip, onWin, children }) => {
+}> = ({ baseState, isVip, onWin, onSpendTicket, children }) => {
   const storeRef = useRef<ArcadePortalStore | null>(null);
   if (storeRef.current === null) {
     storeRef.current = new ArcadePortalStore(baseState);
@@ -176,6 +278,14 @@ export const ArcadePortalProvider: React.FC<{
   useEffect(() => {
     store.setOnWin(onWin);
   }, [store, onWin]);
+
+  useEffect(() => {
+    store.setOnSpendTicket(onSpendTicket);
+  }, [store, onSpendTicket]);
+
+  useEffect(() => {
+    store.setIsVip(isVip);
+  }, [store, isVip]);
 
   useEffect(() => {
     store.setBase(baseState);

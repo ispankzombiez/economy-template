@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import type { RewardWinMeta } from "./games/adapters/portal";
 
 /** x/y coordinate pair used by spawn helpers */
 export type Coordinates = { x: number; y: number };
@@ -6,7 +7,14 @@ export type Coordinates = { x: number; y: number };
 /** Props passed to every local arcade game component */
 export interface ArcadeGameProps {
   onBack: () => void;
-  onWin: (tokens: number) => void;
+  /**
+   * A cabinet paid out.
+   *
+   * `meta.fundedBy` says which published mint to dispatch (the day's free
+   * allowance or the uncapped ticket-funded one) and `meta.machine` which
+   * cabinet produced it, so a VIP free run can mint that cabinet's own action.
+   */
+  onWin: (tokens: number, meta?: RewardWinMeta) => void;
   tokenReward: number;
 }
 
