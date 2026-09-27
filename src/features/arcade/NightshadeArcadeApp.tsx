@@ -8,12 +8,17 @@ import { useMinigameSession, resolveVipAccess } from "lib/portal";
 import { submitScore } from "lib/portal/api";
 import { getMinigamesApiUrl } from "lib/portal/url";
 import {
+  PLAY_TICKET_DAILY_CLAIM_ACTION,
   resolveActionAmounts,
+  resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
 } from "./lib/ravenCoin";
+import { resolveDevAccess } from "./lib/devAccess";
 import type { RewardWinMeta } from "./games/adapters/portal";
 import { NightshadeArcadeHud } from "./components/NightshadeArcadeHud";
+import { NightshadeArcadeNotice } from "./components/NightshadeArcadeNotice";
+import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
 
 export const NightshadeArcadeApp: React.FC = () => {
@@ -34,6 +39,14 @@ export const NightshadeArcadeApp: React.FC = () => {
   const [tokenBalance, setTokenBalance] = useState(0);
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
   const [showShopModal, setShowShopModal] = useState(false);
+  const [notice, setNotice] = useState<ArcadeNotice | null>(null);
+  // The name is server-derived (the session projects the SFL farm), so this is
+  // not something the player typed - but the gate is still only a UI gate. See
+  // `lib/devAccess.ts` for why the action's own `dailyCap` is the real control.
+  const isDev = useMemo(
+    () => resolveDevAccess(playerData?.resolvedProfile?.username),
+    [playerData?.resolvedProfile?.username],
+  );
   const activeEntry = useMemo(
     () => (activeGameId ? getGameEntry(activeGameId) : undefined),
     [activeGameId],
@@ -146,6 +159,66 @@ export const NightshadeArcadeApp: React.FC = () => {
     };
   }, []);
 
+  /**
+   * The entryway chests: **one** Play Ticket per player per day.
+   *
+   * Both chests dispatch the same published action, whose `dailyCap: 1` is what
+   * makes the pair a single daily allowance rather than two — the second chest
+   * of the day is refused by the server, and the player is told so instead of
+   * getting a silent nothing. Nothing here decides whether the player *may* have
+   * the ticket; the rule engine does, which is why the popup reports the
+   * server's verdict rather than a guess.
+   *
+   * FLOWER purchases stay published on the host page as a top-up for a player who
+   * has already claimed today, so the refusal points at them.
+   */
+  useEffect(() => {
+    const claimDailyPlayTicket = () => {
+      if (!actions?.[PLAY_TICKET_DAILY_CLAIM_ACTION]) {
+        setNotice({
+          title: "Nothing inside",
+          body: "Today's Play Ticket isn't available right now. Please try again later.",
+          tone: "bad",
+        });
+        return;
+      }
+
+      const ticketKey = resolvePlayTicketTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
+      });
+      const result = dispatchAction({
+        action: PLAY_TICKET_DAILY_CLAIM_ACTION,
+        amounts: resolveActionAmounts({
+          actions,
+          actionId: PLAY_TICKET_DAILY_CLAIM_ACTION,
+          tokenKey: ticketKey,
+          amount: 1,
+        }),
+      });
+
+      setNotice(
+        result.ok
+          ? {
+              title: "You found a Play Ticket!",
+              body: "It's been added to your inventory. Spend it on any machine for one reward run.",
+              tone: "good",
+            }
+          : {
+              title: "Chest already emptied",
+              body: "You've claimed today's Play Ticket. Come back tomorrow, or top up with FLOWER from the Sunflower Land menu.",
+              tone: "bad",
+            },
+      );
+    };
+
+    nightshadeArcadeEvents.registerChestClickHandler(claimDailyPlayTicket);
+    return () => {
+      nightshadeArcadeEvents.registerChestClickHandler(null);
+    };
+  }, [actions, dispatchAction, economyMeta, playerEconomy]);
+
   useEffect(() => {
     const isGameOpen = Boolean(activeEntry && ActiveGameComponent);
     nightshadeArcadeEvents.setMinigameActive(isGameOpen);
@@ -173,8 +246,12 @@ export const NightshadeArcadeApp: React.FC = () => {
         </Modal>
       ) : null}
       <Modal show={showShopModal} onHide={() => setShowShopModal(false)}>
-        <NightshadeArcadeShop onClose={() => setShowShopModal(false)} />
+        <NightshadeArcadeShop
+          isDev={isDev}
+          onClose={() => setShowShopModal(false)}
+        />
       </Modal>
+      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)} />
     </>
   );
 };

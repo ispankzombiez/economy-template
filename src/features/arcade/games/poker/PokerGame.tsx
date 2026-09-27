@@ -298,6 +298,30 @@ export const PokerGame: React.FC<PokerGameProps> = ({
     setConfirmExit(true);
   };
 
+  /**
+   * The "are you sure?" box, built once and rendered by **every** screen.
+   *
+   * This has to be shared across branches: `handleSessionExit` is reachable from
+   * the betting screen's ✕ as well as the in-hand and results screens, but each
+   * screen is its own early `return`. When the confirm only existed in the main
+   * branch, pressing ✕ on the betting screen set the flag and rendered nothing —
+   * a dead button that left the player stuck in the cabinet with a paid run
+   * still open (and its Play Ticket already spent).
+   */
+  const sessionExitConfirm = confirmExit ? (
+    <ConfirmPanel
+      title="EXIT POKER?"
+      body="Your current hand and chips in this session will be lost. This cannot be undone."
+      confirmLabel="CONFIRM — EXIT"
+      onCancel={() => setConfirmExit(false)}
+      onConfirm={() => {
+        setConfirmExit(false);
+        setShowRules(false);
+        onClose?.();
+      }}
+    />
+  ) : null;
+
   const startHand = (startingChips: number) => {
     const newDeck = new PokerDeck();
     setDeck(newDeck);
@@ -647,6 +671,8 @@ export const PokerGame: React.FC<PokerGameProps> = ({
               EXIT
             </button>
           )}
+
+          {sessionExitConfirm}
         </div>
       </OuterPanel>
     );
@@ -737,6 +763,8 @@ export const PokerGame: React.FC<PokerGameProps> = ({
               </button>
             )}
           </div>
+
+          {sessionExitConfirm}
         </div>
       </OuterPanel>
     );
@@ -1058,19 +1086,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
                 </button>
               )}
 
-              {confirmExit && (
-                <ConfirmPanel
-                  title="EXIT POKER?"
-                  body="Your current hand and chips in this session will be lost. This cannot be undone."
-                  confirmLabel="CONFIRM — EXIT"
-                  onCancel={() => setConfirmExit(false)}
-                  onConfirm={() => {
-                    setConfirmExit(false);
-                    setShowRules(false);
-                    onClose?.();
-                  }}
-                />
-              )}
+              {sessionExitConfirm}
             </div>
           )}
         </div>

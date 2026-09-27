@@ -88,6 +88,38 @@ export const REWARD_ATTEMPT_CLAIM_ACTION = "Claim-Raven-Coin";
 /** Name pattern of the voucher item a paid run is opened with. */
 export const REWARD_ATTEMPT_ITEM_NAME = /^reward[\s_-]*attempts?$/i;
 
+/**
+ * Burns a voucher without paying out - a run that was lost, abandoned or
+ * interrupted.
+ *
+ * A voucher is only meant to exist while the player is actually mid-run, so it
+ * is voided when the cabinet closes, and any straggler is swept on the next
+ * boot. Nothing is minted, so this can only ever destroy the player's own claim
+ * - there is no way to turn a void into currency.
+ *
+ * The burn is **ranged** so a whole leftover stack goes in one request (a
+ * `custom` action keeps its range through publishing, unlike a shop rule).
+ */
+export const REWARD_ATTEMPT_VOID_ACTION = "Void-Reward-Attempt";
+
+/** How many vouchers the player is holding right now. */
+export function countRewardAttempts({
+  playerEconomy,
+  tokenKey,
+}: {
+  playerEconomy?: Pick<
+    MinigameSessionResponse["playerEconomy"],
+    "balances"
+  > | null;
+  tokenKey: string | undefined;
+}): number {
+  if (!tokenKey) return 0;
+  const value = playerEconomy?.balances?.[tokenKey];
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : 0;
+}
+
 /** Prefix shared by every per-cabinet payout action. */
 export const RAVEN_COIN_MACHINE_MINT_PREFIX = "Mint-Raven-Coin-";
 
@@ -139,6 +171,72 @@ export function machineMintActionId(machine: string): string {
  * are what grant them).
  */
 export const PLAY_TICKET_SPEND_ACTION = "Mint-Play-Ticket";
+
+/**
+ * The daily Play Ticket the entryway chests award: one per player per day.
+ *
+ * Published as a ranged mint with `dailyCap: 1`, so the *server* refuses the
+ * second chest of the day. Both entryway chests dispatch this same action, which
+ * is what makes the pair a single daily allowance rather than two.
+ *
+ * This is the free source of Play Tickets. FLOWER purchases remain published on
+ * the host page purely as a top-up for a player who has already claimed today.
+ */
+export const PLAY_TICKET_DAILY_CLAIM_ACTION = "Claim-Play-Ticket";
+
+/**
+ * Developer-only Play Ticket mint, driven by the modal in the shop.
+ *
+ * ## Read this before raising the cap
+ *
+ * **Every published action is callable by every player** — the rule engine has
+ * no per-account action scope, so the username gate in `lib/devAccess.ts` only
+ * decides who *sees the button*. A cheater can call this directly and every
+ * ticket converts to a Raven Coin, so the **`dailyCap` below is the only real
+ * protection**. It is set to a small testing number deliberately.
+ *
+ * Lower it to the minimum that is useful, and **delete this action before
+ * launch**.
+ */
+export const DEV_PLAY_TICKET_MINT_ACTION = "Dev-Mint-Play-Ticket";
+
+/** The mint rule a published action declares for one token, if any. */
+function mintRule(
+  action: unknown,
+  tokenKey: string,
+): Record<string, unknown> | undefined {
+  if (!isRecord(action) || !isRecord(action.mint)) return undefined;
+  const rule = action.mint[tokenKey];
+  return isRecord(rule) ? rule : undefined;
+}
+
+/**
+ * The `dailyCap` a published action enforces for one token, if it has one.
+ *
+ * Used to clamp the dev mint input to what the server will actually grant, so
+ * the UI never asks for a number the rule engine is going to reject.
+ */
+export function resolveActionDailyCap({
+  actions,
+  actionId,
+  tokenKey,
+}: {
+  actions?: Record<string, unknown>;
+  actionId: string;
+  tokenKey: string;
+}): number | undefined {
+  const rule = mintRule(actions?.[actionId], tokenKey);
+  if (!isRecord(rule)) return undefined;
+
+  const cap = rule.dailyCap;
+  if (typeof cap === "number" && Number.isFinite(cap)) return Math.max(0, cap);
+
+  // A ranged rule without an explicit cap is still bounded by its range.
+  const max = rule.max;
+  if (typeof max === "number" && Number.isFinite(max)) return Math.max(0, max);
+
+  return undefined;
+}
 
 /** Fallback key used when no session metadata is available (offline sample). */
 const RAVEN_COIN_TOKEN_KEY = "RavenCoin";

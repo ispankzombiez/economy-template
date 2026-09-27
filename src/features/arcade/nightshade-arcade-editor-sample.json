@@ -211,6 +211,21 @@
       "burn": { "Play Ticket": { "amount": 1 } },
       "mint": { "Reward Attempt": { "amount": 1 } }
     },
+    "Claim-Play-Ticket": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "Play Ticket": { "min": 1, "max": 1, "dailyCap": 1 } }
+    },
+    "Dev-Mint-Play-Ticket": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": { "Play Ticket": { "min": 1, "max": 10, "dailyCap": 10 } }
+    },
+    "Void-Reward-Attempt": {
+      "type": "custom",
+      "showInShop": false,
+      "burn": { "Reward Attempt": { "min": 1, "max": 1000 } }
+    },
     "Claim-Raven-Coin": {
       "type": "custom",
       "showInShop": false,

@@ -4,7 +4,10 @@ import { useMinigameSession } from "lib/portal";
 import { Modal } from "components/ui/Modal";
 import { Panel } from "components/ui/Panel";
 import ravenCoinIcon from "../assets/RavenCoin.webp";
-import { resolveRavenCoinTokenKey } from "../lib/ravenCoin";
+import {
+  resolveRavenCoinTokenKey,
+  resolveRewardAttemptTokenKey,
+} from "../lib/ravenCoin";
 import flowerIcon from "../assets/flower_token.webp";
 import { PortalBasketButton } from "./PortalBasketButton";
 import { requestClosePortal } from "lib/portal/closePortal";
@@ -95,6 +98,19 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
     playerData.resolvedProfile.balance ?? farm.balance,
   );
   const [showInventory, setShowInventory] = useState(false);
+
+  /**
+   * The Reward Attempt voucher is an internal in-flight marker for a paid run,
+   * not something a player holds. It is voided the moment its cabinet closes (see
+   * `RewardAttemptCleanup`), so showing it here would only ever surface a stale
+   * row.
+   */
+  const rewardAttemptToken = resolveRewardAttemptTokenKey({
+    economyMeta,
+    items: playerEconomy?.items,
+    balances: playerEconomy?.balances,
+  });
+
   const visibleInventoryEntries = useMemo(() => {
     const merged = new Map<string, number>();
 
@@ -115,12 +131,14 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
       economyMeta?.items?.[token]?.name ?? token;
 
     return Array.from(merged.entries())
+      .filter(([token]) => token !== rewardAttemptToken)
       .map(([token, amount]) => ({ token, label: labelFor(token), amount }))
       .sort((a, b) => b.amount - a.amount);
   }, [
     playerData.resolvedProfile.inventory,
     playerEconomy.balances,
     economyMeta?.items,
+    rewardAttemptToken,
   ]);
 
   return (

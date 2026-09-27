@@ -231,6 +231,30 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     setConfirmExit(true);
   };
 
+  /**
+   * The "are you sure?" box, built once and rendered by **every** screen.
+   *
+   * This has to be shared across branches: `handleSessionExit` is reachable from
+   * the opening bet screen as well as the in-hand and results screens, but each
+   * screen is its own early `return`. When the confirm only existed in the main
+   * branch, opening it from the bet screen set the flag and rendered nothing —
+   * a dead EXIT button that left the player stuck in the cabinet with a paid
+   * run still open (and its Play Ticket already spent).
+   */
+  const sessionExitConfirm = confirmExit ? (
+    <ConfirmPanel
+      title="EXIT BLACKJACK?"
+      body="Your current hand and chips in this session will be lost. This cannot be undone."
+      confirmLabel="CONFIRM — EXIT"
+      onCancel={() => setConfirmExit(false)}
+      onConfirm={() => {
+        setConfirmExit(false);
+        setShowRules(false);
+        onClose?.();
+      }}
+    />
+  ) : null;
+
   // ─── Card suit images (same assets as poker) ────────────────────────────────
 
   const suitImages: Record<string, string> = {
@@ -707,6 +731,8 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
               EXIT
             </button>
           )}
+
+          {sessionExitConfirm}
         </div>
       </OuterPanel>
     );
@@ -801,6 +827,8 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
               EXIT
             </button>
           )}
+
+          {sessionExitConfirm}
         </div>
       </OuterPanel>
     );
@@ -1027,19 +1055,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
                 </button>
               )}
 
-              {confirmExit && (
-                <ConfirmPanel
-                  title="EXIT BLACKJACK?"
-                  body="Your current hand and chips in this session will be lost. This cannot be undone."
-                  confirmLabel="CONFIRM — EXIT"
-                  onCancel={() => setConfirmExit(false)}
-                  onConfirm={() => {
-                    setConfirmExit(false);
-                    setShowRules(false);
-                    onClose?.();
-                  }}
-                />
-              )}
+              {sessionExitConfirm}
             </div>
           )}
         </div>

@@ -6,6 +6,7 @@ import type { ArcadeGameProps } from "../../types";
 import type { GameState } from "./gameTypes";
 import { ArcadePortalProvider } from "./portal";
 import type { PortalSendResult } from "./portal";
+import { RewardAttemptCleanup } from "./RewardAttemptCleanup";
 import { getTodayKey } from "../poker/session";
 import {
   buildAttemptHistory,
@@ -185,6 +186,7 @@ export function withArcadeProps(
         onWin={onWin}
         onSpendTicket={onSpendTicket}
       >
+        <RewardAttemptCleanup />
         <Original onClose={onBack} />
       </ArcadePortalProvider>
     );

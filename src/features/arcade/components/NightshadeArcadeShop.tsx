@@ -2,6 +2,7 @@ import React, { useMemo, useState } from "react";
 import { Button } from "components/ui/Button";
 import { Label } from "components/ui/Label";
 import { useMinigameSession } from "lib/portal";
+import { NightshadeArcadeDevMint } from "./NightshadeArcadeDevMint";
 
 type EconomyAction = {
   type?: string;
@@ -15,6 +16,15 @@ type EconomyAction = {
 
 type NightshadeArcadeShopProps = {
   onClose: () => void;
+  /**
+   * Whether to offer the developer Play Ticket mint.
+   *
+   * Resolved by the app through `lib/devAccess` so this component stays a plain
+   * view. Note the gate is cosmetic — see `lib/devAccess.ts` and the warning on
+   * `NightshadeArcadeDevMint` — the action's own `dailyCap` is what the server
+   * enforces.
+   */
+  isDev?: boolean;
 };
 
 function toAmount(rule: unknown): number | null {
@@ -28,10 +38,12 @@ function toAmount(rule: unknown): number | null {
 
 export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
   onClose,
+  isDev = false,
 }) => {
   const { actions, dispatchAction, apiError, economyMeta } =
     useMinigameSession();
   const [localError, setLocalError] = useState<string | null>(null);
+  const [showDevMint, setShowDevMint] = useState(false);
 
   const shopItems = useMemo(
     () =>
@@ -154,11 +166,32 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
         </div>
       )}
 
+      {isDev ? (
+        <div className="mt-4 rounded border border-amber-400/40 bg-amber-400/10 p-3">
+          <div className="text-xs font-semibold text-amber-200">
+            Developer tools
+          </div>
+          <div className="mt-1 text-[11px] text-[#dfc7f1]">
+            Mint Play Tickets for testing. Capped per day by the server, and
+            remove this action from the economy before launch.
+          </div>
+          <div className="mt-2">
+            <Button onClick={() => setShowDevMint(true)}>
+              Mint Play Tickets
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {localError ? (
         <div className="mt-3 text-xs text-red-300">{localError}</div>
       ) : null}
       {apiError ? (
         <div className="mt-2 text-xs text-red-300">{apiError}</div>
+      ) : null}
+
+      {showDevMint ? (
+        <NightshadeArcadeDevMint onClose={() => setShowDevMint(false)} />
       ) : null}
     </div>
   );
