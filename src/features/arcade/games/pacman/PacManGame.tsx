@@ -160,7 +160,28 @@ const SCATTER_TARGETS: Vec2[] = [
   { x: 0, y: MAZE_ROWS - 1 }, // Clyde – bottom-left
 ];
 
-const GHOST_HOUSE_EXIT: Vec2 = { x: 13.5, y: 11 };
+/**
+ * The corridor tile above the ghost-house door, on the way out.
+ *
+ * **Must be a whole tile.** The step loop only re-decides a ghost's direction at
+ * a tile centre, gated on `|col - round(col)| < 0.15`, so a half-tile column can
+ * never satisfy it: a ghost sitting on one is frozen in whatever direction it
+ * last had, which is how the doorway used to fill with ghosts pacing back and
+ * forth. The door is row 12 cols 13/14 and the corridor above is row 11, so
+ * (13, 11) is a real tile and the shortest step out.
+ */
+const GHOST_HOUSE_EXIT: Vec2 = { x: 13, y: 11 };
+
+/**
+ * Where an eaten ghost is actually headed: a tile *inside* the house.
+ *
+ * This has to be inside, not the exit. `GHOST_HOUSE_EXIT` sits on row 11, above
+ * the house, while respawning requires reaching rows 12-15 - so an eaten ghost
+ * sent there converged on the doorway without ever stepping into the house to
+ * trigger the respawn. Aiming at a house cell sends it through the door and the
+ * respawn fires on the first tile centre it reaches.
+ */
+const GHOST_HOUSE_HOME: Vec2 = { x: 13, y: 13 };
 
 const isInGhostHouseArea = (col: number, row: number) => {
   return row >= 12 && row <= 15 && col >= 10 && col <= 17;
@@ -236,21 +257,41 @@ const isGhostHouse = (maze: number[][], col: number, row: number): boolean => {
   return maze[r][c] === 4;
 };
 
+/**
+ * Who is trying to move, which decides whether the ghost house is passable.
+ *
+ *  - `player` — never enters the house.
+ *  - `ghost` — a live ghost. May be *inside* the house while leaving it, but
+ *    must not walk back in from outside.
+ *  - `returning-ghost` — an eaten ghost on its way home, the only one allowed
+ *    back in.
+ */
+type MoverKind = "player" | "ghost" | "returning-ghost";
+
 const canMove = (
   maze: number[][],
   col: number,
   row: number,
   dir: Dir,
-  isGhost = false,
+  kind: MoverKind = "player",
 ): boolean => {
   const v = dirVec(dir);
   const nc = (((col + v.x) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
   const nr = row + v.y;
-  if (isGhost) {
-    // Ghosts in "eaten" mode can re-enter the house; others cannot
-    return !isWall(maze, nc, nr);
-  }
-  return !isWall(maze, nc, nr) && !isGhostHouse(maze, nc, nr);
+  if (isWall(maze, nc, nr)) return false;
+
+  if (kind === "returning-ghost") return true;
+  if (!isGhostHouse(maze, nc, nr)) return true;
+
+  // Reaching here means the next tile is inside the house.
+  //
+  // A live ghost is allowed in only while it is already inside, on its way out.
+  // Letting it re-enter from outside is what made released ghosts pace the
+  // doorway: out in the corridor its target became the player below, so "down"
+  // into the house looked like the shortest route; the moment it was back inside
+  // the target flipped to the house exit, so it walked out again and looped
+  // forever. Blocking the return removes the cycle at the source.
+  return kind === "ghost" && isInGhostHouseArea(col, row);
 };
 
 const dist = (a: Vec2, b: Vec2): number => Math.hypot(a.x - b.x, a.y - b.y);
@@ -286,15 +327,18 @@ const getFrightenedChoiceIndex = (ghost: Ghost, candidateCount: number) => {
 };
 
 const chooseGhostDir = (ghost: Ghost, maze: number[][], target: Vec2): Dir => {
+  // An eaten ghost is the only one that may re-enter the house on the way home.
+  const kind: MoverKind = ghost.mode === "eaten" ? "returning-ghost" : "ghost";
+
   let candidates = ALL_DIRS.filter(
     (d) =>
-      d !== OPPOSITE[ghost.dir] && canMove(maze, ghost.col, ghost.row, d, true),
+      d !== OPPOSITE[ghost.dir] && canMove(maze, ghost.col, ghost.row, d, kind),
   );
 
   // If reverse is the only valid path, allow it to prevent hallway oscillation/stalls.
   if (candidates.length === 0) {
     candidates = ALL_DIRS.filter((d) =>
-      canMove(maze, ghost.col, ghost.row, d, true),
+      canMove(maze, ghost.col, ghost.row, d, kind),
     );
   }
 
@@ -339,7 +383,8 @@ const ghostTarget = (
     return { x: playerCol, y: playerRow };
   }
   if (ghost.mode === "eaten") {
-    return GHOST_HOUSE_EXIT;
+    // Into the house, not to the doorway - see GHOST_HOUSE_HOME.
+    return GHOST_HOUSE_HOME;
   }
 
   // Chase targets (classic)
@@ -382,7 +427,10 @@ const ghostTarget = (
 const createGhosts = (): Ghost[] =>
   ([0, 1, 2, 3] as const).map((id) => ({
     id,
-    col: id === 0 ? GHOST_HOUSE_EXIT.x : id === 1 ? 13 : id === 2 ? 14 : 13.5,
+    // Blinky starts out on the corridor above the door; the rest start inside
+    // the house on distinct whole tiles, so every one of them can pass the
+    // step loop's tile-centre test. A half-tile start (13.5) never could.
+    col: id === 0 ? GHOST_HOUSE_EXIT.x : 12 + id,
     row: id === 0 ? GHOST_HOUSE_EXIT.y : 13,
     dir: "left" as Dir,
     released: id === 0,
@@ -724,15 +772,17 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
 
         if (!released && g.id !== 0) {
           if (ghostReleaseMs[g.id] <= 0) {
+            // Unlock the ghost where it stands; do not move it.
+            //
+            // This used to teleport the ghost to `GHOST_HOUSE_EXIT`, which is
+            // also the target a ghost inside the house is given - so it started
+            // life standing on its own goal. "Minimise distance to target" is
+            // then degenerate, because every direction is equally far and the
+            // turn falls to the static priority order, which points it sideways
+            // out of the doorway. Releasing in place keeps the exit genuinely
+            // ahead, so the ghost walks out under its own steam.
             released = true;
-            return {
-              ...g,
-              released,
-              col: GHOST_HOUSE_EXIT.x,
-              row: GHOST_HOUSE_EXIT.y,
-              dir: "left",
-              mode: globalMode,
-            };
+            return { ...g, released, mode: globalMode };
           }
 
           return {
