@@ -6,6 +6,7 @@ import { Player } from "../types/Room";
 import { NPCName, acknowledgedNPCs } from "lib/npcs";
 import { getAnimationUrl } from "../lib/animations";
 import { CONFIG } from "lib/config";
+import { ITEM_IDS } from "features/game/types/bumpkin";
 
 const SQUARE_WIDTH = 16;
 
@@ -14,9 +15,10 @@ type FactionName = string;
 type InventoryItemName = string;
 type ReactionName = string;
 
-// ITEM_IDS maps aura name -> numeric ID for asset URLs
-const ITEM_IDS: Record<string, number> = {};
-// ITEM_DETAILS maps item name -> { image } for reactions
+// ITEM_DETAILS maps item name -> { image } for reactions.
+// NOTE: no ITEM_DETAILS table exists in this repo yet, so `react()` below
+// silently no-ops for items whose texture isn't already loaded. Populate this
+// (or import a real table) when reaction art is needed.
 const ITEM_DETAILS: Record<string, { image: string }> = {};
 
 const NAME_ALIASES: Partial<Record<NPCName, string>> = {
@@ -452,11 +454,17 @@ export class BumpkinContainer extends Phaser.GameObjects.Container {
     if (this.frontfx && this.backfx) {
       this.removeAura();
     }
-    if (this.clothing.aura !== undefined) {
+    // Resolve the aura id up front. `aura` is "" when unequipped (see
+    // lib/mmo/defaultGuestBumpkin), and an unrecognised name would otherwise
+    // request `.../aura/back/undefined.png`, so only proceed with a real id.
+    const auraName = this.clothing.aura;
+    const auraID = auraName
+      ? ITEM_IDS[auraName as keyof typeof ITEM_IDS]
+      : undefined;
+
+    if (auraID !== undefined) {
       // eslint-disable-next-line @typescript-eslint/no-this-alias
       const container = this;
-      const auraName = this.clothing.aura;
-      const auraID = ITEM_IDS[auraName];
 
       this.frontAuraKey = `${auraID}-bumpkin-aura-front-sheet`;
       this.frontAuraAnimationKey = `${auraID}-bumpkin-aura-front`;
@@ -477,7 +485,7 @@ export class BumpkinContainer extends Phaser.GameObjects.Container {
       } else {
         const backauraLoader = container.scene.load.spritesheet(
           this.backAuraKey,
-          `${CONFIG.PROTECTED_IMAGE_URL}/aura/back/${ITEM_IDS[auraName]}.png`,
+          `${CONFIG.PROTECTED_IMAGE_URL}/aura/back/${auraID}.png`,
           {
             frameWidth: 20,
             frameHeight: 19,
@@ -517,7 +525,7 @@ export class BumpkinContainer extends Phaser.GameObjects.Container {
       } else {
         const frontauraLoader = container.scene.load.spritesheet(
           this.frontAuraKey,
-          `${CONFIG.PROTECTED_IMAGE_URL}/aura/front/${ITEM_IDS[auraName]}.png`,
+          `${CONFIG.PROTECTED_IMAGE_URL}/aura/front/${auraID}.png`,
           {
             frameWidth: 20,
             frameHeight: 19,

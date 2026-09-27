@@ -206,7 +206,14 @@ export const MinigamePortalProvider: React.FC<
       const mainApiUrl = getUrl();
       const minigamesApiUrl = getMinigamesApiUrl();
 
-      if ((mainApiUrl || minigamesApiUrl) && !jwt) {
+      // Without a token there is nothing to query. In a hosted build that means
+      // the player opened it directly instead of through the game, so show the
+      // session-expired modal. Under `vite dev` we fall through to the offline
+      // bootstrap below instead, so `npm run dev` boots with no `?jwt=` — append
+      // a token generated in the economy editor to exercise the live API.
+      const devOffline = !!import.meta.env.DEV && !jwt;
+
+      if ((mainApiUrl || minigamesApiUrl) && !jwt && !devOffline) {
         if (!cancelled) {
           setPhase("unauthorised");
         }
@@ -219,7 +226,14 @@ export const MinigamePortalProvider: React.FC<
       }
 
       try {
-        if (!mainApiUrl && !minigamesApiUrl) {
+        if (devOffline) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[MinigamePortal] No ?jwt= found — booting offline. To exercise the live API from the dev server, generate a token in the economy editor and open http://localhost:3000/?jwt=<token>",
+          );
+        }
+
+        if ((!mainApiUrl && !minigamesApiUrl) || devOffline) {
           const portalId = (CONFIG.PORTAL_APP ?? "").trim();
           const playerData = buildPortalPlayerData({
             jwt: "",
@@ -330,6 +344,22 @@ export const MinigamePortalProvider: React.FC<
         // eslint-disable-next-line no-console
         console.log("[BumpkinDiag] resolvedAvatar:", JSON.stringify(playerData.resolvedAvatar));
         if (import.meta.env?.DEV) {
+          // Dev-only: shows which username sources actually populated, so a
+          // single console read answers why the name tag falls back to an id.
+          // eslint-disable-next-line no-console
+          console.log("[UsernameDiag]", {
+            resolved: playerData.resolvedProfile.username,
+            profileSource: playerData.resolvedProfile.source,
+            claimKeys: playerData.tokenClaims
+              ? Object.keys(playerData.tokenClaims)
+              : [],
+            portalProfileKeys: portalProfile ? Object.keys(portalProfile) : [],
+            sessionFarmKeys: session
+              ? Object.keys((session.farm as object) ?? {})
+              : [],
+            mainApiUrl: mainApiUrl ?? "(none)",
+            minigamesApiUrl: minigamesApiUrl ?? "(none)",
+          });
           // eslint-disable-next-line no-console
           console.log("[MinigamePortal] resolved bumpkin pipeline", {
             resolvedAvatarSource: playerData.resolvedAvatar.source,

@@ -6,8 +6,8 @@
   "scripts": {
     "dev": "vite --port 3000 --host",
     "build": "npm run build:hosted",
-    "build:hosted": "rm -rf dist && tsc && vite build --mode hosted",
-    "build:pages": "rm -rf dist && tsc && vite build --mode pages",
+    "build:hosted": "tsc && vite build --mode hosted",
+    "build:pages": "tsc && vite build --mode pages",
     "preview": "vite preview"
   },
   "dependencies": {

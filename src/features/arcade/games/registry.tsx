@@ -1,9 +1,3 @@
-import { TileJumpApp } from "examples/tileJump/TileJumpApp";
-import { HideAndSeekApp } from "examples/hideAndSeek/HideAndSeekApp";
-import { ChickenRescueApp } from "examples/chickenRescue/ChickenRescue";
-import { GoldenCropsApp } from "examples/goldenCrops/GoldenCropsApp";
-import { PlazaPartyApp } from "examples/plazaParty/PlazaPartyApp";
-import { UiResourcesApp } from "examples/ui-resources/UiResourcesApp";
 import { BlackjackGame } from "./blackjack/BlackjackGame";
 import { GoFishGame } from "./gofish/GoFishGame";
 import { UnoGame } from "./uno/UnoGame";
@@ -14,47 +8,38 @@ import { TetrisGame } from "./tetris/TetrisGame";
 import { GoblinInvadersGame } from "./goblininvaders/GoblinInvadersGame";
 import { PacManGame } from "./pacman/PacManGame";
 import { FroggerGame } from "./frogger/FroggerGame";
-import type { ArcadeGameEntry, ArcadeGameProps } from "../types";
-import type { ComponentType } from "react";
+import type { ArcadeGameEntry } from "../types";
 
 /**
- * Demo example apps do not accept ArcadeGameProps (they have no onBack/onWin).
- * Wrap them so they conform to the registry interface; back is handled at the
- * hub level via the registry system.
- */
-function wrapDemo(App: ComponentType): ComponentType<ArcadeGameProps> {
-  const Wrapper: ComponentType<ArcadeGameProps> = () => <App />;
-  Wrapper.displayName = `DemoWrapper(${App.displayName ?? App.name})`;
-  return Wrapper;
-}
-
-/**
- * Central arcade game registry.
+ * Central arcade game registry — one entry per real Nightshade Arcade cabinet.
+ *
+ * ── Scope ───────────────────────────────────────────────────────────────────
+ * The original arcade (`ispankzombiez/Sunflower-Land` @ `portal`,
+ * `src/features/portal/nightshade-arcade/mini-games/`) shipped exactly **10**
+ * games, which map 1:1 onto Tiled cabinets `Machine 1`…`Machine 10` (see
+ * `../data/machineMap.ts`). Cabinets 11–16 were never wired, in the original
+ * either, and are intentionally left inert.
+ *
+ * Template example apps (tile-jump, hide-and-seek, chicken-rescue,
+ * golden-crops, plaza-party, ui-resources) were briefly registered here during
+ * the port. They are **not** Nightshade Arcade games and have been pruned.
  *
  * ── Implementation status key ───────────────────────────────────────────────
- * backingType "local"      → fully playable React-native game component (owns back button via onBack)
+ * backingType "local"      → fully playable React game component (owns back button via onBack)
  * backingType "scaffolded" → non-broken placeholder (owns back button via onBack)
- * backingType "demo"       → pre-existing example app wrapped with wrapDemo(); hub injects back button overlay
  * backingType "portal"     → reserved for future hosted-portal integration
  *
- * ── Checklist sync (from docs/arcade-migration-handoff.txt) ────────────────
- * [x] Poker              — local, available
- * [x] Blackjack          — local, available
- * [x] Go Fish            — local, available
- * [x] Uno                — local, available
- * [x] Solitaire          — local, available
- * [x] Goblin Invaders    — local, available  (target-native, source unverified)
- * [x] Tetris             — local, available  (target-native, source unverified)
- * [x] Barley Breaker     — local, available  (target-native, source unverified)
- * [ ] Pac-Man            — scaffolded        (source unverified; TODO implement)
- * [ ] Frogger            — scaffolded        (source unverified; TODO implement)
- * ── Demo entries (pre-existing, not part of the migration checklist) ─────────
- * [x] Tile Jump          — demo
- * [x] Hide & Seek        — demo
- * [x] Chicken Rescue     — demo
- * [x] Golden Crops       — demo
- * [x] Plaza Party        — demo
- * [x] UI Resources       — demo
+ * ── Originals to restore from source-portal ─────────────────────────────────
+ * [x] Poker              — local
+ * [x] Blackjack          — local
+ * [x] Go Fish            — local
+ * [x] Uno                — local
+ * [x] Solitaire          — local
+ * [x] Goblin Invaders    — local
+ * [x] Tetris             — local
+ * [x] Barley Breaker     — local
+ * [ ] Pac-Man            — stub (46 lines) vs 1,277-line original + session.ts
+ * [ ] Frogger            — stub (46 lines) vs 1,293-line original + session.ts
  */
 export const GAME_REGISTRY: ArcadeGameEntry[] = [
   // ── Migration checklist: completed ─────────────────────────────────────────
@@ -161,61 +146,6 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     portalId: "frogger",
     devNote:
       "Scaffolded. Source minigame id `frogger` is known; local source file in Sunflower-Land was not verified. Implement as target-native lane-crossing game (Path A) or confirm portal hosting (Path B).",
-  },
-  // ── Pre-existing demo examples (not migration checklist items) ─────────────
-  {
-    id: "tile-jump",
-    name: "Tile Jump (Playable Demo)",
-    description: "Playable minigame already wired in this repo.",
-    tokenReward: 50,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(TileJumpApp),
-  },
-  {
-    id: "hide-and-seek",
-    name: "Hide & Seek (Playable Demo)",
-    description: "Playable MMO-style minigame demo.",
-    tokenReward: 50,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(HideAndSeekApp),
-  },
-  {
-    id: "chicken-rescue",
-    name: "Chicken Rescue (Playable Demo)",
-    description: "Playable economy minigame from repository examples.",
-    tokenReward: 60,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(ChickenRescueApp),
-  },
-  {
-    id: "golden-crops",
-    name: "Golden Crops (Playable Demo)",
-    description: "Playable farming minigame from repository examples.",
-    tokenReward: 60,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(GoldenCropsApp),
-  },
-  {
-    id: "plaza-party",
-    name: "Plaza Party (Playable Demo)",
-    description: "Playable plaza exploration minigame from repository examples.",
-    tokenReward: 60,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(PlazaPartyApp),
-  },
-  {
-    id: "ui-resources",
-    name: "UI Resources (Playable Demo)",
-    description: "Playable economy dashboard demo from repository examples.",
-    tokenReward: 40,
-    status: "available",
-    backingType: "demo",
-    component: wrapDemo(UiResourcesApp),
   },
 ];
 

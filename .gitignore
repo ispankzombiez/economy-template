@@ -44,3 +44,5 @@ cache
 /.idea
 /.vscode
 /.cursor
+
+vite.config.ts.timestamp-*.mjs

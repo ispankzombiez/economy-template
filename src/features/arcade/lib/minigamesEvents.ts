@@ -3,7 +3,19 @@
  * Manages communication between the portal scene and minigame modals
  */
 
-type MinigameType =
+/**
+ * Every launchable arcade game id.
+ *
+ * These are the original Nightshade Arcade ids (matching `GAME_REGISTRY` and
+ * `data/machineMap.ts`), plus `slots` / `roulette` which the source repo
+ * declared but never shipped components for — kept so a future cabinet mapping
+ * still type-checks.
+ *
+ * Template example ids (tile-jump, hide-and-seek, chicken-rescue,
+ * golden-crops, plaza-party, ui-resources) were briefly added during the port
+ * and have been removed: they are not Nightshade Arcade games.
+ */
+export type MinigameType =
   | "poker"
   | "slots"
   | "barley-breaker"

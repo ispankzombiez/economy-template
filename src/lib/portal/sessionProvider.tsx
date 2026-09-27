@@ -118,7 +118,14 @@ export function MinigameSessionProvider({
         setPlayerEconomy(nextEconomy);
       });
 
-      if (!getMinigamesApiUrl()) {
+      // Only synchronise when there is an API to talk to *and* a token to talk
+      // with. Booting offline (dev server with no `?jwt=`) still has
+      // VITE_MINIGAMES_API_URL set, so gating on the URL alone made every local
+      // purchase POST with an empty bearer and roll back with a 401
+      // ("Missing or invalid Authorization header"). A hosted build always has a
+      // token — without one the player is stopped at the session-expired screen
+      // — so this never skips a real sync.
+      if (!getMinigamesApiUrl() || !bootstrap.jwt) {
         return;
       }
 

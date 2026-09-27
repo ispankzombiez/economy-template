@@ -5,8 +5,7 @@ import { useMinigameSession } from "lib/portal";
 
 type EconomyAction = {
   type?: string;
-  name?: string;
-  description?: string;
+  showInShop?: boolean;
   mint?: Record<string, { amount?: number } | number>;
   burn?: Record<string, { amount?: number; min?: number; max?: number } | number>;
 };
@@ -27,16 +26,36 @@ function toAmount(rule: unknown): number | null {
 export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
   onClose,
 }) => {
-  const { actions, dispatchAction, apiError } = useMinigameSession();
+  const { actions, dispatchAction, apiError, economyMeta } = useMinigameSession();
   const [localError, setLocalError] = useState<string | null>(null);
 
   const shopItems = useMemo(
     () =>
       Object.entries(actions as Record<string, EconomyAction>).filter(
-        ([, action]) => action?.type === "shop",
+        ([, action]) => action?.type === "shop" && action.showInShop !== false,
       ),
     [actions],
   );
+
+  /**
+   * Shop rules only carry `type` / `showInShop` / `burn` / `mint` — they have no
+   * display copy. The template resolves a product's name, description and art
+   * from `session.items[mintedToken]` (see `examples/ui-resources`), so do the
+   * same here; otherwise every row would be titled with its raw action id
+   * (`buy_nightshade_ticket` instead of `Nightshade Ticket`).
+   */
+  const displayFor = (id: string, action: EconomyAction) => {
+    const mintedToken = Object.keys(action.mint ?? {})[0];
+    const meta = mintedToken ? economyMeta?.items?.[mintedToken] : undefined;
+
+    return {
+      image: meta?.image,
+      name: meta?.name ?? id,
+      description: meta?.description,
+      /** Action id — what `dispatchAction` needs. */
+      actionId: id,
+    };
+  };
 
   return (
     <div className="w-full max-w-md rounded bg-[#1f1529] p-4 text-white">
@@ -53,12 +72,18 @@ export const NightshadeArcadeShop: React.FC<NightshadeArcadeShopProps> = ({
             const burn = Object.entries(action.burn ?? {});
             const mint = Object.entries(action.mint ?? {});
             const hasRangedCost = burn.some(([, value]) => toAmount(value) == null);
+            const { name, description, image } = displayFor(id, action);
 
             return (
               <div key={id} className="rounded border border-white/15 bg-black/30 p-3">
-                <div className="text-xs font-semibold">{action.name ?? id}</div>
-                {action.description ? (
-                  <div className="mt-1 text-[11px] text-[#dfc7f1]">{action.description}</div>
+                <div className="flex items-center gap-2">
+                  {image ? (
+                    <img src={image} alt="" className="h-6 w-6 object-contain" />
+                  ) : null}
+                  <div className="text-xs font-semibold">{name}</div>
+                </div>
+                {description ? (
+                  <div className="mt-1 text-[11px] text-[#dfc7f1]">{description}</div>
                 ) : null}
                 {burn.length > 0 ? (
                   <div className="mt-2 text-[11px] text-[#f7d2dd]">

@@ -7,7 +7,11 @@ import { isTouchDevice } from "features/world/lib/device";
 import { ArcadeBaseScene } from "./ArcadeBaseScene";
 import { translate } from "lib/i18n/translate";
 import VirtualJoystick from "phaser3-rex-plugins/plugins/virtualjoystick.js";
-import { minigamesEventEmitter } from "./lib/minigamesEvents";
+import {
+  minigamesEventEmitter,
+  type MinigameType,
+} from "./lib/minigamesEvents";
+import { getGameIdForMachine } from "./data/machineMap";
 import { nightshadeArcadeEvents } from "./lib/nightshadeArcadeEvents";
 import { PortalNPC } from "./lib/PortalNPC";
 import { getNightshadeArcadeSpawn } from "./lib/spawns";
@@ -108,47 +112,13 @@ export class NightshadeArcadeScene extends ArcadeBaseScene {
                   return;
                 }
 
-                // Use exact matching so names like "Machine 10" don't trigger "Machine 1".
-                const machineName = (name ?? "").trim().toLowerCase();
+                // Exact lookup via data/machineMap.ts — avoids the old
+                // `Machine 1` vs `Machine 10` prefix trap and keeps every
+                // cabinet (1–16) mapped in one editable place.
+                const gameId = getGameIdForMachine(name);
 
-                if (machineName === "machine 1") {
-                  minigamesEventEmitter.emit({ type: "poker" });
-                }
-
-                if (machineName === "machine 2") {
-                  minigamesEventEmitter.emit({ type: "blackjack" });
-                }
-
-                if (machineName === "machine 3") {
-                  minigamesEventEmitter.emit({ type: "gofish" });
-                }
-
-                if (machineName === "machine 4") {
-                  minigamesEventEmitter.emit({ type: "uno" });
-                }
-
-                if (machineName === "machine 5") {
-                  minigamesEventEmitter.emit({ type: "solitaire" });
-                }
-
-                if (machineName === "machine 6") {
-                  minigamesEventEmitter.emit({ type: "goblin-invaders" });
-                }
-
-                if (machineName === "machine 7") {
-                  minigamesEventEmitter.emit({ type: "tetris" });
-                }
-
-                if (machineName === "machine 8") {
-                  minigamesEventEmitter.emit({ type: "pac-man" });
-                }
-
-                if (machineName === "machine 9") {
-                  minigamesEventEmitter.emit({ type: "barley-breaker" });
-                }
-
-                if (machineName === "machine 10") {
-                  minigamesEventEmitter.emit({ type: "frogger" });
+                if (gameId) {
+                  minigamesEventEmitter.emit({ type: gameId as MinigameType });
                 }
               }
             });

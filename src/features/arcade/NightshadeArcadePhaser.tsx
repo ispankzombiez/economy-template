@@ -10,7 +10,11 @@ import { useMinigameSession } from "lib/portal";
 export const NightshadeArcadePhaser: React.FC = () => {
   const { farmId, farm, playerData } = useMinigameSession();
   const bumpkin = (farm as any)?.bumpkin;
-  const username = playerData?.resolvedProfile?.username ?? String(farmId);
+  // The name tag under the bumpkin must be the player's display name. When the
+  // session/JWT carries none, leave this undefined so ArcadeBaseScene renders
+  // `#<farmId>` (matching the HUD's `Farmer #<farmId>`) instead of coercing a
+  // bare id into the tag, which reads as a raw player number.
+  const username = playerData?.resolvedProfile?.username;
   const game = useRef<Game>(undefined);
 
   console.log("[BumpkinDiag] farm.bumpkin raw:", JSON.stringify(farm?.bumpkin));

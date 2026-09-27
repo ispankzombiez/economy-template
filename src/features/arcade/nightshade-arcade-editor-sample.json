@@ -1,0 +1,263 @@
+{
+  "descriptions": {
+    "title": "Nightshade Arcade",
+    "subtitle": "Spend RavenCoins on tickets, food and drink.",
+    "welcome": "Play the arcade cabinets to earn RavenCoins, then trade them here. The Nightshade Ticket is your entry coupon.",
+    "rules": "Every purchase burns RavenCoins and mints the item. Attempts are limited per day; practice mode is always free."
+  },
+  "items": {
+    "RavenCoin": {
+      "name": "RavenCoin",
+      "description": "The Nightshade Arcade currency. Earned by playing cabinets.",
+      "tradeable": false,
+      "initialBalance": 500
+    },
+    "Nightshade Ticket": {
+      "name": "Nightshade Ticket",
+      "description": "A special ticket from the Nightshade Arcade. Also functions as a coupon!",
+      "tradeable": false
+    },
+    "Apple Pie": {
+      "name": "Apple Pie",
+      "description": "A delicious homemade apple pie from the Nightshade Arcade.",
+      "id": 524,
+      "tradeable": true
+    },
+    "Mushroom Soup": {
+      "name": "Mushroom Soup",
+      "description": "A warm and hearty mushroom soup - a specialty of the arcade.",
+      "id": 531,
+      "tradeable": true
+    },
+    "Pumpkin Soup": {
+      "name": "Pumpkin Soup",
+      "description": "Creamy pumpkin soup exclusively from the Nightshade Arcade.",
+      "id": 501,
+      "tradeable": true
+    },
+    "Kale Stew": {
+      "name": "Kale Stew",
+      "description": "A nutritious kale stew prepared at the Nightshade Arcade.",
+      "id": 529,
+      "tradeable": true
+    },
+    "Roasted Cauliflower": {
+      "name": "Roasted Cauliflower",
+      "description": "Perfectly roasted cauliflower - an arcade exclusive.",
+      "id": 502,
+      "tradeable": true
+    },
+    "Blueberry Jam": {
+      "name": "Blueberry Jam",
+      "description": "Homemade blueberry jam from the Nightshade Arcade kitchens.",
+      "id": 525,
+      "tradeable": true
+    },
+    "Honey Cake": {
+      "name": "Honey Cake",
+      "description": "A sweet honey cake with a golden glaze from the arcade.",
+      "id": 527,
+      "tradeable": true
+    },
+    "Mushroom Jacket Potatoes": {
+      "name": "Mushroom Jacket Potatoes",
+      "description": "Jacket potatoes topped with mushroom - arcade specialty.",
+      "id": 530,
+      "tradeable": true
+    },
+    "Kale & Mushroom Pie": {
+      "name": "Kale & Mushroom Pie",
+      "description": "A savory pie combining kale and mushrooms - arcade exclusive.",
+      "id": 528,
+      "tradeable": true
+    },
+    "Orange Cake": {
+      "name": "Orange Cake",
+      "description": "A zesty orange cake from the Nightshade Arcade bakery.",
+      "id": 532,
+      "tradeable": true
+    },
+    "Sunflower Crunch": {
+      "name": "Sunflower Crunch",
+      "description": "A crunchy sunflower snack mix from the arcade.",
+      "id": 533,
+      "tradeable": true
+    },
+    "Beetroot Cake": {
+      "name": "Beetroot Cake",
+      "description": "A vibrant beetroot cake - a premium arcade creation.",
+      "id": 510,
+      "tradeable": true
+    },
+    "Carrot Cake": {
+      "name": "Carrot Cake",
+      "description": "A delightful carrot cake from the Nightshade Arcade.",
+      "id": 508,
+      "tradeable": true
+    },
+    "Pumpkin Cake": {
+      "name": "Pumpkin Cake",
+      "description": "A seasonal pumpkin cake exclusive to the arcade.",
+      "id": 507,
+      "tradeable": true
+    },
+    "Cauliflower Cake": {
+      "name": "Cauliflower Cake",
+      "description": "A unique cauliflower cake creation from the arcade kitchens.",
+      "id": 511,
+      "tradeable": true
+    },
+    "Wheat Cake": {
+      "name": "Wheat Cake",
+      "description": "A wholesome wheat cake from the Nightshade Arcade.",
+      "id": 514,
+      "tradeable": true
+    },
+    "Apple Juice": {
+      "name": "Apple Juice",
+      "description": "Freshly pressed apple juice from the Nightshade Arcade.",
+      "id": 535,
+      "tradeable": true
+    },
+    "Orange Juice": {
+      "name": "Orange Juice",
+      "description": "Freshly squeezed orange juice - arcade premium.",
+      "id": 536,
+      "tradeable": true
+    },
+    "Purple Smoothie": {
+      "name": "Purple Smoothie",
+      "description": "A vibrant purple berry smoothie from the arcade.",
+      "id": 537,
+      "tradeable": true
+    },
+    "Banana Blast": {
+      "name": "Banana Blast",
+      "description": "An energizing banana smoothie from the Nightshade Arcade.",
+      "id": 554,
+      "tradeable": true
+    }
+  },
+  "actions": {
+    "buy_nightshade_ticket": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 50 } },
+      "mint": { "Nightshade Ticket": { "amount": 1 } }
+    },
+    "buy_mushroom_soup": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 25 } },
+      "mint": { "Mushroom Soup": { "amount": 1 } }
+    },
+    "buy_pumpkin_soup": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 28 } },
+      "mint": { "Pumpkin Soup": { "amount": 1 } }
+    },
+    "buy_kale_stew": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 35 } },
+      "mint": { "Kale Stew": { "amount": 1 } }
+    },
+    "buy_roasted_cauliflower": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 20 } },
+      "mint": { "Roasted Cauliflower": { "amount": 1 } }
+    },
+    "buy_blueberry_jam": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 22 } },
+      "mint": { "Blueberry Jam": { "amount": 1 } }
+    },
+    "buy_honey_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 80 } },
+      "mint": { "Honey Cake": { "amount": 1 } }
+    },
+    "buy_mushroom_jacket_potatoes": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 75 } },
+      "mint": { "Mushroom Jacket Potatoes": { "amount": 1 } }
+    },
+    "buy_kale_mushroom_pie": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 90 } },
+      "mint": { "Kale & Mushroom Pie": { "amount": 1 } }
+    },
+    "buy_orange_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 85 } },
+      "mint": { "Orange Cake": { "amount": 1 } }
+    },
+    "buy_sunflower_crunch": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 70 } },
+      "mint": { "Sunflower Crunch": { "amount": 1 } }
+    },
+    "buy_beetroot_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 150 } },
+      "mint": { "Beetroot Cake": { "amount": 1 } }
+    },
+    "buy_carrot_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 160 } },
+      "mint": { "Carrot Cake": { "amount": 1 } }
+    },
+    "buy_pumpkin_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 155 } },
+      "mint": { "Pumpkin Cake": { "amount": 1 } }
+    },
+    "buy_cauliflower_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 165 } },
+      "mint": { "Cauliflower Cake": { "amount": 1 } }
+    },
+    "buy_wheat_cake": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 170 } },
+      "mint": { "Wheat Cake": { "amount": 1 } }
+    },
+    "buy_apple_juice": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 300 } },
+      "mint": { "Apple Juice": { "amount": 1 } }
+    },
+    "buy_orange_juice": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 320 } },
+      "mint": { "Orange Juice": { "amount": 1 } }
+    },
+    "buy_purple_smoothie": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 350 } },
+      "mint": { "Purple Smoothie": { "amount": 1 } }
+    },
+    "buy_banana_blast": {
+      "type": "shop",
+      "showInShop": true,
+      "burn": { "RavenCoin": { "amount": 340 } },
+      "mint": { "Banana Blast": { "amount": 1 } }
+    }
+  }
+}
