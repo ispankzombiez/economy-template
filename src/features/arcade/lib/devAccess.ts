@@ -1,10 +1,54 @@
 /**
  * Who may use the arcade's developer tools (the Play Ticket mint).
  *
- * ## The recorded developer identity
+ * ## The gate is a server-enforced item, not a client check
  *
- * Read off the live portal JWT and session on 2026-09-27, and recorded here so
- * the gate is reproducible rather than guessed:
+ * The mint is carried out by the economies API when it accepts
+ * `POST /action` — our app only asks. So anything decided in the browser is a
+ * suggestion the caller can ignore, and that is exactly what the earlier
+ * name/farm-id check was: a JWT payload is base64, not signed from the client's
+ * point of view, so anyone could edit `farmId` in their own token and see the
+ * panel.
+ *
+ * The gate is now a **Dev Key in the player's balances**, enforced by the rule
+ * engine's `require`:
+ *
+ * ```json
+ * "Dev-Mint-Play-Ticket": {
+ *   "type": "custom",
+ *   "showInShop": false,
+ *   "require": { "4": { "amount": 1 } },
+ *   "mint": { "2": { "min": 1, "max": 10000 } }
+ * }
+ * ```
+ *
+ * `require` is evaluated server-side against the caller's own balances, so a
+ * player without a key is refused before any mint happens — they cannot mint
+ * their way to a key, because the key is not mintable.
+ *
+ * ## How the key was made unobtainable
+ *
+ * The arcade owner can add an item to the portal and then remove the rule that
+ * mints it. That sequence is what makes this safe, and the order matters:
+ *
+ *  1. publish the `Dev Key` item and a one-off `Grant-Dev-Key` mint;
+ *  2. claim the key once, so the owner holds exactly one;
+ *  3. **in the same save**, add `require` to `Dev-Mint-Play-Ticket` *and* delete
+ *     `Grant-Dev-Key`.
+ *
+ * Steps 2 and 3 are deliberately adjacent. Between them the key is worth
+ * nothing, because no rule requires it yet — so the window in which a key could
+ * be grabbed by anyone else closes at the same instant the key starts to
+ * matter. Verified: `Grant-Dev-Key` now answers
+ * `400 Unknown action "Grant-Dev-Key"`, so the key can never be minted again.
+ *
+ * The key is `tradeable: false`, and the mint does not burn it, so the owner
+ * keeps it indefinitely and mints as often as they like.
+ *
+ * ## The recorded owner
+ *
+ * Read off the live portal JWT and session, for diagnosis ("is this the dev
+ * account?") rather than for access control:
  *
  * | What | Value | Where it comes from |
  * | --- | --- | --- |
@@ -13,122 +57,99 @@
  * | Auth address | `google:115172530787410313653` | JWT claim `address` |
  *
  * Note the JWT's `address` is the Google auth subject, **not** the SFL farm id,
- * so `farmId` is the identifier the arcade gates on.
- *
- * ## Where each value is read from
- *
- * The **JWT does not carry a username.** Decoding a real portal token gives
- * only:
- *
- * ```json
- * { "address": "google:...", "userAccess": { "verified": true },
- *   "farmId": 1128976301583508, "portalId": "Nightshade-Arcade",
- *   "iat": 1790515315, "exp": 1793107315 }
- * ```
- *
- * So the two halves of the gate come from two different server-derived sources:
- *
- *  - `tokenClaims.farmId` — read straight out of the JWT the host page hands us,
- *    under that exact key. Deliberately *not* the loose `id`/`fid`/`farm_id`
- *    candidate list that `decodePortalToken` and `resolvedProfile.farmId` use
- *    for display: a gate wants one unambiguous claim, not the first plausible
- *    id-shaped field in some payload.
- *  - `playerData.resolvedProfile.username` — from `farm.username` in
- *    `GET /data?type=session`, which the economies API projects from the SFL
- *    farm. Server-derived, so it is not something the player typed.
- *
- * Both must match. A matching name with a different farm id is a different
- * player who happens to share the handle; a matching farm id with a different
- * name is a renamed account.
- *
- * ## The honest limitation — this is still a UI gate
- *
- * **Every published action is callable by every player** — the rule engine has
- * no per-account action scope, so `Dev-Mint-Play-Ticket` is callable whether or
- * not this gate passes. Nothing in the client can stop that.
- *
- * Requiring the farm id as well as the name does raise the bar, but be clear
- * about what it buys: a JWT payload is base64, not signed from the client's
- * point of view, so anyone can edit `farmId` in their own token and see the
- * panel. **This is obscurity, not authentication.** And because the id is
- * recorded in this file, it is a *published* value — anyone with the repo can
- * read it and put it in their own token. Treat it as a guard against
- * accidentally showing developer tools to ordinary players, and nothing more.
- *
- * The arcade owner has decided to keep the mint uncapped so the dev account can
- * mint as many Play Tickets as it needs, so **delete the action from the economy
- * before launch** — that is the only step that actually protects the ticket
- * economy.
+ * so `farmId` is the player identifier. The JWT carries no username at all, so
+ * the name has to come from the session.
  */
+
+import type { MinigameSessionEconomyMeta } from "lib/portal/types";
+
+type EconomyItems = Record<string, { name?: string } | undefined>;
 
 /**
- * Farm id of the arcade developer, from the portal JWT's `farmId` claim.
+ * Name pattern of the developer key item.
  *
- * Recorded from a live token. A number, not a string.
+ * Resolved by name rather than hard-coded, because a hosted economy keys items
+ * numerically (`"0"`, `"1"`, …) and those keys are the editor's to assign.
  */
-const ARCADE_DEVELOPER_FARM_ID = 1128976301583508;
+export const DEV_KEY_ITEM_NAME = /^dev[\s_-]*keys?$/i;
 
 /**
- * Username of the arcade developer, from the session's `farm.username`.
+ * Fallback token key for the Dev Key on the live Nightshade-Arcade economy.
  *
- * Stored lower-cased: SFL displays whatever case the player chose, and the live
- * account reads `iSPANK`.
+ * Only reached when the session carries no item metadata — in which case a dev
+ * who already holds the key is the one case where guessing helps.
  */
-const ARCADE_DEVELOPER_USERNAME = "ispank";
+const DEV_KEY_TOKEN_KEY = "4";
 
-/**
- * Is this the arcade developer's farm id?
- *
- * Accepts a numeric string as well as a number, so a future serialiser that
- * quotes the claim cannot silently lock the developer out of their own tools.
- * Anything that is not exactly the recorded id is rejected — including a
- * missing claim, a non-finite number, and `0`.
- */
-export function isArcadeDeveloperFarmId(value: unknown): boolean {
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && value.trim() !== ""
-        ? Number(value)
-        : Number.NaN;
+/** The `playerEconomy.balances` key of the Dev Key, if it can be resolved. */
+export function resolveDevKeyTokenKey({
+  economyMeta,
+  items,
+  balances,
+}: {
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+} = {}): string | undefined {
+  const merged: EconomyItems = { ...items, ...economyMeta?.items };
+  for (const [key, item] of Object.entries(merged)) {
+    const name = item?.name;
+    if (typeof name === "string" && DEV_KEY_ITEM_NAME.test(name.trim())) {
+      return key;
+    }
+  }
 
-  return Number.isFinite(parsed) && parsed === ARCADE_DEVELOPER_FARM_ID;
+  // A key already sitting in a balance identifies itself.
+  if (balances) {
+    for (const key of Object.keys(balances)) {
+      if (DEV_KEY_ITEM_NAME.test(key)) return key;
+    }
+  }
+
+  return DEV_KEY_TOKEN_KEY;
+}
+
+/** Does the player hold at least one Dev Key? */
+export function hasDevKey({
+  balances,
+  tokenKey,
+}: {
+  balances?: Record<string, number>;
+  tokenKey: string | undefined;
+}): boolean {
+  if (!tokenKey) return false;
+  const held = balances?.[tokenKey];
+  return typeof held === "number" && Number.isFinite(held) && held >= 1;
 }
 
 /**
- * Is this the arcade developer's username?
+ * The arcade's dev-tools answer for a booted session.
  *
- * Matching is case-insensitive and whitespace-trimmed because SFL usernames are
- * displayed with whatever case the player chose.
- */
-export function isArcadeDeveloperName(value: unknown): boolean {
-  if (typeof value !== "string") return false;
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) return false;
-  return normalized === ARCADE_DEVELOPER_USERNAME;
-}
-
-/**
- * The arcade's dev-tools answer for a booted session: **name AND farm id**.
- *
- * @param username `playerData.resolvedProfile.username` — the server-derived
- *                 farm name. `undefined` without a session, which resolves to
- *                 "not the developer" so a local boot never renders a mint form.
- * @param farmId   `playerData.tokenClaims.farmId` — read from the JWT the host
- *                 page provided.
+ * True only for a player the server has accepted a `require` for, i.e. one
+ * holding a Dev Key. Safe to render on, and the one signal in the client that
+ * mirrors a server-enforced rule rather than merely guessing at the player.
  */
 export function resolveDevAccess({
-  username,
-  farmId,
+  economyMeta,
+  items,
+  balances,
 }: {
-  username: unknown;
-  farmId: unknown;
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
 }): boolean {
-  return isArcadeDeveloperName(username) && isArcadeDeveloperFarmId(farmId);
+  return hasDevKey({
+    balances,
+    tokenKey: resolveDevKeyTokenKey({ economyMeta, items, balances }),
+  });
 }
 
-/** The recorded identity, for diagnostics and tests. */
+/**
+ * The recorded owner, for diagnostics only — this is not what grants access.
+ *
+ * See the note at the top of this file: the access decision is the Dev Key.
+ */
 export const ARCADE_DEVELOPER = {
-  farmId: ARCADE_DEVELOPER_FARM_ID,
-  username: ARCADE_DEVELOPER_USERNAME,
+  farmId: 1128976301583508,
+  username: "iSPANK",
 } as const;

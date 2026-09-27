@@ -28,6 +28,11 @@
       "description": "A paid attempt in progress. One Play Ticket already spent, awaiting a win.",
       "tradeable": false
     },
+    "Dev Key": {
+      "name": "Dev Key",
+      "description": "Unlocks the developer's Play Ticket mint. Not obtainable in-game.",
+      "tradeable": false
+    },
     "Apple Pie": {
       "name": "Apple Pie",
       "description": "A delicious homemade apple pie from the Nightshade Arcade.",
@@ -219,6 +224,7 @@
     "Dev-Mint-Play-Ticket": {
       "type": "custom",
       "showInShop": false,
+      "require": { "Dev Key": { "amount": 1 } },
       "mint": { "Play Ticket": { "min": 1, "max": 10000 } }
     },
     "Void-Reward-Attempt": {

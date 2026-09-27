@@ -41,17 +41,16 @@ export const NightshadeArcadeApp: React.FC = () => {
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
   const [showShopModal, setShowShopModal] = useState(false);
   const [notice, setNotice] = useState<ArcadeNotice | null>(null);
-  // Developer tools need BOTH the farm name and the farm id from the JWT the
-  // host page hands us. Neither is typed by the player, but note the gate is a
-  // UI gate only - see `lib/devAccess.ts` for exactly what it does and does not
-  // stop.
+  // Developer tools are gated on the Dev Key the server requires, not on a name
+  // or an id the client can read - see `lib/devAccess.ts`.
   const isDev = useMemo(
     () =>
       resolveDevAccess({
-        username: playerData?.resolvedProfile?.username,
-        farmId: playerData?.tokenClaims?.farmId,
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
       }),
-    [playerData?.resolvedProfile?.username, playerData?.tokenClaims?.farmId],
+    [economyMeta, playerEconomy?.items, playerEconomy?.balances],
   );
   const activeEntry = useMemo(
     () => (activeGameId ? getGameEntry(activeGameId) : undefined),
