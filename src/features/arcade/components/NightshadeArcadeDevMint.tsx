@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from "react";
 import { Button } from "components/ui/Button";
-import { Modal } from "components/ui/Modal";
 import { useMinigameSession } from "lib/portal";
 import {
   DEV_PLAY_TICKET_MINT_ACTION,
@@ -10,26 +9,25 @@ import {
   resolvePlayTicketTokenKey,
 } from "../lib/ravenCoin";
 
-type NightshadeArcadeDevMintProps = {
-  onClose: () => void;
-};
-
 /**
  * Developer-only Play Ticket mint: type a number, press Mint.
  *
- * Uncapped by the arcade owner's decision — the dev account mints as many
- * tickets as it needs, as many times as it needs them. `min`/`max`/`dailyCap`
- * are read back from the published rule purely so the input never asks for a
- * number the rule engine will reject outright (`Amount for 2 must be between 1
- * and 10000`).
+ * Renders as a **panel inside the chest popup** (`NightshadeArcadeNotice`),
+ * which is where the arcade owner wanted the dev mint to live — the player
+ * clicks a chest at the front entryway, and the dev account gets the mint form
+ * in the same dialog as the chest's result. It brings no modal or close button
+ * of its own; the notice's single OK button dismisses the whole thing.
+ *
+ * Uncapped by the owner's decision — the dev account mints as many tickets as
+ * it needs, as many times as it needs them. `min`/`max`/`dailyCap` are read
+ * back from the published rule purely so the input never asks for a number the
+ * rule engine will reject outright (`Amount for 2 must be between 1 and 10000`).
  *
  * Note the username gate in `lib/devAccess.ts` is a UI gate only: a modified
- * client can dispatch this action without ever rendering this dialog. Delete
- * the action from the economy before launch.
+ * client can dispatch this action without ever rendering this panel. Delete the
+ * action from the economy before launch.
  */
-export const NightshadeArcadeDevMint: React.FC<
-  NightshadeArcadeDevMintProps
-> = ({ onClose }) => {
+export const NightshadeArcadeDevMint: React.FC = () => {
   const { actions, economyMeta, playerEconomy, dispatchAction, apiError } =
     useMinigameSession();
   const [rawAmount, setRawAmount] = useState("1");
@@ -92,75 +90,69 @@ export const NightshadeArcadeDevMint: React.FC<
   };
 
   return (
-    <Modal show onHide={onClose}>
-      <div className="w-full max-w-sm rounded bg-[#1f1529] p-4 text-white">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Dev: Mint Play Tickets</h2>
-          <Button className="w-auto" onClick={onClose}>
-            Close
-          </Button>
-        </div>
+    <div className="mt-3 rounded border border-amber-400/40 bg-amber-400/10 p-3">
+      <h3 className="text-xs font-semibold text-amber-200">
+        Dev: Mint Play Tickets
+      </h3>
 
-        {!published ? (
-          <p className="text-xs text-red-300">
-            No <code>{DEV_PLAY_TICKET_MINT_ACTION}</code> action is published,
-            so there is nothing to dispatch. Publish it in the economy editor
-            first.
+      {!published ? (
+        <p className="mt-1 text-[11px] text-red-300">
+          No <code>{DEV_PLAY_TICKET_MINT_ACTION}</code> action is published, so
+          there is nothing to dispatch. Publish it in the economy editor first.
+        </p>
+      ) : (
+        <>
+          <label className="mt-2 block text-xs text-[#dfc7f1]">
+            How many Play Tickets?
+            <input
+              type="number"
+              inputMode="numeric"
+              min={limits?.min ?? 1}
+              max={perCallMax}
+              value={rawAmount}
+              onChange={(e) => setRawAmount(e.target.value)}
+              className="mt-1 w-full rounded border border-white/20 bg-black/40 p-2 text-sm"
+            />
+          </label>
+
+          <p className="mt-2 text-[11px] text-[#c9e5ff]">
+            Holding {held}.{" "}
+            {perCallMax === undefined
+              ? "No per-mint limit published."
+              : `Up to ${perCallMax.toLocaleString()} per mint.`}{" "}
+            {dailyCap === undefined
+              ? "No daily limit — mint as often as you need."
+              : `Daily limit ${dailyCap.toLocaleString()}.`}
           </p>
-        ) : (
-          <>
-            <label className="block text-xs text-[#dfc7f1]">
-              How many Play Tickets?
-              <input
-                type="number"
-                inputMode="numeric"
-                min={limits?.min ?? 1}
-                max={perCallMax}
-                value={rawAmount}
-                onChange={(e) => setRawAmount(e.target.value)}
-                className="mt-1 w-full rounded border border-white/20 bg-black/40 p-2 text-sm"
-              />
-            </label>
 
-            <p className="mt-2 text-[11px] text-[#c9e5ff]">
-              Holding {held}.{" "}
+          {!inRange && rawAmount.trim() !== "" ? (
+            <p className="mt-1 text-[11px] text-amber-300">
               {perCallMax === undefined
-                ? "No per-mint limit published."
-                : `Up to ${perCallMax.toLocaleString()} per mint.`}{" "}
-              {dailyCap === undefined
-                ? "No daily limit — mint as often as you need."
-                : `Daily limit ${dailyCap.toLocaleString()}.`}
+                ? `Enter a whole number of at least ${limits?.min ?? 1}.`
+                : `Enter a whole number between ${limits?.min ?? 1} and ${perCallMax.toLocaleString()}.`}
             </p>
+          ) : null}
 
-            {!inRange && rawAmount.trim() !== "" ? (
-              <p className="mt-1 text-[11px] text-amber-300">
-                {perCallMax === undefined
-                  ? `Enter a whole number of at least ${limits?.min ?? 1}.`
-                  : `Enter a whole number between ${limits?.min ?? 1} and ${perCallMax.toLocaleString()}.`}
-              </p>
-            ) : null}
+          {feedback ? (
+            <p
+              className={`mt-2 text-xs ${
+                feedback.tone === "good" ? "text-[#8fe3a0]" : "text-red-300"
+              }`}
+            >
+              {feedback.text}
+            </p>
+          ) : null}
+          {apiError && !feedback ? (
+            <p className="mt-2 text-xs text-red-300">{apiError}</p>
+          ) : null}
 
-            {feedback ? (
-              <p
-                className={`mt-2 text-xs ${
-                  feedback.tone === "good" ? "text-[#8fe3a0]" : "text-red-300"
-                }`}
-              >
-                {feedback.text}
-              </p>
-            ) : null}
-            {apiError && !feedback ? (
-              <p className="mt-2 text-xs text-red-300">{apiError}</p>
-            ) : null}
-
-            <div className="mt-4">
-              <Button disabled={!inRange} onClick={mint}>
-                Mint
-              </Button>
-            </div>
-          </>
-        )}
-      </div>
-    </Modal>
+          <div className="mt-3">
+            <Button disabled={!inRange} onClick={mint}>
+              Mint
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
   );
 };

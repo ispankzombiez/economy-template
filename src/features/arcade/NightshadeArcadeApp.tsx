@@ -17,6 +17,7 @@ import {
 import { resolveDevAccess } from "./lib/devAccess";
 import type { RewardWinMeta } from "./games/adapters/portal";
 import { NightshadeArcadeHud } from "./components/NightshadeArcadeHud";
+import { NightshadeArcadeDevMint } from "./components/NightshadeArcadeDevMint";
 import { NightshadeArcadeNotice } from "./components/NightshadeArcadeNotice";
 import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
@@ -246,12 +247,14 @@ export const NightshadeArcadeApp: React.FC = () => {
         </Modal>
       ) : null}
       <Modal show={showShopModal} onHide={() => setShowShopModal(false)}>
-        <NightshadeArcadeShop
-          isDev={isDev}
-          onClose={() => setShowShopModal(false)}
-        />
+        <NightshadeArcadeShop onClose={() => setShowShopModal(false)} />
       </Modal>
-      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)} />
+      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)}>
+        {/* The dev mint lives in the chest popup, not the shop: the dev account
+            clicks a chest at the front entryway and gets the mint form in the
+            same dialog as the chest's result. */}
+        {isDev ? <NightshadeArcadeDevMint /> : null}
+      </NightshadeArcadeNotice>
     </>
   );
 };
