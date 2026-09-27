@@ -62,12 +62,18 @@ export function withArcadeProps(
       dispatchAction,
     } = useMinigameSession();
 
-    // VIP comes from the SFL farm (`farm.vip.expiresAt` or the lifetime banner),
-    // which the portal player profile carries. A session-less boot stays VIP so
-    // a dev session can still exercise the per-cabinet reward path.
+    // VIP comes from the SFL farm's `vip.expiresAt`, read from the player
+    // economies session - the same source as the name and FLOWER the HUD shows.
+    // The portal profile is only a legacy fallback; a session-less boot stays VIP
+    // so a dev session can still exercise the per-cabinet reward path.
     const isVip = useMemo(
-      () => resolveVipAccess(!!jwt, playerData?.portalProfile),
-      [jwt, playerData?.portalProfile],
+      () =>
+        resolveVipAccess({
+          hasSession: !!jwt,
+          sessionFarm: farm,
+          portalProfile: playerData?.portalProfile,
+        }),
+      [jwt, farm, playerData?.portalProfile],
     );
 
     // Same source the arcade HUD shows, so the "has enough FLOWER" gate and

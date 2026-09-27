@@ -25,17 +25,25 @@ import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
 export const NightshadeArcadeApp: React.FC = () => {
   const {
     jwt,
+    farm,
     actions,
     playerData,
     playerEconomy,
     economyMeta,
     dispatchAction,
   } = useMinigameSession();
-  // Same signal `withArcadeProps` gives the cabinets: VIP reads the SFL farm's
-  // `vip.expiresAt` through the portal player profile.
+  // Same signal the cabinets get: `farm.vip.expiresAt` from the player economies
+  // session, which is also where the name and FLOWER come from. The portal
+  // profile is legacy and is CORS-blocked for this origin, so it only serves as
+  // a fallback. See `lib/portal/vip.ts`.
   const isVip = useMemo(
-    () => resolveVipAccess(!!jwt, playerData?.portalProfile),
-    [jwt, playerData?.portalProfile],
+    () =>
+      resolveVipAccess({
+        hasSession: !!jwt,
+        sessionFarm: farm,
+        portalProfile: playerData?.portalProfile,
+      }),
+    [jwt, farm, playerData?.portalProfile],
   );
   const [tokenBalance, setTokenBalance] = useState(0);
   const [activeGameId, setActiveGameId] = useState<string | null>(null);

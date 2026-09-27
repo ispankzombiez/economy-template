@@ -69,6 +69,19 @@ export type MinigameSessionResponse = {
     bumpkin?: unknown;
     /** When the economies API includes it, forwarded to MMO join as `username`. */
     username?: string;
+    /**
+     * The farm's VIP block, when the session projection carries it.
+     *
+     * Optional on purpose: the projection is server-side and currently ships
+     * `{ balance, bumpkin, username, faction }`. `resolveVipAccess` treats its
+     * absence as "cannot answer" and falls back rather than failing, so adding
+     * the field needs no coordinated release - see `vip.ts`.
+     */
+    vip?: {
+      /** Millisecond timestamp; VIP while it is in the future. */
+      expiresAt?: number;
+      bundles?: unknown[];
+    } | null;
   };
   playerEconomy: {
     balances: Record<string, number>;
