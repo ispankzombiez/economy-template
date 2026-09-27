@@ -41,12 +41,17 @@ export const NightshadeArcadeApp: React.FC = () => {
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
   const [showShopModal, setShowShopModal] = useState(false);
   const [notice, setNotice] = useState<ArcadeNotice | null>(null);
-  // The name is server-derived (the session projects the SFL farm), so this is
-  // not something the player typed - but the gate is still only a UI gate. See
-  // `lib/devAccess.ts` for why the action's own `dailyCap` is the real control.
+  // Developer tools need BOTH the farm name and the farm id from the JWT the
+  // host page hands us. Neither is typed by the player, but note the gate is a
+  // UI gate only - see `lib/devAccess.ts` for exactly what it does and does not
+  // stop.
   const isDev = useMemo(
-    () => resolveDevAccess(playerData?.resolvedProfile?.username),
-    [playerData?.resolvedProfile?.username],
+    () =>
+      resolveDevAccess({
+        username: playerData?.resolvedProfile?.username,
+        farmId: playerData?.tokenClaims?.farmId,
+      }),
+    [playerData?.resolvedProfile?.username, playerData?.tokenClaims?.farmId],
   );
   const activeEntry = useMemo(
     () => (activeGameId ? getGameEntry(activeGameId) : undefined),
