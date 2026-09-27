@@ -13,7 +13,7 @@ import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
-import { NPCIcon } from "../adapters/NPCIcon";
+import { NPCIcon, bumpkinPortraitBox } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { PortalContext } from "../adapters/portal";
@@ -38,18 +38,19 @@ const CELL = 54; // px per tile â€” bigger for better visibility
 const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
 
 /**
- * How big the bumpkin is *drawn*.
+ * How big the bumpkin is *drawn*, in pixels of visible character height.
  *
- * `PLAYER_SIZE` is the collision box, not the sprite: the animation sheet is
- * 96x64, so a square box only ever shows a 96x64 letterboxed bumpkin — 2/3 of
- * the box's height — which made the player read as much smaller than the
- * character you walk around as on the arcade floor.
+ * `PLAYER_SIZE` is the collision box, not the sprite. The animation sheet is
+ * 96x64 with the character occupying only 13x18 of it, so sizing the sprite by
+ * its box drew the bumpkin at a fraction of that box and it read as much
+ * smaller than the character you walk around as on the arcade floor.
  *
- * Decoupling the two lets the sprite be drawn larger (and still bottom-aligned
- * to its collision box, so it stands on the same lane) without touching the
- * lanes, logs or hitboxes. One number to tune.
+ * `NPCIcon` now crops to the character and scales that, so this number is the
+ * height actually seen: 48px sits just inside a 54px lane, and the sprite stays
+ * bottom-aligned to the 42px collision box so it stands on the same lane without
+ * touching the lanes, logs or hitboxes. One number to tune.
  */
-const PLAYER_RENDER_SIZE = 63;
+const PLAYER_RENDER_HEIGHT = 48;
 const VIEWPORT_ROWS = 11; // rows visible at once
 const WORLD_ROWS = 30; // total world rows (row 0 = home, row 29 = start)
 
@@ -145,6 +146,8 @@ type LogEntity = {
 type FroggerRuntime = {
   // player center in world-pixel coordinates
   playerCX: number;
+  /** Which way the player's bumpkin portrait faces, so it can turn. */
+  playerFacing: "left" | "right";
   playerCY: number;
 
   goblins: GoblinEntity[];
@@ -383,6 +386,7 @@ const createRuntime = (difficulty: FroggerDifficulty): FroggerRuntime => {
   const introLocked = true;
   return {
     playerCX: cx,
+    playerFacing: "right",
     playerCY: cy,
     goblins: buildGoblins(difficulty, 0, 0),
     logs: buildLogs(difficulty, 0, 0),
@@ -435,6 +439,9 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
 
   const playerParts =
     portalGameState.bumpkin?.equipped ?? NPC_WEARABLES["pumpkin' pete"];
+
+  /** Centering box for the portrait, whose own width is measured at runtime. */
+  const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
   // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const returnToMenu = useCallback(() => {
@@ -756,6 +763,15 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         ...prev,
         playerCX: newCX,
         playerCY: newCY,
+        // Sticky: the portrait keeps facing the way the player last travelled
+        // horizontally, instead of snapping back to centre when they stop. Being
+        // carried along by a drifting log counts as travelling.
+        playerFacing:
+          newCX < prev.playerCX
+            ? "left"
+            : newCX > prev.playerCX
+              ? "right"
+              : prev.playerFacing,
         goblins: newGoblins,
         logs: newLogs,
         cameraY: newCamY,
@@ -1262,21 +1278,27 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
               <div
                 className="absolute"
                 style={{
-                  // Drawn larger than the collision box, but centred on it and
-                  // bottom-aligned so the bumpkin stands on the same lane.
-                  left: runtime.playerCX - PLAYER_RENDER_SIZE / 2,
+                  // Centred on the collision box and bottom-aligned so the
+                  // bumpkin stands on the same lane. The box is
+                  // `bumpkinPortraitBox(...)` wide so the canvas - whose width
+                  // is measured from the sheet - can be centred inside it.
+                  left: runtime.playerCX - portrait.width / 2,
                   top:
                     runtime.playerCY -
                     camY +
                     PLAYER_SIZE / 2 -
-                    PLAYER_RENDER_SIZE,
-                  width: PLAYER_RENDER_SIZE,
-                  height: PLAYER_RENDER_SIZE,
+                    PLAYER_RENDER_HEIGHT,
+                  width: portrait.width,
+                  height: PLAYER_RENDER_HEIGHT,
                   zIndex: 20,
                   filter: "drop-shadow(0 3px 6px rgba(0,0,0,0.7))",
                 }}
               >
-                <NPCIcon parts={playerParts} width={PLAYER_RENDER_SIZE} />
+                <NPCIcon
+                  parts={playerParts}
+                  height={PLAYER_RENDER_HEIGHT}
+                  facing={runtime.playerFacing}
+                />
               </div>
             )}
 

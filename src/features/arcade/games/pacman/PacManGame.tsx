@@ -15,7 +15,7 @@ import { ITEM_DETAILS } from "../adapters/itemDetails";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
-import { NPCIcon } from "../adapters/NPCIcon";
+import { NPCIcon, bumpkinPortraitBox } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
@@ -91,6 +91,18 @@ const INITIAL_POWER_PELLETS = RAW_MAZE.flat().filter((c) => c === 3).length;
 // Player spawn (row 22, just below the ghost house)
 const PLAYER_SPAWN_COL = 13;
 const PLAYER_SPAWN_ROW = 22;
+
+/**
+ * How big the bumpkin is *drawn*, in pixels of visible character height.
+ *
+ * The animation sheet is 96x64 with the character occupying only 13x18 of it,
+ * so sizing the sprite by its box drew the bumpkin at a fraction of that box and
+ * it read as much smaller than the character you walk around as on the arcade
+ * floor. `NPCIcon` now crops to the character and scales that, so this number is
+ * the height actually seen: 30px against the 20px ghosts on a 20px tile grid,
+ * centred on the cell the player occupies. One number to tune.
+ */
+const PLAYER_RENDER_HEIGHT = 30;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -450,6 +462,9 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
 
   const playerParts =
     portalGameState.bumpkin?.equipped ?? NPC_WEARABLES["pumpkin' pete"];
+
+  /** Centering box for the portrait, whose own width is measured at runtime. */
+  const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
   const nextDirRef = useRef<Dir>("none");
   const rewardGrantedRef = useRef(false);
@@ -1269,18 +1284,26 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
               <div
                 className="absolute"
                 style={{
+                  // Centred on the tile the player occupies, so the character
+                  // sits on its cell. The box is `bumpkinPortraitBox(...)` wide
+                  // so the canvas - whose width is measured from the sheet -
+                  // can be centred inside it.
                   left:
                     (((runtime.playerCol % MAZE_COLS) + MAZE_COLS) %
                       MAZE_COLS) *
                       CELL -
-                    CELL / 2,
-                  top: runtime.playerRow * CELL - CELL / 2,
-                  width: CELL * 2,
-                  height: CELL * 2,
+                    portrait.width / 2,
+                  top: runtime.playerRow * CELL - PLAYER_RENDER_HEIGHT / 2,
+                  width: portrait.width,
+                  height: PLAYER_RENDER_HEIGHT,
                   zIndex: 20,
                 }}
               >
-                <NPCIcon parts={playerParts} width={CELL * 2} />
+                <NPCIcon
+                  parts={playerParts}
+                  height={PLAYER_RENDER_HEIGHT}
+                  facing={runtime.playerDir === "left" ? "left" : "right"}
+                />
               </div>
             )}
 

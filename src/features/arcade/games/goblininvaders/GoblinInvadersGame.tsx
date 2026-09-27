@@ -17,7 +17,7 @@ import arcadeTilesheet from "../../assets/nightshade-arcade-tilesheet.png";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
-import { NPCIcon } from "../adapters/NPCIcon";
+import { NPCIcon, bumpkinPortraitBox } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
@@ -41,18 +41,19 @@ const PLAYER_SPEED = 420;
 const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
 
 /**
- * How big the bumpkin is *drawn*.
+ * How big the bumpkin is *drawn*, in pixels of visible character height.
  *
- * `PLAYER_SIZE` is the collision box, not the sprite: the animation sheet is
- * 96x64, so a square box only ever shows a 96x64 letterboxed bumpkin — 2/3 of
- * the box's height — which made the player read as much smaller than the
- * character you walk around as on the arcade floor.
+ * `PLAYER_SIZE` is the collision box, not the sprite. The animation sheet is
+ * 96x64 with the character occupying only 13x18 of it, so sizing the sprite by
+ * its box drew the bumpkin at a fraction of that box and it read as much
+ * smaller than the character you walk around as on the arcade floor.
  *
- * Decoupling the two lets the sprite be drawn larger (and still bottom-aligned
- * to its collision box, so it sits on the same line) without touching the
+ * `NPCIcon` now crops to the character and scales that, so this number is the
+ * height actually seen: 48px against the 42px collision box, still bottom-
+ * aligned to it so the bumpkin sits on the same line, without touching the
  * invaders, shots or hitboxes. One number to tune.
  */
-const PLAYER_RENDER_SIZE = 63;
+const PLAYER_RENDER_HEIGHT = 48;
 const PLAYER_SHOT_SPEED = 620;
 const ENEMY_SHOT_SPEED = 260;
 const ENEMY_ROWS = 5;
@@ -119,6 +120,8 @@ type MysteryShip = {
 
 type GoblinInvadersRuntime = {
   playerX: number;
+  /** Which way the player's bumpkin portrait faces, so it can turn. */
+  playerFacing: "left" | "right";
   score: number;
   lives: number;
   wave: number;
@@ -302,6 +305,7 @@ const createMysteryShip = (): MysteryShip => ({
 
 const createInitialRuntime = (): GoblinInvadersRuntime => ({
   playerX: ARENA_WIDTH / 2 - PLAYER_SIZE / 2,
+  playerFacing: "right",
   score: 0,
   lives: 3,
   wave: 1,
@@ -396,6 +400,9 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
 
   const playerParts =
     portalGameState.bumpkin?.equipped ?? NPC_WEARABLES["pumpkin' pete"];
+
+  /** Centering box for the portrait, whose own width is measured at runtime. */
+  const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
   const startSession = useCallback(
     (
@@ -537,8 +544,18 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
         !!pressedKeysRef.current.ArrowRight || !!pressedKeysRef.current.KeyD;
 
       let playerX = previous.playerX;
-      if (leftPressed) playerX -= PLAYER_SPEED * dt;
-      if (rightPressed) playerX += PLAYER_SPEED * dt;
+      // Facing follows the last horizontal input and is sticky, so the portrait
+      // keeps looking the way the player was last going instead of snapping back
+      // to centre whenever the key is released.
+      let playerFacing = previous.playerFacing;
+      if (leftPressed) {
+        playerX -= PLAYER_SPEED * dt;
+        playerFacing = "left";
+      }
+      if (rightPressed) {
+        playerX += PLAYER_SPEED * dt;
+        playerFacing = "right";
+      }
       playerX = clamp(playerX, 0, ARENA_WIDTH - PLAYER_SIZE);
 
       let shieldCells = previous.shieldCells;
@@ -895,6 +912,7 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
       return {
         ...previous,
         playerX,
+        playerFacing,
         score,
         lives,
         wave,
@@ -1249,16 +1267,22 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             <div
               className="absolute"
               style={{
-                // Drawn larger than the collision box, but centred on it and
-                // bottom-aligned so the bumpkin sits on the same line.
-                width: `${PLAYER_RENDER_SIZE}px`,
-                height: `${PLAYER_RENDER_SIZE}px`,
-                left: `${runtime.playerX + PLAYER_SIZE / 2 - PLAYER_RENDER_SIZE / 2}px`,
-                top: `${PLAYER_Y + PLAYER_SIZE - PLAYER_RENDER_SIZE}px`,
+                // Centred on the collision box and bottom-aligned so the bumpkin
+                // sits on the same line. The box is `bumpkinPortraitBox(...)`
+                // wide so the canvas - whose width is measured from the sheet -
+                // can be centred inside it.
+                width: `${portrait.width}px`,
+                height: `${PLAYER_RENDER_HEIGHT}px`,
+                left: `${runtime.playerX + PLAYER_SIZE / 2 - portrait.width / 2}px`,
+                top: `${PLAYER_Y + PLAYER_SIZE - PLAYER_RENDER_HEIGHT}px`,
               }}
             >
               {isPlayerVisible && (
-                <NPCIcon parts={playerParts} width={PLAYER_RENDER_SIZE} />
+                <NPCIcon
+                  parts={playerParts}
+                  height={PLAYER_RENDER_HEIGHT}
+                  facing={runtime.playerFacing}
+                />
               )}
             </div>
 
