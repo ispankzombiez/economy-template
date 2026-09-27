@@ -219,7 +219,7 @@
     "Dev-Mint-Play-Ticket": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "Play Ticket": { "min": 1, "max": 10, "dailyCap": 10 } }
+      "mint": { "Play Ticket": { "min": 1, "max": 10000 } }
     },
     "Void-Reward-Attempt": {
       "type": "custom",

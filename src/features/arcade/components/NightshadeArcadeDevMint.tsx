@@ -6,7 +6,7 @@ import {
   DEV_PLAY_TICKET_MINT_ACTION,
   getPlayTicketBalance,
   resolveActionAmounts,
-  resolveActionDailyCap,
+  resolveActionMintLimits,
   resolvePlayTicketTokenKey,
 } from "../lib/ravenCoin";
 
@@ -17,16 +17,15 @@ type NightshadeArcadeDevMintProps = {
 /**
  * Developer-only Play Ticket mint: type a number, press Mint.
  *
- * ## What actually protects this
+ * Uncapped by the arcade owner's decision — the dev account mints as many
+ * tickets as it needs, as many times as it needs them. `min`/`max`/`dailyCap`
+ * are read back from the published rule purely so the input never asks for a
+ * number the rule engine will reject outright (`Amount for 2 must be between 1
+ * and 10000`).
  *
- * Not the fact that it is behind a modal, and not the username check in
- * `lib/devAccess.ts` — a modified client can dispatch
- * `Dev-Mint-Play-Ticket` without ever rendering this. The protection is the
- * action's **`dailyCap`**, which the server enforces, and which this dialog
- * reads back to clamp the input. That way the number in the box is a number the
- * rule engine will actually grant instead of a silent rejection.
- *
- * The action should be deleted from the economy before launch.
+ * Note the username gate in `lib/devAccess.ts` is a UI gate only: a modified
+ * client can dispatch this action without ever rendering this dialog. Delete
+ * the action from the economy before launch.
  */
 export const NightshadeArcadeDevMint: React.FC<
   NightshadeArcadeDevMintProps
@@ -49,7 +48,7 @@ export const NightshadeArcadeDevMint: React.FC<
     [economyMeta, playerEconomy?.items, playerEconomy?.balances],
   );
 
-  const cap = resolveActionDailyCap({
+  const limits = resolveActionMintLimits({
     actions,
     actionId: DEV_PLAY_TICKET_MINT_ACTION,
     tokenKey: ticketKey,
@@ -57,11 +56,21 @@ export const NightshadeArcadeDevMint: React.FC<
   const held = getPlayTicketBalance({ playerEconomy, tokenKey: ticketKey });
   const published = Boolean(actions?.[DEV_PLAY_TICKET_MINT_ACTION]);
 
+  const perCallMax =
+    limits && Number.isFinite(limits.max) ? limits.max : undefined;
+  // The editor publishes a sentinel `dailyCap` on a ranged mint that declares
+  // none, so read an absurd cap as "no daily limit" instead of printing it.
+  const dailyCap =
+    limits?.dailyCap !== undefined && limits.dailyCap < 1_000_000
+      ? limits.dailyCap
+      : undefined;
+
   const requested = Math.trunc(Number(rawAmount));
   const inRange =
     Number.isFinite(requested) &&
-    requested >= 1 &&
-    (cap === undefined || requested <= cap);
+    requested >= (limits?.min ?? 1) &&
+    (perCallMax === undefined || requested <= perCallMax) &&
+    (dailyCap === undefined || requested <= dailyCap);
 
   const mint = () => {
     if (!inRange) return;
@@ -105,8 +114,8 @@ export const NightshadeArcadeDevMint: React.FC<
               <input
                 type="number"
                 inputMode="numeric"
-                min={1}
-                max={cap}
+                min={limits?.min ?? 1}
+                max={perCallMax}
                 value={rawAmount}
                 onChange={(e) => setRawAmount(e.target.value)}
                 className="mt-1 w-full rounded border border-white/20 bg-black/40 p-2 text-sm"
@@ -114,15 +123,20 @@ export const NightshadeArcadeDevMint: React.FC<
             </label>
 
             <p className="mt-2 text-[11px] text-[#c9e5ff]">
-              Holding {held}. Server cap:{" "}
-              {cap === undefined ? "none published" : `${cap} per day`}.
+              Holding {held}.{" "}
+              {perCallMax === undefined
+                ? "No per-mint limit published."
+                : `Up to ${perCallMax.toLocaleString()} per mint.`}{" "}
+              {dailyCap === undefined
+                ? "No daily limit — mint as often as you need."
+                : `Daily limit ${dailyCap.toLocaleString()}.`}
             </p>
 
             {!inRange && rawAmount.trim() !== "" ? (
               <p className="mt-1 text-[11px] text-amber-300">
-                {cap === undefined
-                  ? "Enter a whole number of at least 1."
-                  : `Enter a whole number between 1 and ${cap}.`}
+                {perCallMax === undefined
+                  ? `Enter a whole number of at least ${limits?.min ?? 1}.`
+                  : `Enter a whole number between ${limits?.min ?? 1} and ${perCallMax.toLocaleString()}.`}
               </p>
             ) : null}
 

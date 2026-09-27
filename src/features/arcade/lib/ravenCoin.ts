@@ -187,16 +187,23 @@ export const PLAY_TICKET_DAILY_CLAIM_ACTION = "Claim-Play-Ticket";
 /**
  * Developer-only Play Ticket mint, driven by the modal in the shop.
  *
- * ## Read this before raising the cap
+ * **Uncapped by the owner's decision.** The arcade owner asked for the dev
+ * account to be able to mint as many Play Tickets as they want or need, so this
+ * is a ranged mint with no meaningful daily limit: type a number, get that many,
+ * press it again for more. The per-call `max` is only a sanity bound on a single
+ * request, not a budget.
+ *
+ * ## What this means, stated plainly
  *
  * **Every published action is callable by every player** — the rule engine has
  * no per-account action scope, so the username gate in `lib/devAccess.ts` only
  * decides who *sees the button*. A cheater can call this directly and every
- * ticket converts to a Raven Coin, so the **`dailyCap` below is the only real
- * protection**. It is set to a small testing number deliberately.
+ * ticket converts to a Raven Coin through the uncapped `Claim-Raven-Coin`, so
+ * the ticket economy is **not** protected while this action is published. That
+ * is a known, accepted trade-off rather than an oversight.
  *
- * Lower it to the minimum that is useful, and **delete this action before
- * launch**.
+ * The action should therefore be **deleted from the economy before launch**,
+ * leaving the daily chest as the only source of Play Tickets.
  */
 export const DEV_PLAY_TICKET_MINT_ACTION = "Dev-Mint-Play-Ticket";
 
@@ -210,13 +217,27 @@ function mintRule(
   return isRecord(rule) ? rule : undefined;
 }
 
+/** The bounds a published ranged mint declares for one token. */
+export type ActionMintLimits = {
+  /** Smallest amount one call may move. */
+  min: number;
+  /** Largest amount one call may move. */
+  max: number;
+  /** The day's total, when the rule declares one. */
+  dailyCap?: number;
+};
+
 /**
- * The `dailyCap` a published action enforces for one token, if it has one.
+ * The `min` / `max` / `dailyCap` a published action declares for one token.
  *
- * Used to clamp the dev mint input to what the server will actually grant, so
- * the UI never asks for a number the rule engine is going to reject.
+ * Kept as three numbers rather than one "cap" because they answer different
+ * questions: `max` bounds a single request, `dailyCap` bounds the day. A ranged
+ * mint with no `dailyCap` is effectively unlimited across the day.
+ *
+ * Returns `undefined` when the action is not published or mints nothing for that
+ * token.
  */
-export function resolveActionDailyCap({
+export function resolveActionMintLimits({
   actions,
   actionId,
   tokenKey,
@@ -224,18 +245,19 @@ export function resolveActionDailyCap({
   actions?: Record<string, unknown>;
   actionId: string;
   tokenKey: string;
-}): number | undefined {
+}): ActionMintLimits | undefined {
   const rule = mintRule(actions?.[actionId], tokenKey);
   if (!isRecord(rule)) return undefined;
 
-  const cap = rule.dailyCap;
-  if (typeof cap === "number" && Number.isFinite(cap)) return Math.max(0, cap);
+  const min = typeof rule.min === "number" && rule.min > 0 ? rule.min : 1;
+  const max =
+    typeof rule.max === "number" && rule.max >= min ? rule.max : Number.NaN;
+  const dailyCap =
+    typeof rule.dailyCap === "number" && rule.dailyCap >= 0
+      ? rule.dailyCap
+      : undefined;
 
-  // A ranged rule without an explicit cap is still bounded by its range.
-  const max = rule.max;
-  if (typeof max === "number" && Number.isFinite(max)) return Math.max(0, max);
-
-  return undefined;
+  return { min, max, dailyCap };
 }
 
 /** Fallback key used when no session metadata is available (offline sample). */
