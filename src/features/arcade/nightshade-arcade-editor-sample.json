@@ -23,6 +23,11 @@
       "tradeable": false,
       "initialBalance": 3
     },
+    "Reward Attempt": {
+      "name": "Reward Attempt",
+      "description": "A paid attempt in progress. One Play Ticket already spent, awaiting a win.",
+      "tradeable": false
+    },
     "Apple Pie": {
       "name": "Apple Pie",
       "description": "A delicious homemade apple pie from the Nightshade Arcade.",
@@ -200,15 +205,17 @@
       "showInShop": false,
       "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
     },
-    "Mint-Raven-Coin-Ticket": {
+    "Start-Ticket-Run": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1 } }
+      "burn": { "Play Ticket": { "amount": 1 } },
+      "mint": { "Reward Attempt": { "amount": 1 } }
     },
-    "Mint-Play-Ticket": {
+    "Claim-Raven-Coin": {
       "type": "custom",
       "showInShop": false,
-      "burn": { "Play Ticket": { "amount": 1 } }
+      "burn": { "Reward Attempt": { "amount": 1 } },
+      "mint": { "RavenCoin": { "amount": 1 } }
     },
     "buy_nightshade_ticket": {
       "type": "shop",

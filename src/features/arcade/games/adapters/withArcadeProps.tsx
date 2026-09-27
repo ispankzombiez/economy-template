@@ -11,11 +11,12 @@ import {
   buildAttemptHistory,
   getPlayTicketBalance,
   getRavenCoinsMintedToday,
-  PLAY_TICKET_SPEND_ACTION,
   resolveActionAmounts,
   resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
+  resolveRewardAttemptTokenKey,
+  TICKET_RUN_START_ACTION,
 } from "../../lib/ravenCoin";
 
 /** Signature the original arcade games were written against. */
@@ -136,11 +137,13 @@ export function withArcadeProps(
     ]);
 
     /**
-     * Burn one Play Ticket to open a reward run past the free allowance.
+     * Open a Play-Ticket-funded reward run.
      *
-     * The published action is burn-only (`Mint-Play-Ticket`), so the optimistic
-     * rule check inside `dispatchAction` is what refuses the run for a player
-     * who has none — the store surfaces that as a rejected `send`.
+     * One atomic request: the server burns a Play Ticket and mints the voucher
+     * the run pays out against (`Start-Ticket-Run`). Keeping it to a single
+     * action is what stops the ticket spend and the coin payout drifting apart —
+     * when they were separate, the payout could be called on its own and
+     * credited a coin for free.
      */
     const onSpendTicket = useCallback<() => PortalSendResult>(() => {
       const ticketKey = resolvePlayTicketTokenKey({
@@ -148,12 +151,27 @@ export function withArcadeProps(
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
       });
+      const attemptKey = resolveRewardAttemptTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
+      });
+
+      // With no published voucher the run could never be paid out, so refuse
+      // to spend the player's ticket on it.
+      if (!attemptKey) {
+        return {
+          ok: false,
+          error:
+            "This economy has no Reward Attempt item, so a Play Ticket cannot be used yet.",
+        };
+      }
 
       return dispatchAction({
-        action: PLAY_TICKET_SPEND_ACTION,
+        action: TICKET_RUN_START_ACTION,
         amounts: resolveActionAmounts({
           actions,
-          actionId: PLAY_TICKET_SPEND_ACTION,
+          actionId: TICKET_RUN_START_ACTION,
           tokenKey: ticketKey,
           amount: 1,
         }),

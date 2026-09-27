@@ -40,14 +40,53 @@ import type {
 export const RAVEN_COIN_MINT_ACTION = "Mint-Raven-Coin";
 
 /**
- * The action that pays out a **Play-Ticket-funded** reward run.
+ * Opens a **Play-Ticket-funded** reward run.
  *
- * A free run is capped at `dailyCap: 1` on {@link RAVEN_COIN_MINT_ACTION}; a
- * run the player paid a ticket for has to mint through a separate, uncapped
- * action or the day's free cap would swallow it. The ticket itself is burned
- * by {@link PLAY_TICKET_SPEND_ACTION} when the run starts.
+ * Published as an *atomic* swap - one request burns the ticket and mints the
+ * voucher, so the two can never drift apart:
+ *
+ * ```json
+ * { "type": "custom", "showInShop": false,
+ *   "burn": { <playTicket>: { "amount": 1 } },
+ *   "mint": { <rewardAttempt>: { "amount": 1 } } }
+ * ```
+ *
+ * ## Why this is one action and not two
+ *
+ * The first cut burned the ticket on one action and minted the coin on
+ * another. The server cannot see that ordering, so anyone could call the
+ * payout on its own - verified live: the ticket-funded mint returned 200 and
+ * credited a Raven Coin with **zero** tickets burned, repeatable forever.
+ *
+ * Splitting the pair through a voucher closes it. A coin can now only be
+ * minted by destroying a voucher, and a voucher can only be obtained by
+ * destroying a Play Ticket, so the whole chain is checked server-side. The
+ * free allowance (a `dailyCap` on the other mints) is then the only coin a
+ * cheater can reach without paying for it.
  */
-export const RAVEN_COIN_TICKET_MINT_ACTION = "Mint-Raven-Coin-Ticket";
+export const TICKET_RUN_START_ACTION = "Start-Ticket-Run";
+
+/**
+ * Pays out a **Play-Ticket-funded** reward run.
+ *
+ * The mirror image of {@link TICKET_RUN_START_ACTION}: burns the voucher the
+ * run was opened with and mints the Raven Coin, atomically.
+ *
+ * ```json
+ * { "type": "custom", "showInShop": false,
+ *   "burn": { <rewardAttempt>: { "amount": 1 } },
+ *   "mint": { <coin>: { "amount": 1 } } }
+ * ```
+ *
+ * Deliberately **uncapped**: rule 3 is "one Play Ticket buys one attempt, for
+ * as long as the player keeps buying tickets with FLOWER", so the ceiling is
+ * the player's wallet rather than a daily limit. The cost is enforced by the
+ * burn.
+ */
+export const REWARD_ATTEMPT_CLAIM_ACTION = "Claim-Raven-Coin";
+
+/** Name pattern of the voucher item a paid run is opened with. */
+export const REWARD_ATTEMPT_ITEM_NAME = /^reward[\s_-]*attempts?$/i;
 
 /** Prefix shared by every per-cabinet payout action. */
 export const RAVEN_COIN_MACHINE_MINT_PREFIX = "Mint-Raven-Coin-";
@@ -207,9 +246,7 @@ export function resolveRavenCoinMintAction({
   }
 
   const preferred =
-    variant === "ticket"
-      ? RAVEN_COIN_TICKET_MINT_ACTION
-      : RAVEN_COIN_MINT_ACTION;
+    variant === "ticket" ? REWARD_ATTEMPT_CLAIM_ACTION : RAVEN_COIN_MINT_ACTION;
   if (list.some(([id]) => id === preferred)) return preferred;
 
   const matchesCoin = (rule: unknown) => {
@@ -427,4 +464,38 @@ export function getPlayTicketBalance({
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, Math.trunc(value))
     : 0;
+}
+
+/**
+ * The `playerEconomy.balances` key of the voucher a paid run is opened with.
+ *
+ * Same name-resolution approach as the coin and the ticket, because a hosted
+ * economy keys items numerically while the offline sample keys them by name.
+ * Returns `undefined` when no voucher item is published, which is what stops a
+ * ticket-funded payout from being dispatched.
+ */
+export function resolveRewardAttemptTokenKey({
+  economyMeta,
+  items,
+  balances,
+}: {
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+} = {}): string | undefined {
+  const merged: EconomyItems = { ...items, ...economyMeta?.items };
+  for (const [key, item] of Object.entries(merged)) {
+    const name = item?.name;
+    if (typeof name !== "string") continue;
+    if (REWARD_ATTEMPT_ITEM_NAME.test(name.trim())) return key;
+  }
+
+  // A voucher already sitting in a balance identifies itself.
+  if (balances) {
+    for (const key of Object.keys(balances)) {
+      if (REWARD_ATTEMPT_ITEM_NAME.test(key)) return key;
+    }
+  }
+
+  return undefined;
 }
