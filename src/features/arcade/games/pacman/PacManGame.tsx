@@ -1241,8 +1241,12 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   key={`ghost-${i}`}
                   className="absolute flex items-center justify-center"
                   style={{
-                    left: wrapCol * CELL - CELL / 2,
-                    top: g.row * CELL - CELL / 2,
+                    // Same tile-centre convention as the player portrait: a
+                    // tile's middle is `col * CELL + CELL / 2`. Both were half a
+                    // tile off before, which lined them up with each other but
+                    // not with the corridor they moved down.
+                    left: wrapCol * CELL + CELL / 2 - CELL,
+                    top: g.row * CELL + CELL / 2 - CELL,
                     width: CELL * 2,
                     height: CELL * 2,
                     zIndex: 10,
@@ -1284,16 +1288,26 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
               <div
                 className="absolute"
                 style={{
-                  // Centred on the tile the player occupies, so the character
-                  // sits on its cell. The box is `bumpkinPortraitBox(...)` wide
-                  // so the canvas - whose width is measured from the sheet -
-                  // can be centred inside it.
+                  // Centred on the tile's own centre. A tile spans
+                  // `[col * CELL, col * CELL + CELL)`, so its middle is
+                  // `col * CELL + CELL / 2` - which is where the pellets, kale
+                  // and walls are already drawn. Centring the portrait on
+                  // `col * CELL` instead put it half a tile up and to the left
+                  // of the corridor it was travelling down.
+                  //
+                  // Purely visual: the collision checks compare tile
+                  // coordinates (`dist({x: g.col, ...}, {x: playerCol, ...})`),
+                  // never pixels, so nothing about the game changes.
                   left:
                     (((runtime.playerCol % MAZE_COLS) + MAZE_COLS) %
                       MAZE_COLS) *
-                      CELL -
+                      CELL +
+                    CELL / 2 -
                     portrait.width / 2,
-                  top: runtime.playerRow * CELL - PLAYER_RENDER_HEIGHT / 2,
+                  top:
+                    runtime.playerRow * CELL +
+                    CELL / 2 -
+                    PLAYER_RENDER_HEIGHT / 2,
                   width: portrait.width,
                   height: PLAYER_RENDER_HEIGHT,
                   zIndex: 20,
