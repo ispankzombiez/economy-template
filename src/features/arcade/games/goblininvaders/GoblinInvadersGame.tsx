@@ -40,6 +40,13 @@ const PLAYER_Y = ARENA_HEIGHT - 48;
 const PLAYER_SPEED = 420;
 const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
 
+const PLAYER_SHOT_SPEED = 620;
+const ENEMY_SHOT_SPEED = 260;
+const ENEMY_ROWS = 5;
+const ENEMY_COLS = 11;
+const ENEMY_WIDTH = 34;
+const ENEMY_HEIGHT = 34;
+
 /**
  * How big the bumpkin is *drawn*, in pixels of visible character height.
  *
@@ -47,19 +54,16 @@ const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
  * 96x64 with the character occupying only 13x18 of it, so sizing the sprite by
  * its box drew the bumpkin at a fraction of that box and it read as much
  * smaller than the character you walk around as on the arcade floor.
- *
  * `NPCIcon` now crops to the character and scales that, so this number is the
- * height actually seen: 48px against the 42px collision box, still bottom-
- * aligned to it so the bumpkin sits on the same line, without touching the
- * invaders, shots or hitboxes. One number to tune.
+ * height actually seen.
+ *
+ * Tied to `ENEMY_HEIGHT` on purpose: the player should read as the same size as
+ * the goblins it is shooting at, and a hand-typed number here drifts out of step
+ * with the invader sprite the moment either changes. The sprite stays
+ * bottom-aligned to the 42px collision box, so none of the invaders, shots or
+ * hitboxes are affected.
  */
-const PLAYER_RENDER_HEIGHT = 48;
-const PLAYER_SHOT_SPEED = 620;
-const ENEMY_SHOT_SPEED = 260;
-const ENEMY_ROWS = 5;
-const ENEMY_COLS = 11;
-const ENEMY_WIDTH = 34;
-const ENEMY_HEIGHT = 34;
+const PLAYER_RENDER_HEIGHT = ENEMY_HEIGHT;
 const ENEMY_POINTS_LOW = 10;
 const ENEMY_POINTS_MID = 20;
 const ENEMY_POINTS_TOP = 30;
