@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite --port 3000 --host",
     "build": "npm run build:hosted",
-    "build:hosted": "tsc && vite build --mode hosted",
+    "build:hosted": "tsc && vite build --mode hosted && node scripts/checkUpload.mjs",
     "build:pages": "tsc && vite build --mode pages",
+    "upload:check": "node scripts/checkUpload.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -3,7 +3,7 @@
     <info face="Teeny Tiny Pixls" size="5"/>
     <common lineHeight="7" base="0"/>
     <pages>
-        <page id="0" file="Teeny Tiny Pixls5.png"/>
+        <page id="0" file="Teeny_Tiny_Pixls5.png"/>
     </pages>
     <chars>
         <char id="32" x="0" y="0" width="4" height="5" xoffset="0" yoffset="0" xadvance="4" page="0"/>

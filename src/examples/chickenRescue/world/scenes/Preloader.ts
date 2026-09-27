@@ -81,8 +81,8 @@ export abstract class Preloader extends Phaser.Scene {
       });
       this.load.bitmapFont(
         "Teeny Tiny Pixls",
-        "world/Teeny Tiny Pixls5.png",
-        "world/Teeny Tiny Pixls5.xml",
+        "world/Teeny_Tiny_Pixls5.png",
+        "world/Teeny_Tiny_Pixls5.xml",
       );
       this.load.bitmapFont("pixelmix", "world/7px.png", "world/7px.xml");
 
