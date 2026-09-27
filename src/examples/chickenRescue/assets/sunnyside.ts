@@ -1,5 +1,6 @@
 /**
- * CDN URL helpers for Chicken Rescue only (paths match main-game PROTECTED_IMAGE_URL layout).
+ * CDN URL helpers for the template's example games and the arcade (paths match
+ * main-game PROTECTED_IMAGE_URL layout).
  */
 import { CONFIG } from "lib/config";
 
@@ -24,8 +25,14 @@ export const SUNNYSIDE = {
   decorations: {
     skull: `${B()}/decorations/skull.webp`,
   },
+  // Used by the arcade's Frogger (splash art).
+  brand: {
+    water_landing: `${B()}/brand/water_landing.webp`,
+  },
   npcs: {
     bumpkin: `${B()}/npcs/idle.gif`,
+    // Used by the arcade's Goblin Invaders.
+    goblin: `${B()}/npcs/goblin.gif`,
   },
   resource: {
     stone_rock: `${B()}/resources/stone_rock.png`,

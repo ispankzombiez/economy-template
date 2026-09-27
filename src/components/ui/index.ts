@@ -10,6 +10,7 @@ export { Label, LABEL_STYLES } from "./Label";
 export type { LabelType } from "./Label";
 export { Input } from "./Input";
 export { Icon } from "./Icon";
+export { SquareIcon } from "./SquareIcon";
 export { ResourceImage } from "./ResourceImage";
 export { Modal } from "./Modal";
 export { Box } from "./Box";

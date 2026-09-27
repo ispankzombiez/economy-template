@@ -8,6 +8,7 @@ import { TetrisGame } from "./tetris/TetrisGame";
 import { GoblinInvadersGame } from "./goblininvaders/GoblinInvadersGame";
 import { PacManGame } from "./pacman/PacManGame";
 import { FroggerGame } from "./frogger/FroggerGame";
+import { withArcadeProps } from "./adapters/withArcadeProps";
 import type { ArcadeGameEntry } from "../types";
 
 /**
@@ -24,128 +25,113 @@ import type { ArcadeGameEntry } from "../types";
  * golden-crops, plaza-party, ui-resources) were briefly registered here during
  * the port. They are **not** Nightshade Arcade games and have been pruned.
  *
- * ── Implementation status key ───────────────────────────────────────────────
- * backingType "local"      → fully playable React game component (owns back button via onBack)
- * backingType "scaffolded" → non-broken placeholder (owns back button via onBack)
- * backingType "portal"     → reserved for future hosted-portal integration
+ * ── Restore status ──────────────────────────────────────────────────────────
+ * All ten are the **original** components, copied verbatim from `source-portal`
+ * and re-wired through `games/adapters/` (the only thing changed in each file
+ * is the import list). Every entry is therefore `local` + `available`.
  *
- * ── Originals to restore from source-portal ─────────────────────────────────
- * [x] Poker              — local
- * [x] Blackjack          — local
- * [x] Go Fish            — local
- * [x] Uno                — local
- * [x] Solitaire          — local
- * [x] Goblin Invaders    — local
- * [x] Tetris             — local
- * [x] Barley Breaker     — local
- * [ ] Pac-Man            — stub (46 lines) vs 1,277-line original + session.ts
- * [ ] Frogger            — stub (46 lines) vs 1,293-line original + session.ts
+ * ── How an original plugs into the arcade ───────────────────────────────────
+ * The originals are `React.FC<{ onClose?: () => void }>` and talk to an xstate
+ * portal machine this template does not have. `withArcadeProps` supplies that
+ * wiring: it mounts `ArcadePortalProvider`, translates `onClose` → `onBack`,
+ * and turns the game's own `arcadeMinigame.ravenCoinWon` event into `onWin`.
+ *
+ * ── tokenReward ─────────────────────────────────────────────────────────────
+ * Informational only — each game reports its prize itself via
+ * `*_RAVEN_COIN_REWARD`, and every one of the originals is set to 1 RavenCoin.
+ * These values mirror that so the hub can never advertise more than a game
+ * actually pays out.
  */
 export const GAME_REGISTRY: ArcadeGameEntry[] = [
-  // ── Migration checklist: completed ─────────────────────────────────────────
   {
     id: "poker",
     name: "Poker",
     description: "Texas Hold'em against the house.",
-    tokenReward: 100,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: PokerGame,
+    component: withArcadeProps(PokerGame),
   },
   {
     id: "blackjack",
     name: "Blackjack",
     description: "Beat the dealer without busting.",
-    tokenReward: 100,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: BlackjackGame,
+    component: withArcadeProps(BlackjackGame),
   },
   {
     id: "gofish",
     name: "Go Fish",
     description: "Collect matching sets before your opponent.",
-    tokenReward: 75,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: GoFishGame,
+    component: withArcadeProps(GoFishGame),
   },
   {
     id: "uno",
     name: "Uno",
     description: "Play special cards to empty your hand first.",
-    tokenReward: 90,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: UnoGame,
+    component: withArcadeProps(UnoGame),
   },
   {
     id: "solitaire",
     name: "Solitaire",
     description: "Classic card-stacking challenge.",
-    tokenReward: 70,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: SolitaireGame,
+    component: withArcadeProps(SolitaireGame),
   },
-  // ── Migration checklist: newly implemented (target-native) ──────────────────
   {
     id: "goblin-invaders",
     name: "Goblin Invaders",
     description: "Arcade survival shooter.",
-    tokenReward: 120,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: GoblinInvadersGame,
-    devNote:
-      "Target-native Space Invaders variant. Source minigame id `goblin-invaders` is known; local source file in Sunflower-Land was not verified during the research handoff.",
+    component: withArcadeProps(GoblinInvadersGame),
   },
   {
     id: "tetris",
     name: "Tetris",
     description: "Clear lines with falling blocks.",
-    tokenReward: 110,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: TetrisGame,
-    devNote:
-      "Target-native Tetris implementation. Source minigame id `tetris` is known; local source file in Sunflower-Land was not verified during the research handoff.",
+    component: withArcadeProps(TetrisGame),
   },
   {
     id: "barley-breaker",
     name: "Barley Breaker",
     description: "Classic 15-puzzle tile challenge.",
-    tokenReward: 80,
+    tokenReward: 1,
     status: "available",
     backingType: "local",
-    component: BarleyBreakerGame,
-    devNote:
-      "Target-native 15-puzzle implementation. Source minigame id `barley-breaker` is known; local source file in Sunflower-Land was not verified during the research handoff.",
+    component: withArcadeProps(BarleyBreakerGame),
   },
-  // ── Migration checklist: scaffolded (pending implementation) ───────────────
   {
     id: "pac-man",
     name: "Pac-Man",
     description: "Navigate mazes and avoid enemies.",
-    tokenReward: 95,
-    status: "scaffolded",
-    backingType: "scaffolded",
-    component: PacManGame,
-    portalId: "pac-man",
-    devNote:
-      "Scaffolded. Source minigame id `pac-man` is known; local source file in Sunflower-Land was not verified. Implement as target-native maze game (Path A) or confirm portal hosting (Path B).",
+    tokenReward: 1,
+    status: "available",
+    backingType: "local",
+    component: withArcadeProps(PacManGame),
   },
   {
     id: "frogger",
     name: "Frogger",
     description: "Cross lanes and rivers safely.",
-    tokenReward: 85,
-    status: "scaffolded",
-    backingType: "scaffolded",
-    component: FroggerGame,
-    portalId: "frogger",
-    devNote:
-      "Scaffolded. Source minigame id `frogger` is known; local source file in Sunflower-Land was not verified. Implement as target-native lane-crossing game (Path A) or confirm portal hosting (Path B).",
+    tokenReward: 1,
+    status: "available",
+    backingType: "local",
+    component: withArcadeProps(FroggerGame),
   },
 ];
 
