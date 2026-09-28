@@ -77,10 +77,21 @@ export function useRewardRun({
     setError(null);
 
     if (freeAvailable) {
-      portalService.send({
+      // The confirmation is what *spends* the run: it opens the free run
+      // (recording the attempt server-side) or burns a Play Ticket. Its verdict
+      // has to be honoured — starting the run anyway after a refusal would open
+      // a reward run that cost nothing, which is exactly the hole this call
+      // exists to close.
+      const result = portalService.send({
         type: "arcadeMinigame.rewardRunConfirmed",
         name: minigame,
       });
+
+      if (!result.ok) {
+        setError(result.error);
+        return;
+      }
+
       startRewardRun();
       return;
     }
