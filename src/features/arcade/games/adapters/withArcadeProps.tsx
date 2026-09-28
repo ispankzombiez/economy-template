@@ -170,6 +170,13 @@ export function withArcadeProps(
      * grant invents a token the server may never grant, and the UI flips to "free
      * run" before being corrected. Only the server's answer may create this
      * entitlement, so the grant posts without a local apply.
+     *
+     * **A 24h cooldown is what actually stops a re-grant.** `dailyCap: 1` cannot
+     * be relied on for that, because it reads the ledger above. The grant instead
+     * carries `cooldownSeconds: 86400`, which the engine tracks in
+     * `rules[actionId].ranAt` — a *separate* persisted field that, unlike
+     * `dailyMinted`, is preserved when an action response omits it. So the gate
+     * holds whether the mint ledger is populated or not.
      */
     const grantAttemptedRef = useRef(false);
     useEffect(() => {

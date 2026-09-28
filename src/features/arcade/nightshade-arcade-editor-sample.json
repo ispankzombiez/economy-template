@@ -827,7 +827,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Blackjack": {
       "type": "custom",
@@ -838,7 +839,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Gofish": {
       "type": "custom",
@@ -849,7 +851,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Uno": {
       "type": "custom",
@@ -860,7 +863,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Solitaire": {
       "type": "custom",
@@ -871,7 +875,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-GoblinInvaders": {
       "type": "custom",
@@ -882,7 +887,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Tetris": {
       "type": "custom",
@@ -893,7 +899,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-BarleyBreaker": {
       "type": "custom",
@@ -904,7 +911,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-PacMan": {
       "type": "custom",
@@ -915,7 +923,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Frogger": {
       "type": "custom",
@@ -926,7 +935,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Grant-Free-Run-Arcade": {
       "type": "custom",
@@ -937,7 +947,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     }
   }
 }

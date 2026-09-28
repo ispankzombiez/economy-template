@@ -210,20 +210,37 @@ export const FREE_RUN_GRANT_ACTION_PREFIX = "Grant-Free-Run-";
  *
  * | step                | action                        | effect                              |
  * | ------------------- | ----------------------------- | ----------------------------------- |
- * | first visit to a cab | `Grant-Free-Run-<Cabinet>`    | mints 1 token, `dailyCap: 1`         |
+ * | first visit to a cab | `Grant-Free-Run-<Cabinet>`    | mints 1 token, `cooldownSeconds: 86400` |
  * | free run starts     | `Start-Free-Run-<Cabinet>`    | **burns 1 token**, mints 1 voucher   |
  * | ticket run starts   | `Start-Ticket-Run`            | burns 1 Play Ticket, mints a voucher |
  * | win                 | `Claim-Raven-Coin`            | burns the voucher, mints the coin   |
  * | loss / exit / close | `Void-Reward-Attempt`         | burns the voucher                   |
  *
  * The burn is the whole enforcement. Once a cabinet's token is gone it cannot be
- * re-minted today — the grant's `dailyCap: 1` refuses — so **absence is the
- * signal that the free run is spent**, and the outcome of the run never enters
- * into it. A lost or abandoned run cannot refund the attempt, because the token
- * was already destroyed before the first card was dealt.
+ * re-minted today — the grant's cooldown refuses — so **absence is the signal
+ * that the free run is spent**, and the outcome of the run never enters into it.
+ * A lost or abandoned run cannot refund the attempt, because the token was
+ * already destroyed before the first card was dealt.
  *
  * The gate is therefore `balances[tokenKey] > 0`: a plain balance read from the
  * session, with no key format to get wrong and no ledger to merge.
+ *
+ * ## Why a cooldown and not `dailyCap`
+ *
+ * The grant originally carried `dailyCap: 1`, which does not work. `dailyCap` is
+ * read from `playerEconomy.dailyMinted`, and on a live session that ledger can be
+ * absent or empty — measured on the deployed build, mid-session:
+ *
+ * ```
+ * balances:    { "0": 13, "2": 1520, "3": 1, "4": 1, "15": 1 }
+ * dailyMinted: {}
+ * ```
+ *
+ * With an empty ledger the engine computes `used = 0` for every capped mint, so
+ * the cap never engages and a re-grant is allowed every time. `cooldownSeconds`
+ * is tracked in `rules[actionId].ranAt` instead — a separate persisted field that,
+ * unlike `dailyMinted`, is carried forward when an action response omits it — so
+ * 24 hours of cooldown holds whether or not the mint ledger is populated.
  *
  * Grants are **lazy** — one request, on first visit to a cabinet, rather than ten
  * at boot. A refused grant is not an error; it just means the token was already
