@@ -1,6 +1,6 @@
 # The Nightshade Arcade
 
-The Nightshade Arcade is a minigame hub where players earn **NIGHT** tokens and redeem them for prizes.
+The Nightshade Arcade is a minigame hub where players earn **Raven** tokens and redeem them for prizes.
 
 This repository starts from the economy-template and now includes:
 
