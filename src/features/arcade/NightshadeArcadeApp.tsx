@@ -4,7 +4,7 @@ import { getGameEntry, GAME_REGISTRY } from "./games/registry";
 import { NightshadeArcadePhaser } from "./NightshadeArcadePhaser";
 import { minigamesEventEmitter } from "./lib/minigamesEvents";
 import { nightshadeArcadeEvents } from "./lib/nightshadeArcadeEvents";
-import { useMinigameSession, resolveVipAccess } from "lib/portal";
+import { useMinigameSession, useVipAccess } from "lib/portal";
 import { submitScore } from "lib/portal/api";
 import { getMinigamesApiUrl } from "lib/portal/url";
 import {
@@ -23,28 +23,11 @@ import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
 
 export const NightshadeArcadeApp: React.FC = () => {
-  const {
-    jwt,
-    farm,
-    actions,
-    playerData,
-    playerEconomy,
-    economyMeta,
-    dispatchAction,
-  } = useMinigameSession();
-  // Same signal the cabinets get: `farm.vip.expiresAt` from the player economies
-  // session, which is also where the name and FLOWER come from. The portal
-  // profile is legacy and is CORS-blocked for this origin, so it only serves as
-  // a fallback. See `lib/portal/vip.ts`.
-  const isVip = useMemo(
-    () =>
-      resolveVipAccess({
-        hasSession: !!jwt,
-        sessionFarm: farm,
-        portalProfile: playerData?.portalProfile,
-      }),
-    [jwt, farm, playerData?.portalProfile],
-  );
+  const { jwt, actions, playerEconomy, economyMeta, dispatchAction } =
+    useMinigameSession();
+  // Session first, Community API as a fallback: `farm.vip.expiresAt` is the only
+  // signal. See `lib/portal/vip.ts` and `lib/portal/communityVip.ts`.
+  const isVip = useVipAccess();
   const [tokenBalance, setTokenBalance] = useState(0);
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
   const [showShopModal, setShowShopModal] = useState(false);

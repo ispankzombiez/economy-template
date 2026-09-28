@@ -1,7 +1,7 @@
 import React, { useCallback, useMemo } from "react";
 import type { ComponentType } from "react";
 import type { Equipped } from "features/game/types/bumpkin";
-import { resolveVipAccess, useMinigameSession } from "lib/portal";
+import { useVipAccess, useMinigameSession } from "lib/portal";
 import type { ArcadeGameProps } from "../../types";
 import type { GameState } from "./gameTypes";
 import { ArcadePortalProvider } from "./portal";
@@ -53,7 +53,6 @@ export function withArcadeProps(
 ): ComponentType<ArcadeGameProps> {
   const ArcadeGame: React.FC<ArcadeGameProps> = ({ onBack, onWin }) => {
     const {
-      jwt,
       playerData,
       farm,
       playerEconomy,
@@ -62,19 +61,10 @@ export function withArcadeProps(
       dispatchAction,
     } = useMinigameSession();
 
-    // VIP comes from the SFL farm's `vip.expiresAt`, read from the player
-    // economies session - the same source as the name and FLOWER the HUD shows.
-    // The portal profile is only a legacy fallback; a session-less boot stays VIP
+    // VIP comes from the SFL farm's `vip.expiresAt`: the player economies session
+    // first, then the Community API as a fallback. A session-less boot stays VIP
     // so a dev session can still exercise the per-cabinet reward path.
-    const isVip = useMemo(
-      () =>
-        resolveVipAccess({
-          hasSession: !!jwt,
-          sessionFarm: farm,
-          portalProfile: playerData?.portalProfile,
-        }),
-      [jwt, farm, playerData?.portalProfile],
-    );
+    const isVip = useVipAccess();
 
     // Same source the arcade HUD shows, so the "has enough FLOWER" gate and
     // the number on screen can never disagree.

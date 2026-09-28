@@ -110,8 +110,28 @@ export function isVipFarm(
  * which is what lets {@link resolveVipAccess} prefer the session and fall back to
  * the legacy portal profile only when the session has nothing to say.
  */
-function hasVipRecord(farm: unknown): boolean {
+export function hasVipRecord(farm: unknown): boolean {
   return readVipExpiry(asRecord(farm)?.vip) !== undefined;
+}
+
+/**
+ * Is any locally-readable source able to answer the VIP question?
+ *
+ * `false` means every local source is silent, which is the cue for
+ * `useVipAccess` to try the Community API instead of treating the silence as
+ * "not VIP". Kept next to the other VIP helpers so the definition of "a usable
+ * VIP record" stays in one place.
+ */
+export function hasLocalVipSource({
+  sessionFarm,
+  portalProfile,
+}: {
+  sessionFarm?: unknown;
+  portalProfile?: unknown;
+}): boolean {
+  return (
+    hasVipRecord(sessionFarm) || hasVipRecord(asRecord(portalProfile)?.farm)
+  );
 }
 
 /**

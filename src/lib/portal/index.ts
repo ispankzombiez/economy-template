@@ -9,4 +9,5 @@ export * from "./sessionProvider";
 export * from "./minigamePortalProvider";
 export * from "./playerData";
 export * from "./vip";
+export * from "./communityVip";
 export * from "./exit";
