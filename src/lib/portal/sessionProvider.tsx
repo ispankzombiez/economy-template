@@ -31,7 +31,18 @@ import {
  * Use `collectJobId` for generator harvest (`generator.collected`), not a fake `action` id.
  */
 export type PortalEconomySyncInput =
-  | { action: string; amounts?: Record<string, number> }
+  | {
+      action: string;
+      amounts?: Record<string, number>;
+      /**
+       * Set false to skip the local rule engine and let the server's answer be
+       * the only one. Needed where a *refusal* has to be authoritative: the local
+       * engine enforces `dailyCap` from `dailyMinted`, and when the session does
+       * not carry that ledger it will happily allow a capped mint forever. An
+       * entitlement that must not be self-issued has to come from the server.
+       */
+      optimistic?: boolean;
+    }
   | { collectJobId: string };
 
 export type DispatchMinigameActionInput = PortalEconomySyncInput;
@@ -176,6 +187,38 @@ export function MinigameSessionProvider({
     (input: DispatchMinigameActionInput): DispatchMinigameActionResult => {
       setApiError(null);
       const rollback = cloneMinigameSnapshot(playerEconomy);
+
+      // Server-authoritative path: no local rule engine, so a local misjudgement
+      // (notably an absent `dailyMinted` ledger disabling `dailyCap`) cannot
+      // manufacture a balance the server never granted.
+      if ("action" in input && input.optimistic === false) {
+        if (!getMinigamesApiUrl() || !bootstrap.jwt) {
+          return {
+            ok: false,
+            error: "This action needs a live session and there isn't one.",
+          };
+        }
+        void postPlayerEconomyAction({
+          token: bootstrap.jwt,
+          action: input.action,
+          amounts: input.amounts,
+        }).then(
+          (res) => {
+            setPlayerEconomy((prev) =>
+              mergeMinigameEconomyFromApi(
+                prev,
+                authoritativePlayerEconomy(res),
+              ),
+            );
+          },
+          (err) => {
+            const message = err instanceof Error ? err.message : String(err);
+            setApiError(message);
+          },
+        );
+        return { ok: true };
+      }
+
       const optimistic = portalSyncToOptimistic(input);
       const next = applyOptimisticPortalAction(
         bootstrap.actions,
@@ -209,6 +252,7 @@ export function MinigameSessionProvider({
     [
       bootstrap.actions,
       bootstrap.economyMeta?.items,
+      bootstrap.jwt,
       playerEconomy,
       runAfterLocalEconomyCommit,
     ],

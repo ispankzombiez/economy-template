@@ -152,17 +152,24 @@ export function withArcadeProps(
      * carries `dailyCap: 1`, so being refused simply means today's token was
      * already minted and spent, which is exactly the state we want.
      *
-     * ## Why this fires once and not on every balance change
+     * ## Why this fires once, and why it is not optimistic
      *
-     * `playerEconomy` is a dependency of almost everything here and changes on
-     * *every* action, so an effect that re-asks whenever the token is missing
-     * re-asks the moment a free run **burns** it — which is precisely the moment
-     * the player must not be handed one back. Depending on the live balance
-     * re-opens the very hole the token exists to close.
+     * Two separate reasons, both learned the hard way.
      *
-     * So the grant is attempted once per cabinet mount, behind a ref, reading the
-     * balance as it was when the cabinet opened. A refusal is left to stand: it
-     * means today is spent, and re-asking would only risk handing the token back.
+     * **Once.** `playerEconomy` is a dependency of almost everything here and
+     * changes on *every* action, so an effect that re-asks whenever the token is
+     * missing re-asks the moment a free run **burns** it — precisely when the
+     * player must not be handed one back. So the attempt happens once per cabinet
+     * mount, behind a ref.
+     *
+     * **Not optimistic.** The local rule engine enforces `dailyCap` from
+     * `playerEconomy.dailyMinted`, and on a live session that ledger can be
+     * absent or empty — measured on the deployed build, a player mid-session had
+     * `dailyMinted: {}` alongside real balances. With no ledger the local engine
+     * sees `used = 0` and will happily re-allow a capped mint, so an optimistic
+     * grant invents a token the server may never grant, and the UI flips to "free
+     * run" before being corrected. Only the server's answer may create this
+     * entitlement, so the grant posts without a local apply.
      */
     const grantAttemptedRef = useRef(false);
     useEffect(() => {
@@ -198,6 +205,7 @@ export function withArcadeProps(
           tokenKey,
           amount: 1,
         }),
+        optimistic: false,
       });
       // Intentionally mount-only; see the note above.
       // eslint-disable-next-line react-hooks/exhaustive-deps
