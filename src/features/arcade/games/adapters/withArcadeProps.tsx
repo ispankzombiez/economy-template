@@ -10,9 +10,11 @@ import { RewardAttemptCleanup } from "./RewardAttemptCleanup";
 import { getTodayKey } from "../poker/session";
 import {
   buildAttemptHistory,
+  getFreeRunsOpenedToday,
   getPlayTicketBalance,
   getRavenCoinsMintedToday,
   resolveActionAmounts,
+  resolveFreeRunStartAction,
   resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
@@ -77,27 +79,42 @@ export function withArcadeProps(
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
       });
-
-      // Which daily ledger answers "have I already had a free run today?".
-      //
-      //  - **VIP** is rationed per cabinet, so count *this* cabinet's own action
-      //    (`Mint-Raven-Coin-<Cabinet>`). That is the only per-machine history
-      //    the server keeps, which is what makes the rule refresh-proof.
-      //  - **non-VIP** is rationed arcade-wide, so count the shared free action
-      //    and record it under {@link ARCADE_WIDE_ATTEMPT_SLOT}.
-      //
-      // Only the relevant one is hydrated: filling both would make
-      // `getArcadeAttemptsUsedToday` sum the two together.
-      const ledgerAction = resolveRavenCoinMintAction(
-        isVip
-          ? { actions, coinKey, variant: "machine", machine: minigame }
-          : { actions, coinKey, variant: "free" },
-      );
-      const attemptsToday = getRavenCoinsMintedToday({
-        playerEconomy,
-        actionId: ledgerAction,
-        coinKey,
+      const attemptKey = resolveRewardAttemptTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
       });
+
+      // Which daily ledger answers "have I already opened a free run today?".
+      //
+      // When the economy publishes the run-opens, the count comes from the
+      // **open** action and the voucher it minted, because that is recorded
+      // whether the run is won, lost or abandoned. Counting minted coins instead
+      // would only ever charge the player for winning, which let a run be
+      // restarted for free after a loss or a reload.
+      //
+      // Falling back to the payout ledger keeps a fork that has not published the
+      // opens working, at the old (loss-is-free) semantics.
+      const openAction = resolveFreeRunStartAction({
+        actions,
+        isVip,
+        machine: minigame,
+      });
+      const attemptsToday = openAction
+        ? getFreeRunsOpenedToday({
+            playerEconomy,
+            actionId: openAction,
+            voucherKey: attemptKey,
+          })
+        : getRavenCoinsMintedToday({
+            playerEconomy,
+            actionId: resolveRavenCoinMintAction(
+              isVip
+                ? { actions, coinKey, variant: "machine", machine: minigame }
+                : { actions, coinKey, variant: "free" },
+            ),
+            coinKey,
+          });
 
       const playTicketKey = resolvePlayTicketTokenKey({
         economyMeta,
@@ -132,6 +149,54 @@ export function withArcadeProps(
       actions,
       economyMeta,
     ]);
+
+    /**
+     * Spend a free reward run by opening it.
+     *
+     * Dispatches the run-open action, which mints the run's voucher under a
+     * `dailyCap`. That mint is what records the attempt, so it is issued when the
+     * run *starts* rather than when it is won — otherwise losing, or walking away
+     * mid-run, would cost the player nothing and the free allowance could be
+     * retried indefinitely.
+     *
+     * `dispatchAction` applies the rule engine locally first, so a `dailyCap`
+     * refusal comes back as `{ ok: false }` without a round trip and the run is
+     * never started.
+     */
+    const onStartFreeRun = useCallback<() => PortalSendResult>(() => {
+      const openAction = resolveFreeRunStartAction({
+        actions,
+        isVip,
+        machine: minigame,
+      });
+
+      // No run-opens published: the payout carries the cap instead, so there is
+      // nothing to spend here.
+      if (!openAction) return { ok: true, funding: "free" };
+
+      const attemptKey = resolveRewardAttemptTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
+      });
+      if (!attemptKey) {
+        return {
+          ok: false,
+          error:
+            "This economy has no Reward Attempt item, so a free reward run cannot be opened yet.",
+        };
+      }
+
+      return dispatchAction({
+        action: openAction,
+        amounts: resolveActionAmounts({
+          actions,
+          actionId: openAction,
+          tokenKey: attemptKey,
+          amount: 1,
+        }),
+      });
+    }, [actions, dispatchAction, economyMeta, isVip, minigame, playerEconomy]);
 
     /**
      * Open a Play-Ticket-funded reward run.
@@ -181,6 +246,7 @@ export function withArcadeProps(
         isVip={isVip}
         onWin={onWin}
         onSpendTicket={onSpendTicket}
+        onStartFreeRun={onStartFreeRun}
       >
         <RewardAttemptCleanup />
         <Original onClose={onBack} />

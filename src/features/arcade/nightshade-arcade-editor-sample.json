@@ -158,205 +158,566 @@
     "Mint-Raven-Coin": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Poker": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Blackjack": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Gofish": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Uno": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Solitaire": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-GoblinInvaders": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Tetris": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-BarleyBreaker": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-PacMan": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Mint-Raven-Coin-Frogger": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "RavenCoin": { "amount": 1, "dailyCap": 1 } }
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Start-Ticket-Run": {
       "type": "custom",
       "showInShop": false,
-      "burn": { "Play Ticket": { "amount": 1 } },
-      "mint": { "Reward Attempt": { "amount": 1 } }
+      "burn": {
+        "Play Ticket": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1
+        }
+      }
     },
     "Claim-Play-Ticket": {
       "type": "custom",
       "showInShop": false,
-      "mint": { "Play Ticket": { "min": 1, "max": 1, "dailyCap": 1 } }
+      "mint": {
+        "Play Ticket": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
     },
     "Dev-Mint-Play-Ticket": {
       "type": "custom",
       "showInShop": false,
-      "require": { "Dev Key": { "amount": 1 } },
-      "mint": { "Play Ticket": { "min": 1, "max": 10000 } }
+      "require": {
+        "Dev Key": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "Play Ticket": {
+          "min": 1,
+          "max": 10000
+        }
+      }
     },
     "Void-Reward-Attempt": {
       "type": "custom",
       "showInShop": false,
-      "burn": { "Reward Attempt": { "min": 1, "max": 1000 } }
+      "burn": {
+        "Reward Attempt": {
+          "min": 1,
+          "max": 1000
+        }
+      }
     },
     "Claim-Raven-Coin": {
       "type": "custom",
       "showInShop": false,
-      "burn": { "Reward Attempt": { "amount": 1 } },
-      "mint": { "RavenCoin": { "amount": 1 } }
+      "burn": {
+        "Reward Attempt": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "RavenCoin": {
+          "amount": 1
+        }
+      }
     },
     "buy_nightshade_ticket": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 50 } },
-      "mint": { "Nightshade Ticket": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 50
+        }
+      },
+      "mint": {
+        "Nightshade Ticket": {
+          "amount": 1
+        }
+      }
     },
     "buy_mushroom_soup": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 25 } },
-      "mint": { "Mushroom Soup": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 25
+        }
+      },
+      "mint": {
+        "Mushroom Soup": {
+          "amount": 1
+        }
+      }
     },
     "buy_pumpkin_soup": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 28 } },
-      "mint": { "Pumpkin Soup": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 28
+        }
+      },
+      "mint": {
+        "Pumpkin Soup": {
+          "amount": 1
+        }
+      }
     },
     "buy_kale_stew": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 35 } },
-      "mint": { "Kale Stew": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 35
+        }
+      },
+      "mint": {
+        "Kale Stew": {
+          "amount": 1
+        }
+      }
     },
     "buy_roasted_cauliflower": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 20 } },
-      "mint": { "Roasted Cauliflower": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 20
+        }
+      },
+      "mint": {
+        "Roasted Cauliflower": {
+          "amount": 1
+        }
+      }
     },
     "buy_blueberry_jam": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 22 } },
-      "mint": { "Blueberry Jam": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 22
+        }
+      },
+      "mint": {
+        "Blueberry Jam": {
+          "amount": 1
+        }
+      }
     },
     "buy_honey_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 80 } },
-      "mint": { "Honey Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 80
+        }
+      },
+      "mint": {
+        "Honey Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_mushroom_jacket_potatoes": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 75 } },
-      "mint": { "Mushroom Jacket Potatoes": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 75
+        }
+      },
+      "mint": {
+        "Mushroom Jacket Potatoes": {
+          "amount": 1
+        }
+      }
     },
     "buy_kale_mushroom_pie": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 90 } },
-      "mint": { "Kale & Mushroom Pie": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 90
+        }
+      },
+      "mint": {
+        "Kale & Mushroom Pie": {
+          "amount": 1
+        }
+      }
     },
     "buy_orange_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 85 } },
-      "mint": { "Orange Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 85
+        }
+      },
+      "mint": {
+        "Orange Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_sunflower_crunch": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 70 } },
-      "mint": { "Sunflower Crunch": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 70
+        }
+      },
+      "mint": {
+        "Sunflower Crunch": {
+          "amount": 1
+        }
+      }
     },
     "buy_beetroot_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 150 } },
-      "mint": { "Beetroot Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 150
+        }
+      },
+      "mint": {
+        "Beetroot Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_carrot_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 160 } },
-      "mint": { "Carrot Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 160
+        }
+      },
+      "mint": {
+        "Carrot Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_pumpkin_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 155 } },
-      "mint": { "Pumpkin Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 155
+        }
+      },
+      "mint": {
+        "Pumpkin Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_cauliflower_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 165 } },
-      "mint": { "Cauliflower Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 165
+        }
+      },
+      "mint": {
+        "Cauliflower Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_wheat_cake": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 170 } },
-      "mint": { "Wheat Cake": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 170
+        }
+      },
+      "mint": {
+        "Wheat Cake": {
+          "amount": 1
+        }
+      }
     },
     "buy_apple_juice": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 300 } },
-      "mint": { "Apple Juice": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 300
+        }
+      },
+      "mint": {
+        "Apple Juice": {
+          "amount": 1
+        }
+      }
     },
     "buy_orange_juice": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 320 } },
-      "mint": { "Orange Juice": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 320
+        }
+      },
+      "mint": {
+        "Orange Juice": {
+          "amount": 1
+        }
+      }
     },
     "buy_purple_smoothie": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 350 } },
-      "mint": { "Purple Smoothie": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 350
+        }
+      },
+      "mint": {
+        "Purple Smoothie": {
+          "amount": 1
+        }
+      }
     },
     "buy_banana_blast": {
       "type": "shop",
       "showInShop": true,
-      "burn": { "RavenCoin": { "amount": 340 } },
-      "mint": { "Banana Blast": { "amount": 1 } }
+      "burn": {
+        "RavenCoin": {
+          "amount": 340
+        }
+      },
+      "mint": {
+        "Banana Blast": {
+          "amount": 1
+        }
+      }
+    },
+    "Start-Free-Run-Poker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Blackjack": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Gofish": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Uno": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Solitaire": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-GoblinInvaders": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Tetris": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-BarleyBreaker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-PacMan": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Frogger": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Start-Free-Run-Arcade": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
     }
   }
 }

@@ -112,6 +112,15 @@ class ArcadePortalStore implements PortalService {
     error: "Play Tickets are not available in this session.",
   });
 
+  /**
+   * Spends the free allowance by opening the run. Swapped in by the provider.
+   *
+   * Called *before* the run starts, so the attempt is recorded server-side
+   * whether or not the player goes on to win. Without it a lost or abandoned run
+   * would cost nothing and could be restarted indefinitely.
+   */
+  private onStartFreeRun: () => PortalSendResult = () => ({ ok: true });
+
   /** Mirrors the provider's `isVip` so the funding decision lives in one place. */
   private isVip = false;
 
@@ -156,6 +165,10 @@ class ArcadePortalStore implements PortalService {
 
   setOnSpendTicket(onSpendTicket: () => PortalSendResult) {
     this.onSpendTicket = onSpendTicket;
+  }
+
+  setOnStartFreeRun(onStartFreeRun: () => PortalSendResult) {
+    this.onStartFreeRun = onStartFreeRun;
   }
 
   setIsVip(isVip: boolean) {
@@ -216,6 +229,12 @@ class ArcadePortalStore implements PortalService {
         this.runMachine = event.name;
 
         if (this.freeRunAvailable(event.name)) {
+          // Spend the allowance now, while the run is only being opened. The
+          // server records it, so losing or abandoning the run does not give it
+          // back — and a `dailyCap` refusal here means the run never starts.
+          const opened = this.onStartFreeRun();
+          if (!opened.ok) return opened;
+
           this.runFunding = "free";
           return { ok: true, funding: "free" };
         }
@@ -267,8 +286,13 @@ export const ArcadePortalProvider: React.FC<{
   onWin: (amount: number, meta?: RewardWinMeta) => void;
   /** Burns one Play Ticket (published as `Mint-Play-Ticket`). */
   onSpendTicket: () => PortalSendResult;
+  /**
+   * Spends the free allowance by opening the run (`Start-Free-Run-<Cabinet>`).
+   * Optional so a caller that has not adopted run-opens still mounts.
+   */
+  onStartFreeRun?: () => PortalSendResult;
   children: React.ReactNode;
-}> = ({ baseState, isVip, onWin, onSpendTicket, children }) => {
+}> = ({ baseState, isVip, onWin, onSpendTicket, onStartFreeRun, children }) => {
   const storeRef = useRef<ArcadePortalStore | null>(null);
   if (storeRef.current === null) {
     storeRef.current = new ArcadePortalStore(baseState);
@@ -282,6 +306,10 @@ export const ArcadePortalProvider: React.FC<{
   useEffect(() => {
     store.setOnSpendTicket(onSpendTicket);
   }, [store, onSpendTicket]);
+
+  useEffect(() => {
+    if (onStartFreeRun) store.setOnStartFreeRun(onStartFreeRun);
+  }, [store, onStartFreeRun]);
 
   useEffect(() => {
     store.setIsVip(isVip);

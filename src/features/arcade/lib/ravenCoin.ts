@@ -189,6 +189,111 @@ export function machineMintActionId(machine: string): string {
   return `${RAVEN_COIN_MACHINE_MINT_PREFIX}${suffix}`;
 }
 
+/** Prefix shared by every per-cabinet *free run open* action. */
+export const FREE_RUN_START_ACTION_PREFIX = "Start-Free-Run-";
+
+/**
+ * The arcade-wide free-run open action, for a **non-VIP** player's one free run
+ * a day.
+ *
+ * ## Why the free allowance is opened rather than paid
+ *
+ * The allowance used to be enforced by the *payout*: `Mint-Raven-Coin-<Cabinet>`
+ * carried `dailyCap: 1`, so a run only cost the player anything once it **won** —
+ * `dailyMinted` moves on a mint and on nothing else. A player could therefore
+ * start a reward run, lose or walk away, reload, and start another: the attempt
+ * was never recorded anywhere the server could see. The only thing that consumed
+ * it was the portal store's in-memory `localGames`, which is discarded on reload
+ * and on switching cabinets.
+ *
+ * That also made free runs strictly better than paid ones, since
+ * {@link TICKET_RUN_START_ACTION} burns a ticket when the run *starts* — a lost
+ * paid run costs a ticket, a lost free run costs nothing.
+ *
+ * So the attempt is now spent when the run **opens**, by an action that mints the
+ * run's voucher. The mint lands in `dailyMinted` whatever happens next, which is
+ * what makes the attempt stick:
+ *
+ * | step                | action                                | effect                        |
+ * | ------------------- | ------------------------------------- | ----------------------------- |
+ * | free run opens      | `Start-Free-Run-<Cabinet>` (or below) | mints 1 voucher, `dailyCap: 1` |
+ * | ticket run opens    | `Start-Ticket-Run`                    | burns 1 ticket, mints voucher  |
+ * | win                 | `Claim-Raven-Coin`                    | burns voucher, mints the coin |
+ * | loss / exit / close | `Void-Reward-Attempt`                 | burns voucher                 |
+ *
+ * A lost run leaves the attempt spent, because what the ledger recorded was the
+ * *open*. The per-cabinet `dailyCap` moves from the payout to the open, and the
+ * cabinet still has to be part of the action id for the same reason as before:
+ * `dailyMinted` is the only persisted per-day counter the API exposes, and it is
+ * keyed `<actionId>|<tokenKey>`.
+ *
+ * | cabinet           | free run open                        |
+ * | ----------------- | ------------------------------------ |
+ * | `poker`           | `Start-Free-Run-Poker`               |
+ * | `blackjack`       | `Start-Free-Run-Blackjack`           |
+ * | `gofish`          | `Start-Free-Run-Gofish`              |
+ * | `uno`             | `Start-Free-Run-Uno`                 |
+ * | `solitaire`       | `Start-Free-Run-Solitaire`           |
+ * | `goblin-invaders` | `Start-Free-Run-GoblinInvaders`      |
+ * | `tetris`          | `Start-Free-Run-Tetris`              |
+ * | `barley-breaker`  | `Start-Free-Run-BarleyBreaker`       |
+ * | `pac-man`         | `Start-Free-Run-PacMan`              |
+ * | `frogger`         | `Start-Free-Run-Frogger`             |
+ *
+ * **Adding a cabinet:** register it in `GAME_REGISTRY` and publish the matching
+ * open action, exactly as with the per-cabinet mints.
+ */
+export function freeRunStartActionId(machine: string): string {
+  const suffix = String(machine)
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+
+  return `${FREE_RUN_START_ACTION_PREFIX}${suffix}`;
+}
+
+/**
+ * The arcade-wide free run a **non-VIP** player gets: one per day, any machine.
+ *
+ * Published as `{ type: "custom", showInShop: false, mint: { <voucher>: { amount: 1, dailyCap: 1 } } }`.
+ */
+export const FREE_RUN_START_ARCADE_ACTION = "Start-Free-Run-Arcade";
+
+/**
+ * The action that spends a free reward run, or `null` if none is published.
+ *
+ * VIP are rationed per cabinet, so they get the per-cabinet open; a non-VIP is
+ * rationed arcade-wide, so they get the shared one. Returning `null` is the
+ * signal that this economy has not adopted run-opens, and the caller must fall
+ * back to the older "the payout carries the cap" behaviour rather than blocking
+ * the player.
+ */
+export function resolveFreeRunStartAction({
+  actions,
+  isVip,
+  machine,
+}: {
+  actions?: Record<string, unknown>;
+  isVip: boolean;
+  machine?: string;
+}): string | null {
+  const list = actions ?? {};
+  if (isVip && machine) {
+    const perMachine = freeRunStartActionId(machine);
+    if (perMachine in list) return perMachine;
+  }
+  if (FREE_RUN_START_ARCADE_ACTION in list) return FREE_RUN_START_ARCADE_ACTION;
+  return null;
+}
+
+/** True once this economy spends free attempts by opening a run. */
+export function supportsFreeRunOpens(
+  actions?: Record<string, unknown>,
+): boolean {
+  return resolveFreeRunStartAction({ actions, isVip: false }) !== null;
+}
+
 /**
  * Burns one Play Ticket to open a reward run past the free daily allowance.
  *
@@ -373,17 +478,30 @@ export function resolveRavenCoinMintAction({
   coinKey,
   variant = "free",
   machine,
+  voucherKey,
 }: {
   actions?: Record<string, unknown>;
   coinKey?: string;
   variant?: "free" | "machine" | "ticket";
   /** Registry id of the cabinet, required for `variant: "machine"`. */
   machine?: string;
+  /**
+   * Set when the run was opened against a voucher. The payout then has to burn
+   * that voucher — which is what makes a *free* run cost anything, since the
+   * attempt was spent by the open rather than by the payout.
+   */
+  voucherKey?: string;
 }): string | null {
   const list: [string, AnyAction][] = Object.entries(
     (actions ?? {}) as Record<string, AnyAction>,
   );
   if (!list.length) return null;
+
+  // A run opened against a voucher is paid by destroying it, whatever funded
+  // it. `Claim-Raven-Coin` is uncapped by design now: the cap lives on the open.
+  if (voucherKey && list.some(([id]) => id === REWARD_ATTEMPT_CLAIM_ACTION)) {
+    return REWARD_ATTEMPT_CLAIM_ACTION;
+  }
 
   // An explicitly published id always wins, so a fork can rename freely.
   if (variant === "machine" && machine) {
@@ -561,6 +679,32 @@ export function getRavenCoinsMintedToday({
   }
 
   return 0;
+}
+
+/**
+ * Free reward runs already opened today, straight from the server's ledger.
+ *
+ * The same read as {@link getRavenCoinsMintedToday}, pointed at the *open* action
+ * and the voucher rather than at the payout and the coin. The distinction is the
+ * whole point: the open is recorded whether the run is won, lost or abandoned, so
+ * this count survives losing, which a count of minted coins never could.
+ */
+export function getFreeRunsOpenedToday({
+  playerEconomy,
+  actionId,
+  voucherKey,
+}: {
+  playerEconomy?: MinigameSessionResponse["playerEconomy"];
+  /** The run-open action, or `null` when the economy has none published. */
+  actionId: string | null;
+  voucherKey: string | undefined;
+}): number {
+  if (!voucherKey) return 0;
+  return getRavenCoinsMintedToday({
+    playerEconomy,
+    actionId,
+    coinKey: voucherKey,
+  });
 }
 
 /**

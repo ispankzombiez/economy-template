@@ -13,6 +13,7 @@ import {
   resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
+  resolveRewardAttemptTokenKey,
 } from "./lib/ravenCoin";
 import { resolveDevAccess } from "./lib/devAccess";
 import type { RewardWinMeta } from "./games/adapters/portal";
@@ -98,11 +99,23 @@ export const NightshadeArcadeApp: React.FC = () => {
     const variant =
       meta?.fundedBy === "ticket" ? "ticket" : vip ? "machine" : "free";
 
+    // When the economy spends free attempts by *opening* a run, both a free and
+    // a ticket-funded run are paid the same way — by destroying the voucher the
+    // open minted. That is what makes a free run cost its attempt: the attempt
+    // was spent at the open, so the payout no longer carries the cap and is free
+    // to be uncapped.
+    const voucherKey = resolveRewardAttemptTokenKey({
+      economyMeta,
+      items: playerEconomy?.items,
+      balances: playerEconomy?.balances,
+    });
+
     const mintAction = resolveRavenCoinMintAction({
       actions,
       coinKey,
       variant,
       machine: meta?.machine,
+      voucherKey,
     });
     const amounts = resolveActionAmounts({
       actions,
