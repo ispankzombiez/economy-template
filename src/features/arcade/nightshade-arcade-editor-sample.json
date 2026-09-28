@@ -6,6 +6,61 @@
     "rules": "Every purchase burns RavenCoins and mints the item. Attempts are limited per day; practice mode is always free."
   },
   "items": {
+    "555": {
+      "name": "Free Run Token - Poker",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 555
+    },
+    "556": {
+      "name": "Free Run Token - Blackjack",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 556
+    },
+    "557": {
+      "name": "Free Run Token - Gofish",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 557
+    },
+    "558": {
+      "name": "Free Run Token - Uno",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 558
+    },
+    "559": {
+      "name": "Free Run Token - Solitaire",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 559
+    },
+    "560": {
+      "name": "Free Run Token - GoblinInvaders",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 560
+    },
+    "561": {
+      "name": "Free Run Token - Tetris",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 561
+    },
+    "562": {
+      "name": "Free Run Token - BarleyBreaker",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 562
+    },
+    "563": {
+      "name": "Free Run Token - PacMan",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 563
+    },
+    "564": {
+      "name": "Free Run Token - Frogger",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 564
+    },
+    "565": {
+      "name": "Free Run Token - Arcade",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 565
+    },
     "RavenCoin": {
       "name": "RavenCoin",
       "description": "The Nightshade Arcade currency. Earned by playing cabinets.",
@@ -612,109 +667,274 @@
     "Start-Free-Run-Poker": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "555": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Blackjack": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "556": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Gofish": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "557": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Uno": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "558": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Solitaire": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "559": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-GoblinInvaders": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "560": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Tetris": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "561": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-BarleyBreaker": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "562": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-PacMan": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "563": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Frogger": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "564": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
-          "dailyCap": 1
+          "amount": 1
         }
       }
     },
     "Start-Free-Run-Arcade": {
       "type": "custom",
       "showInShop": false,
+      "burn": {
+        "565": {
+          "amount": 1
+        }
+      },
       "mint": {
         "Reward Attempt": {
-          "amount": 1,
+          "amount": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Poker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "555": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Blackjack": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "556": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Gofish": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "557": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Uno": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "558": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Solitaire": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "559": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-GoblinInvaders": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "560": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Tetris": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "561": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-BarleyBreaker": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "562": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-PacMan": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "563": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Frogger": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "564": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Grant-Free-Run-Arcade": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "565": {
+          "min": 1,
+          "max": 1,
           "dailyCap": 1
         }
       }

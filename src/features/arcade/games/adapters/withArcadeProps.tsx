@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo } from "react";
 import type { ComponentType } from "react";
 import type { Equipped } from "features/game/types/bumpkin";
 import { useVipAccess, useMinigameSession } from "lib/portal";
@@ -10,11 +10,13 @@ import { RewardAttemptCleanup } from "./RewardAttemptCleanup";
 import { getTodayKey } from "../poker/session";
 import {
   buildAttemptHistory,
-  getFreeRunsOpenedToday,
+  getFreeRunTokenBalance,
   getPlayTicketBalance,
   getRavenCoinsMintedToday,
   resolveActionAmounts,
+  resolveFreeRunGrantAction,
   resolveFreeRunStartAction,
+  resolveFreeRunTokenKey,
   resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
@@ -55,6 +57,7 @@ export function withArcadeProps(
 ): ComponentType<ArcadeGameProps> {
   const ArcadeGame: React.FC<ArcadeGameProps> = ({ onBack, onWin }) => {
     const {
+      jwt,
       playerData,
       farm,
       playerEconomy,
@@ -79,33 +82,34 @@ export function withArcadeProps(
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
       });
-      const attemptKey = resolveRewardAttemptTokenKey({
+      const tokenKey = resolveFreeRunTokenKey({
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
+        isVip,
+        machine: minigame,
       });
 
-      // Which daily ledger answers "have I already opened a free run today?".
+      // "Have I already used today's free run on this cabinet?" is answered by
+      // whether the player is **still holding its token**. The token is minted on
+      // first visit and burned when a free run starts, so its absence is the
+      // signal — a plain balance read, with no mint ledger to interpret and
+      // nothing that depends on how the run turned out.
       //
-      // When the economy publishes the run-opens, the count comes from the
-      // **open** action and the voucher it minted, because that is recorded
-      // whether the run is won, lost or abandoned. Counting minted coins instead
-      // would only ever charge the player for winning, which let a run be
-      // restarted for free after a loss or a reload.
-      //
-      // Falling back to the payout ledger keeps a fork that has not published the
-      // opens working, at the old (loss-is-free) semantics.
+      // `attemptsToday` is the shape the gate expects (used runs, not remaining
+      // ones), so a held token means zero used.
       const openAction = resolveFreeRunStartAction({
         actions,
         isVip,
         machine: minigame,
       });
       const attemptsToday = openAction
-        ? getFreeRunsOpenedToday({
+        ? getFreeRunTokenBalance({
             playerEconomy,
-            actionId: openAction,
-            voucherKey: attemptKey,
-          })
+            tokenKey,
+          }) > 0
+          ? 0
+          : 1
         : getRavenCoinsMintedToday({
             playerEconomy,
             actionId: resolveRavenCoinMintAction(
@@ -151,17 +155,63 @@ export function withArcadeProps(
     ]);
 
     /**
-     * Spend a free reward run by opening it.
+     * Mint this cabinet's free-run token, on first visit.
      *
-     * Dispatches the run-open action, which mints the run's voucher under a
-     * `dailyCap`. That mint is what records the attempt, so it is issued when the
-     * run *starts* rather than when it is won — otherwise losing, or walking away
-     * mid-run, would cost the player nothing and the free allowance could be
-     * retried indefinitely.
+     * Lazy rather than at boot: one request instead of ten, and it happens where
+     * a failure would be visible. A refusal is **not** an error — the grant
+     * carries `dailyCap: 1`, so being refused simply means today's token was
+     * already minted and spent, which is exactly the state we want.
+     */
+    useEffect(() => {
+      if (!jwt) return;
+      const grantAction = resolveFreeRunGrantAction({
+        actions,
+        isVip,
+        machine: minigame,
+      });
+      if (!grantAction) return;
+
+      const tokenKey = resolveFreeRunTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
+        isVip,
+        machine: minigame,
+      });
+      if (!tokenKey) return;
+      if (getFreeRunTokenBalance({ playerEconomy, tokenKey }) > 0) return;
+
+      // Deliberately not awaited and not surfaced: a refusal is the expected
+      // "already used today" answer, not a failure to report.
+      dispatchAction({
+        action: grantAction,
+        amounts: resolveActionAmounts({
+          actions,
+          actionId: grantAction,
+          tokenKey,
+          amount: 1,
+        }),
+      });
+    }, [
+      jwt,
+      actions,
+      dispatchAction,
+      economyMeta,
+      isVip,
+      minigame,
+      playerEconomy,
+    ]);
+
+    /**
+     * Spend a free reward run by burning its token.
      *
-     * `dispatchAction` applies the rule engine locally first, so a `dailyCap`
-     * refusal comes back as `{ ok: false }` without a round trip and the run is
-     * never started.
+     * `Start-Free-Run-<Cabinet>` burns the token and mints the run's voucher in
+     * one atomic request. The burn happens when the run *starts*, so the outcome
+     * cannot give the attempt back: a loss, a walk-out mid-run or a refresh all
+     * leave the cabinet charging a Play Ticket for the rest of the day.
+     *
+     * `dispatchAction` runs the rule engine locally first, so a refusal comes
+     * back as `{ ok: false }` without a round trip and the run never starts.
      */
     const onStartFreeRun = useCallback<() => PortalSendResult>(() => {
       const openAction = resolveFreeRunStartAction({
@@ -174,16 +224,23 @@ export function withArcadeProps(
       // nothing to spend here.
       if (!openAction) return { ok: true, funding: "free" };
 
+      const tokenKey = resolveFreeRunTokenKey({
+        economyMeta,
+        items: playerEconomy?.items,
+        balances: playerEconomy?.balances,
+        isVip,
+        machine: minigame,
+      });
       const attemptKey = resolveRewardAttemptTokenKey({
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
       });
-      if (!attemptKey) {
+      if (!tokenKey || !attemptKey) {
         return {
           ok: false,
           error:
-            "This economy has no Reward Attempt item, so a free reward run cannot be opened yet.",
+            "This economy has no Free Run Token item, so a free reward run cannot be opened yet.",
         };
       }
 
@@ -192,7 +249,7 @@ export function withArcadeProps(
         amounts: resolveActionAmounts({
           actions,
           actionId: openAction,
-          tokenKey: attemptKey,
+          tokenKey,
           amount: 1,
         }),
       });

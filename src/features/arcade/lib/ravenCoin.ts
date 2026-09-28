@@ -192,56 +192,59 @@ export function machineMintActionId(machine: string): string {
 /** Prefix shared by every per-cabinet *free run open* action. */
 export const FREE_RUN_START_ACTION_PREFIX = "Start-Free-Run-";
 
+/** Prefix shared by every per-cabinet free-run **token grant** action. */
+export const FREE_RUN_GRANT_ACTION_PREFIX = "Grant-Free-Run-";
+
 /**
- * The arcade-wide free-run open action, for a **non-VIP** player's one free run
- * a day.
+ * ## The free allowance is a token that gets burned, not a number in a ledger
  *
- * ## Why the free allowance is opened rather than paid
+ * Two earlier attempts both read the free allowance out of
+ * `playerEconomy.dailyMinted`, and both were fragile: the ledger is keyed
+ * `<actionId>|<tokenKey>`, it has to survive a merge with the action response,
+ * and it only ever records *mints*. Reading a mint ledger to answer "has this
+ * player used today's free run yet?" is asking it a question it cannot answer
+ * about a run that was lost.
  *
- * The allowance used to be enforced by the *payout*: `Mint-Raven-Coin-<Cabinet>`
- * carried `dailyCap: 1`, so a run only cost the player anything once it **won** —
- * `dailyMinted` moves on a mint and on nothing else. A player could therefore
- * start a reward run, lose or walk away, reload, and start another: the attempt
- * was never recorded anywhere the server could see. The only thing that consumed
- * it was the portal store's in-memory `localGames`, which is discarded on reload
- * and on switching cabinets.
+ * So the entitlement is now an actual **balance**: one `Free Run Token` per
+ * cabinet, minted on first visit and burned when a free run starts.
  *
- * That also made free runs strictly better than paid ones, since
- * {@link TICKET_RUN_START_ACTION} burns a ticket when the run *starts* — a lost
- * paid run costs a ticket, a lost free run costs nothing.
+ * | step                | action                        | effect                              |
+ * | ------------------- | ----------------------------- | ----------------------------------- |
+ * | first visit to a cab | `Grant-Free-Run-<Cabinet>`    | mints 1 token, `dailyCap: 1`         |
+ * | free run starts     | `Start-Free-Run-<Cabinet>`    | **burns 1 token**, mints 1 voucher   |
+ * | ticket run starts   | `Start-Ticket-Run`            | burns 1 Play Ticket, mints a voucher |
+ * | win                 | `Claim-Raven-Coin`            | burns the voucher, mints the coin   |
+ * | loss / exit / close | `Void-Reward-Attempt`         | burns the voucher                   |
  *
- * So the attempt is now spent when the run **opens**, by an action that mints the
- * run's voucher. The mint lands in `dailyMinted` whatever happens next, which is
- * what makes the attempt stick:
+ * The burn is the whole enforcement. Once a cabinet's token is gone it cannot be
+ * re-minted today — the grant's `dailyCap: 1` refuses — so **absence is the
+ * signal that the free run is spent**, and the outcome of the run never enters
+ * into it. A lost or abandoned run cannot refund the attempt, because the token
+ * was already destroyed before the first card was dealt.
  *
- * | step                | action                                | effect                        |
- * | ------------------- | ------------------------------------- | ----------------------------- |
- * | free run opens      | `Start-Free-Run-<Cabinet>` (or below) | mints 1 voucher, `dailyCap: 1` |
- * | ticket run opens    | `Start-Ticket-Run`                    | burns 1 ticket, mints voucher  |
- * | win                 | `Claim-Raven-Coin`                    | burns voucher, mints the coin |
- * | loss / exit / close | `Void-Reward-Attempt`                 | burns voucher                 |
+ * The gate is therefore `balances[tokenKey] > 0`: a plain balance read from the
+ * session, with no key format to get wrong and no ledger to merge.
  *
- * A lost run leaves the attempt spent, because what the ledger recorded was the
- * *open*. The per-cabinet `dailyCap` moves from the payout to the open, and the
- * cabinet still has to be part of the action id for the same reason as before:
- * `dailyMinted` is the only persisted per-day counter the API exposes, and it is
- * keyed `<actionId>|<tokenKey>`.
+ * Grants are **lazy** — one request, on first visit to a cabinet, rather than ten
+ * at boot. A refused grant is not an error; it just means the token was already
+ * spent today.
  *
- * | cabinet           | free run open                        |
- * | ----------------- | ------------------------------------ |
- * | `poker`           | `Start-Free-Run-Poker`               |
- * | `blackjack`       | `Start-Free-Run-Blackjack`           |
- * | `gofish`          | `Start-Free-Run-Gofish`              |
- * | `uno`             | `Start-Free-Run-Uno`                 |
- * | `solitaire`       | `Start-Free-Run-Solitaire`           |
- * | `goblin-invaders` | `Start-Free-Run-GoblinInvaders`      |
- * | `tetris`          | `Start-Free-Run-Tetris`              |
- * | `barley-breaker`  | `Start-Free-Run-BarleyBreaker`       |
- * | `pac-man`         | `Start-Free-Run-PacMan`              |
- * | `frogger`         | `Start-Free-Run-Frogger`             |
+ * | cabinet           | token item                     | grant / open                    |
+ * | ----------------- | ------------------------------ | ------------------------------- |
+ * | `poker`           | `Free Run Token - Poker`        | `Grant-…` / `Start-…-Poker`     |
+ * | `blackjack`       | `Free Run Token - Blackjack`    | … `Blackjack`                   |
+ * | `gofish`          | `Free Run Token - Gofish`       | … `Gofish`                      |
+ * | `uno`             | `Free Run Token - Uno`          | … `Uno`                         |
+ * | `solitaire`       | `Free Run Token - Solitaire`    | … `Solitaire`                   |
+ * | `goblin-invaders` | `Free Run Token - GoblinInvaders` | … `GoblinInvaders`            |
+ * | `tetris`          | `Free Run Token - Tetris`       | … `Tetris`                      |
+ * | `barley-breaker`  | `Free Run Token - BarleyBreaker` | … `BarleyBreaker`              |
+ * | `pac-man`         | `Free Run Token - PacMan`       | … `PacMan`                      |
+ * | `frogger`         | `Free Run Token - Frogger`      | … `Frogger`                     |
+ * | *(non-VIP)*       | `Free Run Token - Arcade`       | … `Arcade`                      |
  *
- * **Adding a cabinet:** register it in `GAME_REGISTRY` and publish the matching
- * open action, exactly as with the per-cabinet mints.
+ * **Adding a cabinet:** register it in `GAME_REGISTRY`, then publish the token
+ * item plus its grant and open actions.
  */
 export function freeRunStartActionId(machine: string): string {
   const suffix = String(machine)
@@ -253,21 +256,61 @@ export function freeRunStartActionId(machine: string): string {
   return `${FREE_RUN_START_ACTION_PREFIX}${suffix}`;
 }
 
+/** The grant action that mints a cabinet's free-run token. */
+export function freeRunGrantActionId(machine: string): string {
+  const suffix = String(machine)
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+
+  return `${FREE_RUN_GRANT_ACTION_PREFIX}${suffix}`;
+}
+
+/** Cabinet suffix shared by the action ids and the token item names. */
+function machineSuffix(machine: string): string {
+  return String(machine)
+    .split(/[^a-z0-9]+/i)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join("");
+}
+
+/**
+ * The item name carrying a cabinet's free-run token.
+ *
+ * The economy has no "hidden item" flag, so the name is deliberately plain: it
+ * appears in no arcade surface (the HUD renders the coin and Play Tickets by
+ * name, and every action sets `showInShop: false`), but the portal-side economy
+ * dashboard may still list the item, so it should not read as a collectable.
+ */
+export function freeRunTokenItemName(machine?: string): string {
+  return machine
+    ? `Free Run Token - ${machineSuffix(machine)}`
+    : "Free Run Token - Arcade";
+}
+
+/** Item names that are free-run tokens, for {@link resolveFreeRunTokenKey}. */
+const FREE_RUN_TOKEN_NAME = /^free\s*run\s*tokens?\s*-\s*(.+)$/i;
+
 /**
  * The arcade-wide free run a **non-VIP** player gets: one per day, any machine.
  *
- * Published as `{ type: "custom", showInShop: false, mint: { <voucher>: { amount: 1, dailyCap: 1 } } }`.
+ * Published as
+ * `{ type: "custom", showInShop: false, burn: { <arcadeToken>: { amount: 1 } }, mint: { <voucher>: { amount: 1 } } }`.
  */
 export const FREE_RUN_START_ARCADE_ACTION = "Start-Free-Run-Arcade";
 
+/** The arcade-wide grant, for a non-VIP's single daily token. */
+export const FREE_RUN_GRANT_ARCADE_ACTION = "Grant-Free-Run-Arcade";
+
 /**
- * The action that spends a free reward run, or `null` if none is published.
+ * The action that **spends** a free reward run, or `null` if none is published.
  *
- * VIP are rationed per cabinet, so they get the per-cabinet open; a non-VIP is
- * rationed arcade-wide, so they get the shared one. Returning `null` is the
- * signal that this economy has not adopted run-opens, and the caller must fall
- * back to the older "the payout carries the cap" behaviour rather than blocking
- * the player.
+ * VIP are rationed per cabinet, so they get the per-cabinet action; a non-VIP is
+ * rationed arcade-wide, so they get the shared one. `null` means this economy has
+ * not adopted the tokens, and the caller falls back to the older "the payout
+ * carries the cap" behaviour rather than blocking the player.
  */
 export function resolveFreeRunStartAction({
   actions,
@@ -287,11 +330,86 @@ export function resolveFreeRunStartAction({
   return null;
 }
 
-/** True once this economy spends free attempts by opening a run. */
+/** The action that grants a free-run token, or `null` if none is published. */
+export function resolveFreeRunGrantAction({
+  actions,
+  isVip,
+  machine,
+}: {
+  actions?: Record<string, unknown>;
+  isVip: boolean;
+  machine?: string;
+}): string | null {
+  const list = actions ?? {};
+  if (isVip && machine) {
+    const perMachine = freeRunGrantActionId(machine);
+    if (perMachine in list) return perMachine;
+  }
+  if (FREE_RUN_GRANT_ARCADE_ACTION in list) return FREE_RUN_GRANT_ARCADE_ACTION;
+  return null;
+}
+
+/** True once this economy spends free attempts by burning a token. */
 export function supportsFreeRunOpens(
   actions?: Record<string, unknown>,
 ): boolean {
   return resolveFreeRunStartAction({ actions, isVip: false }) !== null;
+}
+
+/** The `playerEconomy.balances` key holding a cabinet's free-run token. */
+export function resolveFreeRunTokenKey({
+  economyMeta,
+  items,
+  balances,
+  isVip,
+  machine,
+}: {
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+  /** Required: a VIP's tokens are per cabinet, a non-VIP's is arcade-wide. */
+  isVip: boolean;
+  machine?: string;
+}): string | undefined {
+  const merged: EconomyItems = { ...items, ...economyMeta?.items };
+  const wanted = isVip && machine ? machineSuffix(machine) : "arcade";
+
+  for (const [key, item] of Object.entries(merged)) {
+    const name = item?.name;
+    if (typeof name !== "string") continue;
+    const match = FREE_RUN_TOKEN_NAME.exec(name.trim());
+    if (match && match[1].trim().toLowerCase() === wanted.toLowerCase()) {
+      return key;
+    }
+  }
+
+  // A balance under a token-shaped key still identifies itself.
+  for (const key of Object.keys(balances ?? {})) {
+    const match = FREE_RUN_TOKEN_NAME.exec(key.trim());
+    if (match && match[1].trim().toLowerCase() === wanted.toLowerCase()) {
+      return key;
+    }
+  }
+
+  return undefined;
+}
+
+/** Free-run tokens this player is currently holding for a cabinet. */
+export function getFreeRunTokenBalance({
+  playerEconomy,
+  tokenKey,
+}: {
+  playerEconomy?: Pick<
+    MinigameSessionResponse["playerEconomy"],
+    "balances"
+  > | null;
+  tokenKey: string | undefined;
+}): number {
+  if (!tokenKey) return 0;
+  const value = playerEconomy?.balances?.[tokenKey];
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : 0;
 }
 
 /**
@@ -679,32 +797,6 @@ export function getRavenCoinsMintedToday({
   }
 
   return 0;
-}
-
-/**
- * Free reward runs already opened today, straight from the server's ledger.
- *
- * The same read as {@link getRavenCoinsMintedToday}, pointed at the *open* action
- * and the voucher rather than at the payout and the coin. The distinction is the
- * whole point: the open is recorded whether the run is won, lost or abandoned, so
- * this count survives losing, which a count of minted coins never could.
- */
-export function getFreeRunsOpenedToday({
-  playerEconomy,
-  actionId,
-  voucherKey,
-}: {
-  playerEconomy?: MinigameSessionResponse["playerEconomy"];
-  /** The run-open action, or `null` when the economy has none published. */
-  actionId: string | null;
-  voucherKey: string | undefined;
-}): number {
-  if (!voucherKey) return 0;
-  return getRavenCoinsMintedToday({
-    playerEconomy,
-    actionId,
-    coinKey: voucherKey,
-  });
 }
 
 /**
