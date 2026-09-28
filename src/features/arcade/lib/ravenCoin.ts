@@ -36,6 +36,32 @@ import type {
  * This one carries `dailyCap: 1`, so it is the **free** daily reward run: the
  * server refuses a second mint on it for the day (verified live —
  * `400 Daily cap exceeded for 0 on action Mint-Raven-Coin`).
+ *
+ * ## The per-cabinet actions are not gated on VIP — a known, accepted trade-off
+ *
+ * A non-VIP player is meant to get one free run a day from *this* action, while a
+ * VIP player gets one per cabinet from the ten `Mint-Raven-Coin-<Machine>`
+ * actions. Each of those also carries `dailyCap: 1`, so the server's view is just
+ * "eleven actions, one coin each per day" — **it has no notion of VIP at all.**
+ *
+ * Every one of those ids is a plain string in the public bundle, so anyone can
+ * post `Mint-Raven-Coin-Poker` directly and be credited a coin without ever
+ * holding a VIP flag. The realistic ceiling is therefore **ten free coins a day
+ * instead of one**, for someone willing to call the endpoint with a public
+ * string. This is a property of splitting the allowance across actions, not of
+ * how VIP is detected: it is equally true whether VIP is read from the session,
+ * from the Community API, or not at all.
+ *
+ * **Nothing client-side can close it.** The arcade is a static bundle, so the
+ * player owns the runtime and any check they can read is a check they can skip —
+ * including the farm-identity cross-check in `lib/portal/communityVip.ts`, which
+ * only guarantees *our* read is of the right farm. Closing the gap needs a
+ * server-side VIP requirement on the per-cabinet mints, the same way
+ * `require` on a Dev Key item is enforced — see {@link DEV_PLAY_TICKET_MINT_ACTION}
+ * for the other accepted exposure of the same kind.
+ *
+ * The owner's decision is to keep the per-cabinet mints and harden what can be
+ * hardened, accepting the rest.
  */
 export const RAVEN_COIN_MINT_ACTION = "Mint-Raven-Coin";
 

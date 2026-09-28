@@ -112,48 +112,96 @@ export function pickFarm(body: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * Is this response about the farm we asked for?
+ * Is this response definitely about the farm we are paying?
  *
- * The `id` path parameter is overloaded: a number up to 1,000,000,000 resolves as
- * an **NFT id** and anything larger as an **account id**. A session `farmId` is an
- * account id, so the right branch is taken in practice — but if that ever changed,
- * the API would answer with a valid, entirely unrelated farm rather than an
- * error. Since this value gates coin rewards, a mismatched `id` is treated as
- * "unknown" instead of being read as another player's VIP.
+ * ## What this does and does not buy
  *
- * The check is skipped when the envelope omits `id`, since absence is not
- * evidence of a mismatch.
+ * This is an **identity check on our own read**, not an authorisation check on
+ * the player's request. It guarantees the VIP we act on belongs to the farm the
+ * portal issued a JWT for, which stops three real failure modes:
+ *
+ *  - the overloaded `id` path parameter silently resolving to another farm
+ *    (a number up to 1,000,000,000 is an **NFT id**, anything larger an
+ *    **account id**) and returning a valid, unrelated farm rather than an error;
+ *  - a stale or cached response being attributed to the wrong player;
+ *  - any future refactor that starts reading the wrong field or the wrong farm.
+ *
+ * It does **not** stop someone from calling `Mint-Raven-Coin-<Machine>` directly.
+ * Those action ids are public strings in the bundle and the server only enforces
+ * each action's own `dailyCap`, so no client-side check can close that path — see
+ * the note on `RAVEN_COIN_MINT_ACTION` in `features/arcade/lib/ravenCoin.ts`.
+ * Closing it needs a server-side VIP requirement.
+ *
+ * ## The three-way agreement
+ *
+ * `farmId` comes from a portal-signed JWT, the session's `username` comes from
+ * the economies API, and the Community API's `username` comes from the game
+ * server. Requiring all three to agree means a forged or misrouted response has
+ * to satisfy two independently-sourced values at once, rather than one.
+ *
+ * Fails closed: a response that omits the username is treated as a mismatch,
+ * because an unconfirmable identity is not a confirmed one.
  */
-function isResponseFor(body: unknown, farmId: number): boolean {
+export function isVerifiedFarmResponse({
+  body,
+  farmId,
+  expectedUsername,
+}: {
+  body: unknown;
+  farmId: number;
+  /** The session's username, when it has one. */
+  expectedUsername?: string;
+}): boolean {
   if (typeof body !== "object" || body === null) return false;
-  const id = (body as Record<string, unknown>).id;
-  if (typeof id !== "number") return true;
-  return id === farmId;
+  const envelope = body as Record<string, unknown>;
+
+  // A present-but-different account id is a mismatch. An absent one is not
+  // evidence either way, so it does not fail the check on its own.
+  if (typeof envelope.id === "number" && envelope.id !== farmId) return false;
+
+  const farm = pickFarm(body);
+  if (!farm) return false;
+
+  if (expectedUsername === undefined) return true;
+
+  const username = farm.username;
+  if (typeof username !== "string") return false;
+  // Case-insensitive and trimmed: two sources describing the same farm should
+  // agree, but one may normalise casing or whitespace. Being stricter here would
+  // only cost a real VIP their status over a cosmetic difference, while a
+  // genuinely different player still fails to match.
+  return username.trim().toLowerCase() === expectedUsername.trim().toLowerCase();
 }
 
 /** One in-flight or settled lookup per farm, so re-renders never re-request. */
-const cache = new Map<number, Promise<boolean | undefined>>();
+const cache = new Map<string, Promise<boolean | undefined>>();
 
 /**
  * Is this farm VIP, according to the Community API?
  *
  * `undefined` means "could not tell" — no key, throttled (429), unauthorised
- * (401), an unexpected shape, or blocked by CORS. Callers must treat that as
- * unknown rather than as "no".
+ * (401), an unexpected shape, a response that failed the identity check, or
+ * blocked by CORS. Callers must treat that as unknown rather than as "no".
  */
 export function fetchCommunityVip({
   farmId,
   apiKey,
+  expectedUsername,
 }: {
   farmId: number;
   apiKey?: string;
+  expectedUsername?: string;
 }): Promise<boolean | undefined> {
   const key = apiKey ?? communityApiKey();
   if (!key || !Number.isFinite(farmId) || farmId <= 0) {
     return Promise.resolve(undefined);
   }
 
-  const cached = cache.get(farmId);
+  // The username is part of the cache key: the same farm asked about under a
+  // different expected identity is a different question, and a cached pass for
+  // one must not satisfy the other.
+  const cacheKey = `${farmId}|${expectedUsername ?? ""}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
 
   // Deliberately not abortable. The result is memoised per farm, so an abort
@@ -170,7 +218,9 @@ export function fetchCommunityVip({
       // 429 = throttled. None of them mean "this player is not VIP".
       if (!response.ok) return undefined;
       const body = await response.json();
-      if (!isResponseFor(body, farmId)) return undefined;
+      if (!isVerifiedFarmResponse({ body, farmId, expectedUsername })) {
+        return undefined;
+      }
       const farm = pickFarm(body);
       return farm ? isVipFarm(farm) : undefined;
     } catch {
@@ -179,7 +229,7 @@ export function fetchCommunityVip({
     }
   })();
 
-  cache.set(farmId, pending);
+  cache.set(cacheKey, pending);
   return pending;
 }
 
@@ -196,6 +246,11 @@ export function resetCommunityVipCache(): void {
  * answers. A Community API lookup can flip it to `true` a moment later, so treat
  * a `false` immediately after boot as "not known yet" rather than "not VIP". That
  * only ever affects which mint a win dispatches, never whether a win counts.
+ *
+ * When the fallback answers, it has first agreed the farm's `username` with the
+ * session's, so the VIP acted on belongs to the farm the JWT was issued for —
+ * see {@link isVerifiedFarmResponse} for what that does and does not protect
+ * against.
  */
 export function useVipAccess(): boolean {
   const { jwt, farm, farmId, playerData } = useMinigameSession();
@@ -226,7 +281,13 @@ export function useVipAccess(): boolean {
     // Not cancellable on purpose: the lookup is memoised per farm, so aborting
     // would strand the cache. See `fetchCommunityVip`.
     let cancelled = false;
-    void fetchCommunityVip({ farmId, apiKey: key }).then((answer) => {
+    void fetchCommunityVip({
+      farmId,
+      apiKey: key,
+      // Cross-check against the session so the VIP we act on is provably the
+      // same farm the JWT was issued for. See `isVerifiedFarmResponse`.
+      expectedUsername: farm.username,
+    }).then((answer) => {
       if (!cancelled) setCommunityVip(answer);
     });
 
