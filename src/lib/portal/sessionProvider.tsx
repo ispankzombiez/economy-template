@@ -22,6 +22,7 @@ import {
   applyOptimisticPortalAction,
   cloneMinigameSnapshot,
   mergeMinigameEconomyFromApi,
+  authoritativePlayerEconomy,
   normalizeMinigameFromApi,
 } from "./runtimeHelpers";
 
@@ -71,7 +72,9 @@ export type MinigameSessionValue = {
   farm: MinigameSessionResponse["farm"];
   playerEconomy: MinigameSessionResponse["playerEconomy"];
   actions: Record<string, unknown>;
-  dispatchAction: (input: DispatchMinigameActionInput) => DispatchMinigameActionResult;
+  dispatchAction: (
+    input: DispatchMinigameActionInput,
+  ) => DispatchMinigameActionResult;
   commitLocalPlayerEconomySync: (
     input: CommitLocalPlayerEconomyInput,
   ) => boolean;
@@ -144,7 +147,7 @@ export function MinigameSessionProvider({
       void postPromise.then(
         (res) => {
           setPlayerEconomy((prev) =>
-            mergeMinigameEconomyFromApi(prev, res.playerEconomy),
+            mergeMinigameEconomyFromApi(prev, authoritativePlayerEconomy(res)),
           );
         },
         (err) => {
@@ -187,15 +190,12 @@ export function MinigameSessionProvider({
       if (!next.ok) {
         if (import.meta.env?.DEV) {
           // eslint-disable-next-line no-console
-          console.warn(
-            "[MinigameSession] dispatch failed",
-            {
-              actionId: optimistic.actionId,
-              error: next.error,
-              availableActions: Object.keys(bootstrap.actions ?? {}),
-              apiMode: !!getMinigamesApiUrl(),
-            },
-          );
+          console.warn("[MinigameSession] dispatch failed", {
+            actionId: optimistic.actionId,
+            error: next.error,
+            availableActions: Object.keys(bootstrap.actions ?? {}),
+            apiMode: !!getMinigamesApiUrl(),
+          });
         }
         return { ok: false, error: next.error };
       }
@@ -288,7 +288,10 @@ export function MinigameSessionProvider({
                     action: input.action,
                     amounts: input.amounts,
                   });
-            state = mergeMinigameEconomyFromApi(state, res.playerEconomy);
+            state = mergeMinigameEconomyFromApi(
+              state,
+              authoritativePlayerEconomy(res),
+            );
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             setPlayerEconomy(state);
@@ -300,7 +303,12 @@ export function MinigameSessionProvider({
       })();
       return lastOk;
     },
-    [bootstrap.actions, bootstrap.economyMeta?.items, bootstrap.jwt, playerEconomy],
+    [
+      bootstrap.actions,
+      bootstrap.economyMeta?.items,
+      bootstrap.jwt,
+      playerEconomy,
+    ],
   );
 
   const clearApiError = useCallback(() => setApiError(null), []);

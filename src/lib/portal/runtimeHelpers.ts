@@ -1,4 +1,4 @@
-import type { MinigameSessionResponse } from "./types";
+import type { MinigameActionResponse, MinigameSessionResponse } from "./types";
 import {
   emptyPlayerEconomyState,
   processPlayerEconomyAction,
@@ -118,9 +118,43 @@ export function normalizeMinigameFromApi(
 const RUN_SESSION_BALANCE_KEYS = ["LIVE_GAME", "ADVANCED_GAME"] as const;
 
 /**
+ * The economy to merge out of a `POST /action` response.
+ *
+ * The response carries the economy twice: a top-level `playerEconomy`, and
+ * `economy` — documented as the "full session-shaped payload after the action
+ * (same shape as GET session `data`)". The full payload is the authoritative one
+ * and is the only place `dailyMinted` is reliably populated, so prefer it and
+ * fall back to the top-level field for older/leaner responses.
+ */
+export function authoritativePlayerEconomy(
+  res: MinigameActionResponse,
+): MinigameSessionResponse["playerEconomy"] {
+  return res.economy?.playerEconomy ?? res.playerEconomy;
+}
+
+/**
  * Some portal action responses return a partial `balances` map. If `LIVE_GAME` /
  * `ADVANCED_GAME` are omitted, keep the values from `prev` so an in-progress run
  * is not cleared before GAMEOVER.
+ *
+ * ## `dailyMinted` must survive the merge
+ *
+ * `dailyMinted` is the **only** persisted record of what the player has already
+ * minted today, and the arcade's free reward-run allowance is derived from it
+ * (`getRavenCoinsMintedToday` in `features/arcade/lib/ravenCoin.ts`).
+ *
+ * `normalizeMinigameFromApi` defaults an absent `dailyMinted` to
+ * `{ utcDay: today, minted: {} }`, so taking it straight from the response — as
+ * this function used to — means an action response that omits the field **erases
+ * the player's usage history**. The optimistic apply had already counted the mint
+ * correctly; the merge then threw that count away, the free-run gate read zero,
+ * and every subsequent run looked unused. That showed up as an arcade handing out
+ * unlimited free runs and never asking for a Play Ticket.
+ *
+ * So `dailyMinted`, like `rules` and `purchaseCounts`, falls back to `prev` when
+ * the response leaves it out — with one extra condition: only while `prev` is
+ * still today's ledger. Carrying yesterday's totals forward would lock a player
+ * out of their free run until a response happened to include the field.
  */
 export function mergeMinigameEconomyFromApi(
   prev: MinigameSessionResponse["playerEconomy"],
@@ -136,9 +170,17 @@ export function mergeMinigameEconomyFromApi(
       }
     }
   }
+
+  const keepPreviousLedger =
+    raw.dailyMinted == null &&
+    prev.dailyMinted != null &&
+    next.dailyMinted != null &&
+    prev.dailyMinted.utcDay === next.dailyMinted.utcDay;
+
   return {
     ...next,
     balances,
+    dailyMinted: keepPreviousLedger ? prev.dailyMinted : next.dailyMinted,
     rules: next.rules !== undefined ? next.rules : prev.rules,
     purchaseCounts:
       next.purchaseCounts !== undefined
