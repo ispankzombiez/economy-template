@@ -14,6 +14,7 @@ import {
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
   resolveRewardAttemptTokenKey,
+  supportsFreeRunOpens,
 } from "./lib/ravenCoin";
 import { resolveDevAccess } from "./lib/devAccess";
 import type { RewardWinMeta } from "./games/adapters/portal";
@@ -99,16 +100,25 @@ export const NightshadeArcadeApp: React.FC = () => {
     const variant =
       meta?.fundedBy === "ticket" ? "ticket" : vip ? "machine" : "free";
 
-    // When the economy spends free attempts by *opening* a run, both a free and
-    // a ticket-funded run are paid the same way — by destroying the voucher the
-    // open minted. That is what makes a free run cost its attempt: the attempt
-    // was spent at the open, so the payout no longer carries the cap and is free
-    // to be uncapped.
-    const voucherKey = resolveRewardAttemptTokenKey({
-      economyMeta,
-      items: playerEconomy?.items,
-      balances: playerEconomy?.balances,
-    });
+    // A run is paid by destroying a voucher only when it was *opened* against
+    // one. A ticket run always was. A free run only is once this economy
+    // publishes the run-opens — and that has to be checked, because the
+    // Reward Attempt item exists either way (the ticket flow mints it).
+    //
+    // Getting this wrong desynchronises the ledger from the gate: paying a free
+    // win through `Claim-Raven-Coin` while the gate still counts
+    // `Mint-Raven-Coin-<Cabinet>` means the count the gate reads never moves, so
+    // the free run looks unused again after every refresh. Within one session
+    // the in-session counter hides it, which is why it only showed up on reload.
+    const voucherFunded =
+      meta?.fundedBy === "ticket" || supportsFreeRunOpens(actions);
+    const voucherKey = voucherFunded
+      ? resolveRewardAttemptTokenKey({
+          economyMeta,
+          items: playerEconomy?.items,
+          balances: playerEconomy?.balances,
+        })
+      : undefined;
 
     const mintAction = resolveRavenCoinMintAction({
       actions,
