@@ -33,6 +33,11 @@ interface ImportMetaEnv {
   readonly VITE_PORTAL_CR_ACTION_GAME_OVER_BASIC?: string;
   readonly VITE_PORTAL_CR_ACTION_START_ADVANCED?: string;
   readonly VITE_PORTAL_CR_ACTION_GAME_OVER_ADVANCED?: string;
+  /**
+   * Where the arcade reads the published VIP index from. Defaults to the
+   * `vip-data` branch of this repo on raw.githubusercontent.com.
+   */
+  readonly VITE_VIP_INDEX_URL?: string;
 }
 
 interface ImportMeta {

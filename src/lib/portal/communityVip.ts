@@ -1,50 +1,60 @@
 /**
- * VIP via the Sunflower Land **Community API** — a fallback, not the primary.
+ * VIP for the arcade, read from an index this repo publishes itself.
  *
- * ## Why this exists
+ * ## Why not call the Community API
  *
- * `farm.vip` is not in the player economies session yet, and the older portal
- * route the arcade used to read is CORS-blocked for its origin. The Community API
- * (`https://sunflower-land.com/community-docs/`) serves the same farm data, so
- * it is wired here as a third source.
+ * The obvious implementation — `GET /community/farms/{id}` with `x-api-key` —
+ * does not work from the arcade, for two reasons measured against the live host:
  *
- * ## The endpoint
+ * 1. **CORS.** `api.sunflower-land.com` echoes `Access-Control-Allow-Origin`
+ *    only for `sunflower-land.com` and `www.sunflower-land.com`. The arcade is
+ *    served from `nightshade-arcade.economies.sunflower-land.com`, so the
+ *    preflight passes (the server does allow the `x-api-key` header) and the
+ *    actual GET comes back with **no** `Access-Control-Allow-Origin` at all. The
+ *    browser then discards a response the server sent perfectly happily. The
+ *    request is not failing — the *reading* of it is.
+ * 2. **The key is a credential.** It was wired in as `VITE_SUNFLOWER_COMMUNITY_API_KEY`,
+ *    which Vite inlines into the shipped bundle, so it was readable by anyone
+ *    who opened devtools.
  *
- * `GET {base}/community/farms/{id}` with the key in `x-api-key`, base
- * `https://api.sunflower-land.com` (per the docs' own "Base URL" field). The
- * documented response is:
+ * ## What happens instead
+ *
+ * `.github/workflows/vip-index.yml` runs `scripts/build-vip-index.mjs` daily
+ * with the key held as a repository secret. It reads the Community API's nightly
+ * farm dump and publishes `vip-index.json` to the `vip-data` branch. This file
+ * fetches that over `raw.githubusercontent.com`, which answers
+ * `Access-Control-Allow-Origin: *`, so no preflight, no credential, and nothing
+ * to allow-list.
+ *
+ * The file looks like:
  *
  * ```json
- * { "farm": { ... }, "id": 121500, "nft_id": 29411,
- *   "nftId": 29411, "isBlacklisted": false, "updatedAt": "2026-08-25T03:12:44.000Z" }
+ * { "source": "2026-09-27/active.jsonl.gz", "generatedAt": 1790570000000,
+ *   "count": 17020,
+ *   "entries": [[121500, "someplayer", 32501520000000], ...] }
  * ```
  *
- * The `id` path parameter is flexible: numeric <= 1,000,000,000 resolves as an
- * **NFT id**, a larger number as an **account id**, and a `0x...` value as a
- * linked wallet address. A session `farmId` is the account id, so it takes the
- * second branch. The full farm object is the same game state a player sees when
- * visiting, which is why `farm.vip` can be read off it.
+ * ## Freshness
  *
- * Documented failure modes, all of which must resolve to "unknown" rather than
- * "not VIP": `401` (key absent/invalid, or its farm lost VIP or level 50 — a key
- * is only valid while its own farm meets the requirements), `404` (no such farm),
- * and `429` (per-IP throttle, roughly one request per 5s, doubling to 10s if
- * hammered).
+ * The dump lands nightly, so the index is up to ~24 hours old — but the stored
+ * value is `vip.expiresAt`, an **absolute timestamp**, not a boolean. A farm
+ * already VIP therefore stays correctly VIP right up to its real expiry; only a
+ * farm that became VIP since the dump waits for the next one. Blacklisted
+ * accounts are dropped when the index is built.
  *
- * ## Two hard limits, both outside this file
+ * ## What this does and does not buy
  *
- * 1. **The key is public.** It comes from a `VITE_*` variable, which Vite inlines
- *    into the shipped bundle, so every player can read it. That is an accepted
- *    trade-off — the arcade owner can rotate the key at any time — but be clear
- *    about what it means: it is a shared credential handed to every visitor, not
- *    a private dev secret, and abuse of it is attributed to the owner.
- * 2. **CORS still blocks us.** `api.sunflower-land.com` allows
- *    `sunflower-land.com` and `www.sunflower-land.com` only, and the preflight
- *    for `/community/*` returns no `Access-Control-Allow-Origin` for the
- *    arcade's host. The request below therefore fails until that origin is
- *    allow-listed. It is `x-api-key` that makes the request preflighted, and the
- *    server already allows that header, so the allow-list is the only thing
- *    standing in the way.
+ * It keeps the credential off the client and makes the answer one *we* publish
+ * rather than anything the player supplies, and the identity check below still
+ * ties the entry to the farm the JWT was issued for.
+ *
+ * It is **not** a security boundary. Anyone willing to edit their own browser
+ * can edit this too — the index is public by design (it is served from a public
+ * repo with no credential), and a signature would not help because the key to
+ * verify it ships in the same bundle they would be editing. The thing that would
+ * close the economy down is a **server-side VIP requirement** on the per-cabinet
+ * mints; see the note on `RAVEN_COIN_MINT_ACTION` in `features/arcade/lib/ravenCoin.ts`.
+ * Treat this as a rewards signal, which is all the arcade uses it for.
  *
  * ## Ordering
  *
@@ -54,190 +64,217 @@
 
 import { useEffect, useState } from "react";
 import { useMinigameSession } from "./sessionProvider";
-import { hasLocalVipSource, isVipFarm, resolveVipAccess } from "./vip";
-
-const COMMUNITY_API_BASE = "https://api.sunflower-land.com";
+import { hasLocalVipSource, resolveVipAccess } from "./vip";
 
 /**
- * The Community API key, inlined at build time.
+ * Where the published index lives.
  *
- * Absent (or blank) disables this path entirely and the arcade behaves exactly as
- * it does today.
+ * Override with `VITE_VIP_INDEX_URL` when the index is served from somewhere
+ * else (a fork, or a mirror on the arcade's own host).
  */
-export function communityApiKey(): string | undefined {
-  const key = import.meta.env.VITE_SUNFLOWER_COMMUNITY_API_KEY;
-  return typeof key === "string" && key.trim() !== "" ? key.trim() : undefined;
+export const DEFAULT_VIP_INDEX_URL =
+  "https://raw.githubusercontent.com/ispankzombiez/economy-template/vip-data/vip-index.json";
+
+/**
+ * The resolved index URL.
+ *
+ * A blank or missing override falls back to the default rather than disabling
+ * the source — an unset variable must not quietly silence VIP for everyone. To
+ * opt out, pass `indexUrl: ""` to {@link loadVipIndex} directly.
+ */
+export function vipIndexUrl(): string {
+  const override = import.meta.env.VITE_VIP_INDEX_URL;
+  if (typeof override === "string" && override.trim() !== "") return override.trim();
+  return DEFAULT_VIP_INDEX_URL;
 }
 
+/** One farm in the published index: `[account id, username, vip expiresAt]`. */
+export type VipIndexEntry = [number, string, number];
+
+/** The part of the index this file cares about. */
+export type VipIndex = {
+  source: string;
+  generatedAt: number;
+  entries: Map<number, { username: string; expiresAt: number }>;
+};
+
 /**
- * Pull the farm out of whichever shape the endpoint returned.
+ * Parse a published index, or return `undefined` if it is not one.
  *
- * `GET /community/farms/{id}` is documented as returning one farm, while the
- * list endpoint returns `{ farms: [{ id, nft_id, farm }] }`, so accept both plus
- * a bare farm rather than betting on one. Exported for tests: the exact shape is
- * the part of this path most likely to be wrong.
+ * Deliberately strict about shape and lenient about content: a truncated or
+ * hand-edited file must never look like "nobody is VIP", because the caller
+ * turns `undefined` into "could not tell" and `false` into "not VIP". An empty
+ * `entries` array *is* a valid answer, so it is accepted as such.
  */
-export function pickFarm(body: unknown): Record<string, unknown> | undefined {
+export function parseVipIndex(body: unknown): VipIndex | undefined {
   if (typeof body !== "object" || body === null) return undefined;
   const record = body as Record<string, unknown>;
+  if (!Array.isArray(record.entries)) return undefined;
 
-  const direct = record.farm;
-  if (direct && typeof direct === "object") {
-    return direct as Record<string, unknown>;
+  const entries = new Map<number, { username: string; expiresAt: number }>();
+  for (const raw of record.entries) {
+    if (!Array.isArray(raw)) return undefined;
+    const [id, username, expiresAt] = raw as [unknown, unknown, unknown];
+    if (typeof id !== "number" || !Number.isFinite(id)) return undefined;
+    if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return undefined;
+    entries.set(id, {
+      username: typeof username === "string" ? username : "",
+      expiresAt,
+    });
   }
 
-  const data = record.data;
-  if (data && typeof data === "object") {
-    const nested = (data as Record<string, unknown>).farm;
-    if (nested && typeof nested === "object") {
-      return nested as Record<string, unknown>;
-    }
-  }
-
-  const farms = record.farms;
-  if (Array.isArray(farms) && farms.length > 0) {
-    const first = farms[0];
-    if (first && typeof first === "object") {
-      const farm = (first as Record<string, unknown>).farm;
-      if (farm && typeof farm === "object")
-        return farm as Record<string, unknown>;
-    }
-  }
-
-  // A bare farm object: it is recognisable by carrying farm-shaped keys.
-  if ("vip" in record || "username" in record || "balance" in record) {
-    return record;
-  }
-  return undefined;
+  return {
+    source: typeof record.source === "string" ? record.source : "",
+    generatedAt:
+      typeof record.generatedAt === "number" ? record.generatedAt : Number.NaN,
+    entries,
+  };
 }
 
 /**
- * Is this response definitely about the farm we are paying?
+ * Is this entry about the farm we are paying?
  *
- * ## What this does and does not buy
+ * The index is keyed by account id, which is exactly what the portal JWT already
+ * authenticated, so the lookup itself is the strong half of the check. The
+ * username is the second, independent source: it comes from the dump rather than
+ * from the player, and agreeing means a misrouted or mis-keyed entry has to
+ * satisfy two separately-sourced values at once.
  *
- * This is an **identity check on our own read**, not an authorisation check on
- * the player's request. It guarantees the VIP we act on belongs to the farm the
- * portal issued a JWT for, which stops three real failure modes:
- *
- *  - the overloaded `id` path parameter silently resolving to another farm
- *    (a number up to 1,000,000,000 is an **NFT id**, anything larger an
- *    **account id**) and returning a valid, unrelated farm rather than an error;
- *  - a stale or cached response being attributed to the wrong player;
- *  - any future refactor that starts reading the wrong field or the wrong farm.
- *
- * It does **not** stop someone from calling `Mint-Raven-Coin-<Machine>` directly.
- * Those action ids are public strings in the bundle and the server only enforces
- * each action's own `dailyCap`, so no client-side check can close that path — see
- * the note on `RAVEN_COIN_MINT_ACTION` in `features/arcade/lib/ravenCoin.ts`.
- * Closing it needs a server-side VIP requirement.
- *
- * ## The three-way agreement
- *
- * `farmId` comes from a portal-signed JWT, the session's `username` comes from
- * the economies API, and the Community API's `username` comes from the game
- * server. Requiring all three to agree means a forged or misrouted response has
- * to satisfy two independently-sourced values at once, rather than one.
- *
- * Fails closed: a response that omits the username is treated as a mismatch,
- * because an unconfirmable identity is not a confirmed one.
+ * Fails closed: an entry with no username, or a session with a username the
+ * entry does not share, is "could not tell" rather than "yes". A session with no
+ * username at all cannot be checked against, and — as before — is not treated as
+ * a mismatch, because the id lookup already identified the farm.
  */
-export function isVerifiedFarmResponse({
+export function isVerifiedVipEntry({
+  entry,
+  expectedUsername,
+}: {
+  entry: { username: string };
+  expectedUsername?: string;
+}): boolean {
+  if (expectedUsername === undefined) return true;
+
+  const username = entry.username;
+  if (typeof username !== "string" || username.trim() === "") return false;
+  // Case-insensitive and trimmed: two sources describing the same farm should
+  // agree even if one normalises casing. Being stricter would only cost a real
+  // VIP their status over a cosmetic difference, while a genuinely different
+  // player still fails to match.
+  return username.trim().toLowerCase() === expectedUsername.trim().toLowerCase();
+}
+
+/**
+ * Answer from an index body without touching the network.
+ *
+ * `undefined` means "could not tell": unparseable file, or an entry that failed
+ * the identity check. `false` means the index is well-formed and simply does not
+ * list this farm among its active VIPs — a real answer, not a failure.
+ */
+export function answerFromIndex({
   body,
   farmId,
   expectedUsername,
+  now = Date.now(),
 }: {
   body: unknown;
   farmId: number;
-  /** The session's username, when it has one. */
   expectedUsername?: string;
-}): boolean {
-  if (typeof body !== "object" || body === null) return false;
-  const envelope = body as Record<string, unknown>;
+  now?: number;
+}): boolean | undefined {
+  const index = parseVipIndex(body);
+  if (!index) return undefined;
+  if (!Number.isFinite(farmId) || farmId <= 0) return undefined;
 
-  // A present-but-different account id is a mismatch. An absent one is not
-  // evidence either way, so it does not fail the check on its own.
-  if (typeof envelope.id === "number" && envelope.id !== farmId) return false;
+  const entry = index.entries.get(farmId);
+  if (!entry) return false;
+  if (!isVerifiedVipEntry({ entry, expectedUsername })) return undefined;
 
-  const farm = pickFarm(body);
-  if (!farm) return false;
-
-  if (expectedUsername === undefined) return true;
-
-  const username = farm.username;
-  if (typeof username !== "string") return false;
-  // Case-insensitive and trimmed: two sources describing the same farm should
-  // agree, but one may normalise casing or whitespace. Being stricter here would
-  // only cost a real VIP their status over a cosmetic difference, while a
-  // genuinely different player still fails to match.
-  return (
-    username.trim().toLowerCase() === expectedUsername.trim().toLowerCase()
-  );
+  return entry.expiresAt > now;
 }
 
-/** One in-flight or settled lookup per farm, so re-renders never re-request. */
-const cache = new Map<string, Promise<boolean | undefined>>();
+/** One in-flight or settled index per page load, so re-renders never re-request. */
+let indexPromise: Promise<VipIndex | undefined> | undefined;
 
 /**
- * Is this farm VIP, according to the Community API?
+ * Fetch and parse the published index, at most once per page load.
  *
- * `undefined` means "could not tell" — no key, throttled (429), unauthorised
- * (401), an unexpected shape, a response that failed the identity check, or
- * blocked by CORS. Callers must treat that as unknown rather than as "no".
+ * A failed load is *not* cached: the next cabinet mount is allowed to try again,
+ * so a blip during boot does not pin the player to "unknown" for the session.
  */
-export function fetchCommunityVip({
-  farmId,
-  apiKey,
-  expectedUsername,
-}: {
-  farmId: number;
-  apiKey?: string;
-  expectedUsername?: string;
-}): Promise<boolean | undefined> {
-  const key = apiKey ?? communityApiKey();
-  if (!key || !Number.isFinite(farmId) || farmId <= 0) {
-    return Promise.resolve(undefined);
-  }
+export function loadVipIndex({
+  indexUrl = vipIndexUrl(),
+}: { indexUrl?: string } = {}): Promise<VipIndex | undefined> {
+  if (!indexUrl) return Promise.resolve(undefined);
 
-  // The username is part of the cache key: the same farm asked about under a
-  // different expected identity is a different question, and a cached pass for
-  // one must not satisfy the other.
-  const cacheKey = `${farmId}|${expectedUsername ?? ""}`;
-  const cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  // Deliberately not abortable. The result is memoised per farm, so an abort
-  // would cache "unknown" permanently and no later mount could ever retry.
-  // The lookup is one request per farm per page load, which is well inside the
-  // documented rate limit, so there is nothing to gain from cancelling it.
-  const pending = (async (): Promise<boolean | undefined> => {
-    try {
-      const response = await fetch(
-        `${COMMUNITY_API_BASE}/community/farms/${farmId}`,
-        { headers: { accept: "application/json", "x-api-key": key } },
-      );
-      // 401 = key invalid or its farm lost VIP/level, 404 = no such farm,
-      // 429 = throttled. None of them mean "this player is not VIP".
-      if (!response.ok) return undefined;
-      const body = await response.json();
-      if (!isVerifiedFarmResponse({ body, farmId, expectedUsername })) {
+  if (!indexPromise) {
+    indexPromise = (async () => {
+      try {
+        // No custom headers, so this is a simple request: no preflight.
+        const response = await fetch(indexUrl, { headers: { accept: "application/json" } });
+        if (!response.ok) return undefined;
+        return parseVipIndex(await response.json());
+      } catch {
+        // Network failure or malformed body: unknown, not "no".
         return undefined;
       }
-      const farm = pickFarm(body);
-      return farm ? isVipFarm(farm) : undefined;
-    } catch {
-      // Network failure, including the CORS block: unknown, not "no".
+    })();
+
+    void indexPromise.then((index) => {
+      if (!index) indexPromise = undefined;
+    });
+  }
+
+  return indexPromise;
+}
+
+/** Per-farm answers, so one index read serves every component on the page. */
+const farmCache = new Map<string, Promise<boolean | undefined>>();
+
+/**
+ * Is this farm VIP, according to the published index?
+ *
+ * `undefined` means "could not tell" — no index, a failed fetch, an unparseable
+ * file, or an entry that failed the identity check. Callers must treat that as
+ * unknown rather than as "no".
+ */
+export function fetchFarmVip({
+  farmId,
+  expectedUsername,
+  indexUrl = vipIndexUrl(),
+}: {
+  farmId: number;
+  expectedUsername?: string;
+  indexUrl?: string;
+}): Promise<boolean | undefined> {
+  if (!Number.isFinite(farmId) || farmId <= 0) return Promise.resolve(undefined);
+
+  const key = `${indexUrl}|${farmId}|${expectedUsername ?? ""}`;
+  const existing = farmCache.get(key);
+  if (existing) return existing;
+
+  const pending = loadVipIndex({ indexUrl }).then((index) => {
+    if (!index) {
+      // Nothing was learned, so do not remember the answer.
+      farmCache.delete(key);
       return undefined;
     }
-  })();
+    const entry = index.entries.get(farmId);
+    if (!entry) return false;
+    if (!isVerifiedVipEntry({ entry, expectedUsername })) {
+      farmCache.delete(key);
+      return undefined;
+    }
+    return entry.expiresAt > Date.now();
+  });
 
-  cache.set(cacheKey, pending);
+  farmCache.set(key, pending);
   return pending;
 }
 
-/** Test seam: forget memoised lookups. */
-export function resetCommunityVipCache(): void {
-  cache.clear();
+/** Test seam: forget the index and every per-farm answer. */
+export function clearVipIndexCache(): void {
+  indexPromise = undefined;
+  farmCache.clear();
 }
 
 /**
@@ -245,17 +282,16 @@ export function resetCommunityVipCache(): void {
  *
  * One hook owns the lookup so `isVip` and `resolved` can never disagree — they
  * previously lived in two hooks, and the second one derived "settled" from
- * whether a lookup was *possible* rather than whether it had *finished*. Since
- * the Community API is the only source on a hosted build, that meant `resolved`
- * stayed `false` forever, and a caller waiting on it never ran.
+ * whether a lookup was *possible* rather than whether it had *finished*, which
+ * left `resolved` false forever and any caller waiting on it waiting forever.
  *
  * `resolved` is `true` once the answer can no longer change: no session, a
- * session that answers locally, no key configured, or the lookup has returned —
+ * session that answers locally, no usable farm id, or the lookup has returned —
  * including when it returned "could not tell". It is never left hanging on a
  * source that will not answer, so waiting on it is always safe.
  *
- * Two components calling this share one request: {@link fetchCommunityVip}
- * memoises per farm, so the second caller gets the first one's result.
+ * Two components calling this share one request: {@link loadVipIndex} memoises
+ * the file, so the second caller gets the first one's result.
  */
 function useVipState(): { isVip: boolean; resolved: boolean } {
   const { jwt, farm, farmId, playerData } = useMinigameSession();
@@ -270,17 +306,17 @@ function useVipState(): { isVip: boolean; resolved: boolean } {
     sessionFarm: farm,
     portalProfile,
   });
-  const key = communityApiKey();
 
-  const [communityVip, setCommunityVip] = useState<boolean | undefined>(
-    undefined,
-  );
-  const [settled, setSettled] = useState(false);
-
+  const expectedUsername =
+    typeof farm?.username === "string" ? farm.username : undefined;
   // Only ask when the session cannot answer for itself: it is the primary
   // source, and a lookup fired before the farm arrives would be memoised against
   // a question the session was about to answer itself.
-  const willQuery = !!jwt && !!farm && !answeredLocally && !!key;
+  const willQuery =
+    !!jwt && !!farm && !answeredLocally && Number.isFinite(farmId) && farmId > 0;
+
+  const [answer, setAnswer] = useState<boolean | undefined>(undefined);
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     if (!willQuery) {
@@ -288,41 +324,33 @@ function useVipState(): { isVip: boolean; resolved: boolean } {
       return;
     }
     setSettled(false);
+    setAnswer(undefined);
+
     let cancelled = false;
-    void fetchCommunityVip({
-      farmId,
-      apiKey: key,
-      // Cross-check against the session so the VIP we act on is provably the same
-      // farm the JWT was issued for. See `isVerifiedFarmResponse`.
-      expectedUsername: farm.username,
-    }).then((answer) => {
+    void fetchFarmVip({ farmId, expectedUsername }).then((value) => {
       if (cancelled) return;
-      setCommunityVip(answer);
+      setAnswer(value);
       setSettled(true);
     });
+
     return () => {
       cancelled = true;
     };
-  }, [willQuery, farmId, farm]);
+  }, [willQuery, farmId, expectedUsername]);
 
   // Never let a fallback answer override a local one.
-  const isVip = answeredLocally ? localVip : (communityVip ?? localVip);
+  const isVip = answeredLocally ? localVip : (answer ?? localVip);
   return { isVip, resolved: !willQuery || settled };
 }
 
 /**
- * The arcade's VIP answer, session first and Community API as a fallback.
+ * The arcade's VIP answer, session first and the published index as a fallback.
  *
  * The first render always reports whatever the local sources say — which is
- * `false` until either the session projection carries `vip` or this fallback
- * answers. A Community API lookup can flip it to `true` a moment later, so treat
- * a `false` immediately after boot as "not known yet" rather than "not VIP". That
- * only ever affects which mint a win dispatches, never whether a win counts.
- *
- * When the fallback answers, it has first agreed the farm's `username` with the
- * session's, so the VIP acted on belongs to the farm the JWT was issued for —
- * see {@link isVerifiedFarmResponse} for what that does and does not protect
- * against.
+ * `false` until either the session projection carries `vip` or the index
+ * answers. The index is a network read, so treat a `false` immediately after
+ * boot as "not known yet" rather than "not VIP". That only ever affects which
+ * mint a win dispatches, never whether a win counts.
  */
 export function useVipAccess(): boolean {
   return useVipState().isVip;
@@ -331,7 +359,7 @@ export function useVipAccess(): boolean {
 /**
  * Has the VIP answer settled yet?
  *
- * `false` only while a Community API lookup is genuinely in flight. Callers that
+ * `false` only while the index lookup is genuinely in flight. Callers that
  * **mint something as a consequence of the answer** must wait for this, because
  * acting on the pre-resolution `false` bakes in the wrong choice: the free-run
  * grant picks an arcade-wide token over per-cabinet ones from `isVip`, so

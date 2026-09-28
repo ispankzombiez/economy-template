@@ -46,3 +46,7 @@ cache
 /.cursor
 
 vite.config.ts.timestamp-*.mjs
+
+# generated locally by scripts/build-vip-index.mjs; published to the vip-data
+# branch by .github/workflows/vip-index.yml, never committed here
+vip-index.json

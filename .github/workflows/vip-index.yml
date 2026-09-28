@@ -1,0 +1,75 @@
+# Publishes the VIP index the arcade reads instead of calling the Community API.
+#
+# Why a workflow and not a runtime call: `api.sunflower-land.com` only echoes
+# `Access-Control-Allow-Origin` for `sunflower-land.com` / `www.sunflower-land.com`,
+# so the arcade's browser is refused the response, and shipping the key to the
+# client would make it public anyway. This job keeps the key in a secret and
+# publishes a credential-free file to the `vip-data` branch, which
+# `raw.githubusercontent.com` serves with `Access-Control-Allow-Origin: *`.
+#
+# Setup (one time): Settings → Secrets and variables → Actions → New repository
+# secret, name COMMUNITY_API_KEY, value the key from the community docs sidebar.
+# The key is tied to your farm (it stops working if VIP lapses or level drops
+# below 50), so rotate it there if it ever changes.
+#
+# The nightly dump lands at ~22:00 UTC, so this runs 80 minutes later. Use the
+# "Run workflow" button for an immediate build.
+
+name: Publish VIP index
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 23 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-vip-index
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push to the vip-data branch
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Build index from the nightly dump
+        env:
+          COMMUNITY_API_KEY: ${{ secrets.COMMUNITY_API_KEY }}
+        run: node scripts/build-vip-index.mjs --out "${RUNNER_TEMP}/vip-index.json"
+
+      - name: Publish to the vip-data branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          work="$(mktemp -d)"
+          cp "${RUNNER_TEMP}/vip-index.json" "${work}/vip-index.json"
+          cd "${work}"
+
+          git init -q --initial-branch=vip-data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vip-index.json
+          git commit -q -m "VIP index from nightly dump"
+
+          # One force-pushed commit, so the branch always holds exactly this file.
+          # Committing normally would add ~650 KB to every clone, every day.
+          git push --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GH_REPO}.git" \
+            HEAD:vip-data
+
+          echo "Published vip-data/vip-index.json"
