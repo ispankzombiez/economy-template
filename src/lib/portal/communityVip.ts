@@ -241,36 +241,73 @@ export function resetCommunityVipCache(): void {
 }
 
 /**
- * Has the VIP answer settled yet?
+ * VIP, and whether that answer has settled.
  *
- * `false` only while a Community API lookup is genuinely in flight — no session,
- * or a session with no VIP record and a key configured. Callers that **mint
- * something as a consequence of the answer** must wait for this, because acting
- * on the pre-resolution `false` bakes in the wrong choice: the free-run grant
- * picks an arcade-wide token over per-cabinet ones from `isVip`, so granting
- * before VIP resolves hands a VIP the non-VIP allowance and then locks it in for
- * the day.
+ * One hook owns the lookup so `isVip` and `resolved` can never disagree — they
+ * previously lived in two hooks, and the second one derived "settled" from
+ * whether a lookup was *possible* rather than whether it had *finished*. Since
+ * the Community API is the only source on a hosted build, that meant `resolved`
+ * stayed `false` forever, and a caller waiting on it never ran.
  *
- * `true` in every other case, including a failed or absent lookup, so it never
- * blocks on a source that will not answer.
+ * `resolved` is `true` once the answer can no longer change: no session, a
+ * session that answers locally, no key configured, or the lookup has returned —
+ * including when it returned "could not tell". It is never left hanging on a
+ * source that will not answer, so waiting on it is always safe.
+ *
+ * Two components calling this share one request: {@link fetchCommunityVip}
+ * memoises per farm, so the second caller gets the first one's result.
  */
-export function useVipResolved(): boolean {
-  const { jwt, farm, playerData } = useMinigameSession();
+function useVipState(): { isVip: boolean; resolved: boolean } {
+  const { jwt, farm, farmId, playerData } = useMinigameSession();
   const portalProfile = playerData?.portalProfile;
-  const [resolved, setResolved] = useState<boolean>(() => !communityApiKey());
 
-  const answerableLocally = hasLocalVipSource({
+  const localVip = resolveVipAccess({
+    hasSession: !!jwt,
     sessionFarm: farm,
     portalProfile,
   });
-  const waiting = !!jwt && !!farm && !answerableLocally && !!communityApiKey();
+  const answeredLocally = hasLocalVipSource({
+    sessionFarm: farm,
+    portalProfile,
+  });
+  const key = communityApiKey();
+
+  const [communityVip, setCommunityVip] = useState<boolean | undefined>(
+    undefined,
+  );
+  const [settled, setSettled] = useState(false);
+
+  // Only ask when the session cannot answer for itself: it is the primary
+  // source, and a lookup fired before the farm arrives would be memoised against
+  // a question the session was about to answer itself.
+  const willQuery = !!jwt && !!farm && !answeredLocally && !!key;
 
   useEffect(() => {
-    if (waiting) setResolved(false);
-    else setResolved(true);
-  }, [waiting]);
+    if (!willQuery) {
+      setSettled(true);
+      return;
+    }
+    setSettled(false);
+    let cancelled = false;
+    void fetchCommunityVip({
+      farmId,
+      apiKey: key,
+      // Cross-check against the session so the VIP we act on is provably the same
+      // farm the JWT was issued for. See `isVerifiedFarmResponse`.
+      expectedUsername: farm.username,
+    }).then((answer) => {
+      if (cancelled) return;
+      setCommunityVip(answer);
+      setSettled(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [willQuery, farmId, farm]);
 
-  return resolved;
+  // Never let a fallback answer override a local one.
+  const isVip = answeredLocally ? localVip : (communityVip ?? localVip);
+  return { isVip, resolved: !willQuery || settled };
 }
 
 /**
@@ -288,50 +325,19 @@ export function useVipResolved(): boolean {
  * against.
  */
 export function useVipAccess(): boolean {
-  const { jwt, farm, farmId, playerData } = useMinigameSession();
-  const portalProfile = playerData?.portalProfile;
+  return useVipState().isVip;
+}
 
-  const localVip = resolveVipAccess({
-    hasSession: !!jwt,
-    sessionFarm: farm,
-    portalProfile,
-  });
-  const answeredLocally = hasLocalVipSource({
-    sessionFarm: farm,
-    portalProfile,
-  });
-
-  const [communityVip, setCommunityVip] = useState<boolean | undefined>(
-    undefined,
-  );
-
-  useEffect(() => {
-    // Wait for the session farm before asking anything else: it is the primary
-    // source, and a lookup fired before it arrives would be memoised against a
-    // question the session was about to answer for itself.
-    if (!jwt || !farm || answeredLocally) return;
-    const key = communityApiKey();
-    if (!key) return;
-
-    // Not cancellable on purpose: the lookup is memoised per farm, so aborting
-    // would strand the cache. See `fetchCommunityVip`.
-    let cancelled = false;
-    void fetchCommunityVip({
-      farmId,
-      apiKey: key,
-      // Cross-check against the session so the VIP we act on is provably the
-      // same farm the JWT was issued for. See `isVerifiedFarmResponse`.
-      expectedUsername: farm.username,
-    }).then((answer) => {
-      if (!cancelled) setCommunityVip(answer);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [jwt, farm, farmId, answeredLocally]);
-
-  // Never let a fallback answer override a local one.
-  if (answeredLocally) return localVip;
-  return communityVip ?? localVip;
+/**
+ * Has the VIP answer settled yet?
+ *
+ * `false` only while a Community API lookup is genuinely in flight. Callers that
+ * **mint something as a consequence of the answer** must wait for this, because
+ * acting on the pre-resolution `false` bakes in the wrong choice: the free-run
+ * grant picks an arcade-wide token over per-cabinet ones from `isVip`, so
+ * granting before VIP resolves hands a VIP the non-VIP allowance and locks it in
+ * for the day.
+ */
+export function useVipResolved(): boolean {
+  return useVipState().resolved;
 }

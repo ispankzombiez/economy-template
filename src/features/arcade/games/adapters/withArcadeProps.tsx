@@ -154,15 +154,16 @@ export function withArcadeProps(
      * carries `dailyCap: 1`, so being refused simply means today's token was
      * already minted and spent, which is exactly the state we want.
      *
-     * ## Why this fires once, and why it is not optimistic
+     * ## Why this fires at most once, and why it is not optimistic
      *
      * Two separate reasons, both learned the hard way.
      *
-     * **Once.** `playerEconomy` is a dependency of almost everything here and
-     * changes on *every* action, so an effect that re-asks whenever the token is
-     * missing re-asks the moment a free run **burns** it — precisely when the
-     * player must not be handed one back. So the attempt happens once per cabinet
-     * mount, behind a ref.
+     * **At most once.** `playerEconomy` is a dependency of almost everything here
+     * and changes on *every* action, so an effect that re-asks whenever the token
+     * is missing re-asks the moment a free run **burns** it - precisely when the
+     * player must not be handed one back. The ref is what enforces that, which
+     * leaves the effect free to re-run on the inputs it genuinely depends on
+     * (most importantly VIP settling) without ever dispatching twice.
      *
      * **Not optimistic.** The local rule engine enforces `dailyCap` from
      * `playerEconomy.dailyMinted`, and on a live session that ledger can be
@@ -221,9 +222,22 @@ export function withArcadeProps(
         }),
         optimistic: false,
       });
-      // Intentionally mount-only; see the note above.
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+      // `vipResolved` is in the deps on purpose. The guard above is a ref, not a
+      // dep, so this effect re-runs freely — on VIP settling, on a session
+      // landing — while still dispatching at most once. Pinning the deps to `[]`
+      // looked tidier and was a real bug: the effect ran once while VIP was
+      // unresolved, returned early, and never ran again, so no token was ever
+      // granted and every machine demanded a Play Ticket.
+    }, [
+      jwt,
+      actions,
+      dispatchAction,
+      economyMeta,
+      isVip,
+      minigame,
+      playerEconomy,
+      vipResolved,
+    ]);
 
     /**
      * Spend a free reward run by burning its token.
