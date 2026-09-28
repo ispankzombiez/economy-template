@@ -170,7 +170,9 @@ export function isVerifiedFarmResponse({
   // agree, but one may normalise casing or whitespace. Being stricter here would
   // only cost a real VIP their status over a cosmetic difference, while a
   // genuinely different player still fails to match.
-  return username.trim().toLowerCase() === expectedUsername.trim().toLowerCase();
+  return (
+    username.trim().toLowerCase() === expectedUsername.trim().toLowerCase()
+  );
 }
 
 /** One in-flight or settled lookup per farm, so re-renders never re-request. */
@@ -236,6 +238,39 @@ export function fetchCommunityVip({
 /** Test seam: forget memoised lookups. */
 export function resetCommunityVipCache(): void {
   cache.clear();
+}
+
+/**
+ * Has the VIP answer settled yet?
+ *
+ * `false` only while a Community API lookup is genuinely in flight — no session,
+ * or a session with no VIP record and a key configured. Callers that **mint
+ * something as a consequence of the answer** must wait for this, because acting
+ * on the pre-resolution `false` bakes in the wrong choice: the free-run grant
+ * picks an arcade-wide token over per-cabinet ones from `isVip`, so granting
+ * before VIP resolves hands a VIP the non-VIP allowance and then locks it in for
+ * the day.
+ *
+ * `true` in every other case, including a failed or absent lookup, so it never
+ * blocks on a source that will not answer.
+ */
+export function useVipResolved(): boolean {
+  const { jwt, farm, playerData } = useMinigameSession();
+  const portalProfile = playerData?.portalProfile;
+  const [resolved, setResolved] = useState<boolean>(() => !communityApiKey());
+
+  const answerableLocally = hasLocalVipSource({
+    sessionFarm: farm,
+    portalProfile,
+  });
+  const waiting = !!jwt && !!farm && !answerableLocally && !!communityApiKey();
+
+  useEffect(() => {
+    if (waiting) setResolved(false);
+    else setResolved(true);
+  }, [waiting]);
+
+  return resolved;
 }
 
 /**

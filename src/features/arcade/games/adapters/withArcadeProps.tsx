@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ComponentType } from "react";
 import type { Equipped } from "features/game/types/bumpkin";
-import { useVipAccess, useMinigameSession } from "lib/portal";
+import { useVipAccess, useVipResolved, useMinigameSession } from "lib/portal";
 import type { ArcadeGameProps } from "../../types";
 import type { GameState } from "./gameTypes";
 import { ArcadePortalProvider } from "./portal";
@@ -67,6 +67,8 @@ export function withArcadeProps(
     // first, then the Community API as a fallback. A session-less boot stays VIP
     // so a dev session can still exercise the per-cabinet reward path.
     const isVip = useVipAccess();
+    // Whether that answer has settled, which the free-run grant waits for.
+    const vipResolved = useVipResolved();
 
     // Same source the arcade HUD shows, so the "has enough FLOWER" gate and
     // the number on screen can never disagree.
@@ -182,6 +184,11 @@ export function withArcadeProps(
     useEffect(() => {
       if (grantAttemptedRef.current) return;
       if (!jwt) return;
+      // Wait for VIP to settle. The token minted here is chosen by `isVip` — an
+      // arcade-wide one for a non-VIP, per-cabinet for a VIP — so granting while
+      // the answer is still pending hands out the wrong allowance and, because the
+      // grant carries a 24h cooldown, locks it in for the rest of the day.
+      if (!vipResolved) return;
       const grantAction = resolveFreeRunGrantAction({
         actions,
         isVip,
