@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ComponentType } from "react";
 import type { Equipped } from "features/game/types/bumpkin";
 import { useVipAccess, useMinigameSession } from "lib/portal";
@@ -12,14 +12,11 @@ import {
   buildAttemptHistory,
   getFreeRunTokenBalance,
   getPlayTicketBalance,
-  getRavenCoinsMintedToday,
   resolveActionAmounts,
   resolveFreeRunGrantAction,
   resolveFreeRunStartAction,
   resolveFreeRunTokenKey,
   resolvePlayTicketTokenKey,
-  resolveRavenCoinMintAction,
-  resolveRavenCoinTokenKey,
   resolveRewardAttemptTokenKey,
   TICKET_RUN_START_ACTION,
 } from "../../lib/ravenCoin";
@@ -77,11 +74,6 @@ export function withArcadeProps(
     const equipped = playerData?.resolvedAvatar?.equipped;
 
     const baseState = useMemo<GameState>(() => {
-      const coinKey = resolveRavenCoinTokenKey({
-        economyMeta,
-        items: playerEconomy?.items,
-        balances: playerEconomy?.balances,
-      });
       const tokenKey = resolveFreeRunTokenKey({
         economyMeta,
         items: playerEconomy?.items,
@@ -103,22 +95,20 @@ export function withArcadeProps(
         isVip,
         machine: minigame,
       });
-      const attemptsToday = openAction
-        ? getFreeRunTokenBalance({
-            playerEconomy,
-            tokenKey,
-          }) > 0
-          ? 0
-          : 1
-        : getRavenCoinsMintedToday({
-            playerEconomy,
-            actionId: resolveRavenCoinMintAction(
-              isVip
-                ? { actions, coinKey, variant: "machine", machine: minigame }
-                : { actions, coinKey, variant: "free" },
-            ),
-            coinKey,
-          });
+      const tokenBalance = getFreeRunTokenBalance({
+        playerEconomy,
+        tokenKey,
+      });
+
+      // **Fails closed.** If the token economy is not fully published, or has not
+      // finished loading, this reports the allowance as spent rather than
+      // guessing. That used to fall back to counting minted coins, which is zero
+      // for any run that did not win — so a partial publish silently handed out
+      // free runs on every loss and every walk-out. A wrong "charges a ticket"
+      // costs the player one ticket; a wrong "free" costs the economy a coin per
+      // attempt, every time.
+      const attemptsToday =
+        !openAction || !tokenKey ? 1 : tokenBalance > 0 ? 0 : 1;
 
       const playTicketKey = resolvePlayTicketTokenKey({
         economyMeta,
@@ -161,8 +151,22 @@ export function withArcadeProps(
      * a failure would be visible. A refusal is **not** an error — the grant
      * carries `dailyCap: 1`, so being refused simply means today's token was
      * already minted and spent, which is exactly the state we want.
+     *
+     * ## Why this fires once and not on every balance change
+     *
+     * `playerEconomy` is a dependency of almost everything here and changes on
+     * *every* action, so an effect that re-asks whenever the token is missing
+     * re-asks the moment a free run **burns** it — which is precisely the moment
+     * the player must not be handed one back. Depending on the live balance
+     * re-opens the very hole the token exists to close.
+     *
+     * So the grant is attempted once per cabinet mount, behind a ref, reading the
+     * balance as it was when the cabinet opened. A refusal is left to stand: it
+     * means today is spent, and re-asking would only risk handing the token back.
      */
+    const grantAttemptedRef = useRef(false);
     useEffect(() => {
+      if (grantAttemptedRef.current) return;
       if (!jwt) return;
       const grantAction = resolveFreeRunGrantAction({
         actions,
@@ -179,8 +183,11 @@ export function withArcadeProps(
         machine: minigame,
       });
       if (!tokenKey) return;
+
+      // Already holding one: nothing to grant, and do not spend the attempt.
       if (getFreeRunTokenBalance({ playerEconomy, tokenKey }) > 0) return;
 
+      grantAttemptedRef.current = true;
       // Deliberately not awaited and not surfaced: a refusal is the expected
       // "already used today" answer, not a failure to report.
       dispatchAction({
@@ -192,15 +199,9 @@ export function withArcadeProps(
           amount: 1,
         }),
       });
-    }, [
-      jwt,
-      actions,
-      dispatchAction,
-      economyMeta,
-      isVip,
-      minigame,
-      playerEconomy,
-    ]);
+      // Intentionally mount-only; see the note above.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     /**
      * Spend a free reward run by burning its token.
