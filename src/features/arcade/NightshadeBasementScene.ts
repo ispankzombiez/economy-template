@@ -101,10 +101,10 @@ export class NightshadeBasementScene extends ArcadeTiledScene {
       to: "nightshade-arcade",
     });
 
-    // Halfway up the back wall: the wall spans y 0–32 and the statue is 48x45
-    // with art to the very top of its frame, so a centre of y=38.5 puts its
-    // head on y=16 — the wall's midpoint.
-    this.createRavenStatue(192, 38.5);
+    // Halfway up the back wall: the wall spans y 0–16 and the statue is 48x45
+    // with art to the very top of its frame, so a centre of y=30.5 puts its
+    // head on y=8 — the wall's midpoint.
+    this.createRavenStatue(192, 30.5);
 
     // Two columns of three, flanking the runner. The left column looks on
     // toward the statue; the right column is turned to face back across it.
@@ -116,8 +116,9 @@ export class NightshadeBasementScene extends ArcadeTiledScene {
     this.createCultist(240, 188, true);
 
     // A pace in front of the statue, turned to face back across the runner as
-    // he preaches to the cultists.
-    this.createKohi(226, 60);
+    // he preaches to the cultists. He moves with the statue (same -8) so the
+    // pair keeps the spacing it was approved with.
+    this.createKohi(226, 52);
   }
 
   /** The raven statue standing at the head of the carpet runner. */
@@ -125,8 +126,13 @@ export class NightshadeBasementScene extends ArcadeTiledScene {
     const statue = this.add.image(x, y, "ravenStatue");
     statue.setDepth(y);
 
-    // Solid plinth so the player walks around it rather than through it.
-    this.addSolid(x - 24, y, 48, 22);
+    // Solid plinth so the player walks around it rather than through it. It
+    // runs from the back wall's lower edge down to the statue's feet, not just
+    // across the base — with the wall only one tile deep there is a strip
+    // between the two, and at 8px tall the player fits through it and ends up
+    // hidden behind the statue's head.
+    const wallBottom = 16;
+    this.addSolid(x - 24, wallBottom, 48, y + 22 - wallBottom);
   }
 
   /**

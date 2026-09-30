@@ -66,6 +66,62 @@ const colorText: Record<UnoColor, string> = {
   Wild: "text-white",
 };
 
+/**
+ * The centre marks of the Reverse and Skip cards, drawn instead of spelled.
+ *
+ * Neither word ever fit the middle of a card — "Reverse" is nine characters in
+ * a panel two inches wide — and both are marks every UNO player reads before
+ * they read anything else:
+ *
+ *  - **Reverse** — the pair of arrows pointing past each other along one
+ *    diagonal: one out to the upper right, one back to the lower left, their
+ *    shafts hooking around the middle so each sits behind the other.
+ *  - **Skip** — the ring with a slash through it.
+ *
+ * They are inline SVG rather than art assets for three reasons: they scale to
+ * both card sizes, they take the card's own colour, and a mark this simple is
+ * better drawn than shipped as a bitmap. `currentColor` is the fill, with a
+ * black outline over it so the two arrows stay separate where they cross —
+ * exactly how the mark is printed.
+ */
+const ReverseSymbol: React.FC<{ className?: string }> = ({ className }) => (
+  <svg viewBox="0 0 48 48" className={className} fill="none" aria-hidden="true">
+    <g fill="currentColor" stroke="#000" strokeWidth={2} strokeLinejoin="round">
+      <polygon points="29.5,20.7 31.2,23.1 31.8,25.4 31.8,28.7 31.1,31.1 28.0,35.0 20.5,40.9 24.3,45.9 7.2,45.9 9.8,29.6 10.2,29.3 14.4,33.2 29.4,20.8" />
+      <polygon points="23.9,2.0 40.9,2.2 38.2,18.7 33.7,14.7 18.7,27.3 18.3,27.1 16.3,22.6 16.3,19.3 17.0,16.9 19.4,13.5 27.6,7.0 23.8,2.1" />
+    </g>
+  </svg>
+);
+
+const SkipSymbol: React.FC<{ className?: string }> = ({ className }) => (
+  <svg viewBox="0 0 48 48" className={className} fill="none" aria-hidden="true">
+    {/* The ring: one path stroked twice — a black edge, then the card's own
+        colour over it, which leaves black showing on both sides of the band. */}
+    <ellipse cx={24} cy={24} rx={17} ry={14} stroke="#000" strokeWidth={7.5} />
+    <ellipse cx={24} cy={24} rx={17} ry={14} stroke="currentColor" strokeWidth={4} />
+    {/* The slash, outlined the same way. Its ends stop inside the ring so the
+        bar reads as crossing the middle rather than poking out of it. */}
+    <line
+      x1={13.6}
+      y1={31.8}
+      x2={34.4}
+      y2={16.2}
+      stroke="#000"
+      strokeWidth={9}
+      strokeLinecap="round"
+    />
+    <line
+      x1={13.6}
+      y1={31.8}
+      x2={34.4}
+      y2={16.2}
+      stroke="currentColor"
+      strokeWidth={5}
+      strokeLinecap="round"
+    />
+  </svg>
+);
+
 const PLAYER_NAMES = ["You", "Bot 1", "Bot 2", "Bot 3"];
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -746,7 +802,21 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
         <span
           className={`absolute inset-0 grid place-items-center font-bold ${centerFaceClass} leading-none`}
         >
-          {centerLabel}
+          {card.face === "Reverse" ? (
+            <>
+              <ReverseSymbol className={small ? "h-5 w-5" : "h-8 w-8"} />
+              {/* The mark is decorative; the name still has to reach a
+                  screen reader. */}
+              <span className="sr-only">Reverse</span>
+            </>
+          ) : card.face === "Skip" ? (
+            <>
+              <SkipSymbol className={small ? "h-5 w-5" : "h-8 w-8"} />
+              <span className="sr-only">Skip</span>
+            </>
+          ) : (
+            centerLabel
+          )}
         </span>
       </button>
     );

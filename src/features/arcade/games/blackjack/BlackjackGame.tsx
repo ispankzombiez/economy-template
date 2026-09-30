@@ -723,9 +723,12 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
             </p>
           )}
 
+          {/* The menu is before any run exists — nothing has been spent, so it
+              leaves straight away, the way every other cabinet's menu does.
+              Only a run already in progress asks first. */}
           {onClose && (
             <button
-              onClick={handleSessionExit}
+              onClick={onClose}
               className="w-full px-6 py-2 bg-gray-400 text-white font-semibold rounded-lg hover:bg-gray-500 active:scale-95 transition-all"
             >
               EXIT
@@ -819,9 +822,11 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
             ✓ DEAL
           </button>
 
+          {/* Between hands a run is open, so this asks before it goes — the
+              same gate as the table screen's BACK TO ARCADE. */}
           {onClose && (
             <button
-              onClick={onClose}
+              onClick={handleSessionExit}
               className="w-full px-6 py-2 bg-gray-400 text-white font-semibold rounded-lg hover:bg-gray-500 active:scale-95 transition-all"
             >
               EXIT
