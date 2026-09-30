@@ -8,6 +8,7 @@ import { TetrisGame } from "./tetris/TetrisGame";
 import { GoblinInvadersGame } from "./goblininvaders/GoblinInvadersGame";
 import { PacManGame } from "./pacman/PacManGame";
 import { FroggerGame } from "./frogger/FroggerGame";
+import { RavenBubblesGame } from "./ravenbubbles/RavenBubblesGame";
 import { withArcadeProps } from "./adapters/withArcadeProps";
 import type { ArcadeGameEntry } from "../types";
 
@@ -18,17 +19,21 @@ import type { ArcadeGameEntry } from "../types";
  * The original arcade (`ispankzombiez/Sunflower-Land` @ `portal`,
  * `src/features/portal/nightshade-arcade/mini-games/`) shipped exactly **10**
  * games, which map 1:1 onto Tiled cabinets `Machine 1`…`Machine 10` (see
- * `../data/machineMap.ts`). Cabinets 11–16 were never wired, in the original
+ * `../data/machineMap.ts`). Cabinets 12–16 were never wired, in the original
  * either, and are intentionally left inert.
+ *
+ * This fork adds an eleventh, `raven-bubbles` (Raven Bubbles), on `Machine 11`
+ * — the first cabinet the original left empty.
  *
  * Template example apps (tile-jump, hide-and-seek, chicken-rescue,
  * golden-crops, plaza-party, ui-resources) were briefly registered here during
  * the port. They are **not** Nightshade Arcade games and have been pruned.
  *
  * ── Restore status ──────────────────────────────────────────────────────────
- * All ten are the **original** components, copied verbatim from `source-portal`
- * and re-wired through `games/adapters/` (the only thing changed in each file
- * is the import list). Every entry is therefore `local` + `available`.
+ * The ten originals are the **original** components, copied verbatim from
+ * `source-portal` and re-wired through `games/adapters/` (the only thing
+ * changed in each file is the import list). Every entry is therefore `local` +
+ * `available`. `raven-bubbles` is written natively against the same adapters.
  *
  * ── How an original plugs into the arcade ───────────────────────────────────
  * The originals are `React.FC<{ onClose?: () => void }>` and talk to an xstate
@@ -132,6 +137,15 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(FroggerGame, "frogger"),
+  },
+  {
+    id: "raven-bubbles",
+    name: "Raven Bubbles",
+    description: "Pop crop bubbles and hit the target score.",
+    tokenReward: 1,
+    status: "available",
+    backingType: "local",
+    component: withArcadeProps(RavenBubblesGame, "raven-bubbles"),
   },
 ];
 

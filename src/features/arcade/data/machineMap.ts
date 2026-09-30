@@ -14,9 +14,10 @@
  * first port used a hard-coded 10-branch if-chain covering machines 1–10 only.
  * That chain has been replaced by this lookup.
  *
- * ── Cabinets 11–16 are intentionally inert ──────────────────────────────────
+ * ── Cabinets 12–16 are intentionally inert ──────────────────────────────────
  * The original arcade shipped exactly 10 games for 16 cabinets, so 11–16 were
- * dead in the original too. They are deliberately left unmapped. Do not map
+ * dead in the original too. This fork wires `Machine 11` to `raven-bubbles`
+ * (Raven Bubbles); 12–16 are still deliberately left unmapped. Do not map
  * template example apps (tile-jump, chicken-rescue, …) here — those are not
  * Nightshade Arcade games. `slots` / `roulette` exist as event types in
  * `lib/minigamesEvents.ts` but have never had components, so they are not
@@ -36,6 +37,8 @@ export const MACHINE_TO_GAME: Readonly<Record<string, string>> = {
   "machine 8": "pac-man",
   "machine 9": "barley-breaker",
   "machine 10": "frogger",
+  // ── This fork's eleventh cabinet ──────────────────────────────────────────
+  "machine 11": "raven-bubbles",
 };
 
 /**
