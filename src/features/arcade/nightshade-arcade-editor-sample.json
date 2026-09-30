@@ -9,57 +9,68 @@
     "555": {
       "name": "Free Run Token - Poker",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 555
+      "id": 555,
+      "is_visible": false
     },
     "556": {
       "name": "Free Run Token - Blackjack",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 556
+      "id": 556,
+      "is_visible": false
     },
     "557": {
       "name": "Free Run Token - Gofish",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 557
+      "id": 557,
+      "is_visible": false
     },
     "558": {
       "name": "Free Run Token - Uno",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 558
+      "id": 558,
+      "is_visible": false
     },
     "559": {
       "name": "Free Run Token - Solitaire",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 559
+      "id": 559,
+      "is_visible": false
     },
     "560": {
       "name": "Free Run Token - GoblinInvaders",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 560
+      "id": 560,
+      "is_visible": false
     },
     "561": {
       "name": "Free Run Token - Tetris",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 561
+      "id": 561,
+      "is_visible": false
     },
     "562": {
       "name": "Free Run Token - BarleyBreaker",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 562
+      "id": 562,
+      "is_visible": false
     },
     "563": {
       "name": "Free Run Token - PacMan",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 563
+      "id": 563,
+      "is_visible": false
     },
     "564": {
       "name": "Free Run Token - Frogger",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 564
+      "id": 564,
+      "is_visible": false
     },
     "565": {
       "name": "Free Run Token - Arcade",
       "description": "Internal arcade bookkeeping. Not a collectable.",
-      "id": 565
+      "id": 565,
+      "is_visible": false
     },
     "RavenCoin": {
       "name": "RavenCoin",
@@ -81,12 +92,14 @@
     "Reward Attempt": {
       "name": "Reward Attempt",
       "description": "A paid attempt in progress. One Play Ticket already spent, awaiting a win.",
-      "tradeable": false
+      "tradeable": false,
+      "is_visible": false
     },
     "Dev Key": {
       "name": "Dev Key",
       "description": "Unlocks the developer's Play Ticket mint. Not obtainable in-game.",
-      "tradeable": false
+      "tradeable": false,
+      "is_visible": false
     },
     "Apple Pie": {
       "name": "Apple Pie",
@@ -343,7 +356,8 @@
           "max": 1,
           "dailyCap": 1
         }
-      }
+      },
+      "cooldownSeconds": 86400
     },
     "Dev-Mint-Play-Ticket": {
       "type": "custom",

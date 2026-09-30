@@ -3,20 +3,18 @@ import customTileset from "./assets/nightshade-arcade-tilesheet.png";
 import stairsDown from "./assets/stairs_down.png";
 import ravenCoinIcon from "./assets/RavenCoin.webp";
 import type { SceneId } from "features/world/sceneIds";
-import { isTouchDevice } from "features/world/lib/device";
-import { ArcadeBaseScene } from "./ArcadeBaseScene";
-import { translate } from "lib/i18n/translate";
-import VirtualJoystick from "phaser3-rex-plugins/plugins/virtualjoystick.js";
-import {
-  minigamesEventEmitter,
-  type MinigameType,
-} from "./lib/minigamesEvents";
-import { getGameIdForMachine } from "./data/machineMap";
+import { ArcadeTiledScene } from "./ArcadeTiledScene";
 import { nightshadeArcadeEvents } from "./lib/nightshadeArcadeEvents";
 import { PortalNPC } from "./lib/PortalNPC";
 import { getNightshadeArcadeSpawn } from "./lib/spawns";
 
-export class NightshadeArcadeScene extends ArcadeBaseScene {
+/**
+ * Ground floor of the Nightshade Arcade.
+ *
+ * The staircase in the top-right corner is a warp trigger (see
+ * `addStairsWarp`) that drops the player into {@link NightshadeBasementScene}.
+ */
+export class NightshadeArcadeScene extends ArcadeTiledScene {
   sceneId: SceneId = "nightshade-arcade" as SceneId;
 
   constructor() {
@@ -40,126 +38,11 @@ export class NightshadeArcadeScene extends ArcadeBaseScene {
     super.preload();
   }
 
-  override initialiseControls() {
-    if (isTouchDevice()) {
-      const { centerX, centerY, height } = this.cameras.main;
-      this.joystick = new VirtualJoystick(this, {
-        x: centerX,
-        y: centerY - 35 + height / this.zoom / 2,
-        radius: 15,
-        base: this.add.circle(0, 0, 15, 0x000000, 0.2).setDepth(1000000000),
-        thumb: this.add.circle(0, 0, 7, 0xffffff, 0.2).setDepth(1000000000),
-        forceMin: 2,
-      });
-    }
-
-    super.initialiseControls();
-  }
-
-  // Override initialiseMap to use correct margin/spacing for custom arcade tilesheet
-  initialiseMap() {
-    this.map = this.make.tilemap({ key: "nightshade-arcade" });
-
-    // Add tileset with margin:0, spacing:0 (custom arcade tilesheet settings)
-    const tileset = this.map.addTilesetImage(
-      "Sunnyside V3",
-      "nightshade-tileset",
-      16,
-      16,
-      0, // margin: 0
-      0, // spacing: 0
-    ) as Phaser.Tilemaps.Tileset;
-
-    // Set up collider layers
-    this.colliders = this.add.group();
-
-    if (this.map.getObjectLayer("Collision")) {
-      const collisionPolygons = this.map.createFromObjects("Collision", {
-        scene: this,
-      });
-      collisionPolygons.forEach((polygon) => {
-        this.colliders?.add(polygon);
-        this.physics.world.enable(polygon);
-        (polygon.body as Phaser.Physics.Arcade.Body).setImmovable(true);
-      });
-    }
-
-    // Setup interactable layers
-    if (this.map.getObjectLayer("Collision")) {
-      const interactablesPolygons = this.map.createFromObjects("Collision", {});
-      interactablesPolygons.forEach((polygon) => {
-        const name = (polygon as any).name;
-
-        // Only make machines and special objects interactive
-        if (
-          name?.includes("Machine") ||
-          name === "daily chest" ||
-          name?.includes("prize desk")
-        ) {
-          polygon
-            .setInteractive({ cursor: "pointer" })
-            .on("pointerdown", (p: Phaser.Input.Pointer) => {
-              if (this.joystick?.pointer) return;
-
-              if (p.downElement.nodeName === "CANVAS") {
-                const distance = Phaser.Math.Distance.BetweenPoints(
-                  this.currentPlayer as any,
-                  polygon as Phaser.GameObjects.Polygon,
-                );
-
-                if (distance > 50) {
-                  this.currentPlayer?.speak(translate("base.iam.far.away"));
-                  return;
-                }
-
-                // Exact lookup via data/machineMap.ts — avoids the old
-                // `Machine 1` vs `Machine 10` prefix trap and keeps every
-                // cabinet (1–16) mapped in one editable place.
-                const gameId = getGameIdForMachine(name);
-
-                if (gameId) {
-                  minigamesEventEmitter.emit({ type: gameId as MinigameType });
-                }
-              }
-            });
-        }
-      });
-    }
-
-    // Create all tile layers for rendering
-    this.map.layers.forEach((layerData) => {
-      const layer = this.map.createLayer(layerData.name, [tileset], 0, 0);
-      this.layers[layerData.name] = layer as Phaser.Tilemaps.TilemapLayer;
-    });
-
-    // Set physics world bounds to match the tilemap dimensions
-    this.physics.world.setBounds(
-      0,
-      0,
-      this.map.width * 16,
-      this.map.height * 16,
-    );
-
-    this.triggerColliders = this.add.group();
-
-    if (!this.map.getObjectLayer("Trigger")) return;
-
-    this.map.getObjectLayer("Trigger")?.objects.forEach((trigger) => {
-      const polygon = this.add.polygon(
-        trigger.x as number,
-        trigger.y as number,
-        trigger.polygon as unknown as number[][],
-        0xff0000,
-        0,
-      );
-
-      polygon.data.set("name", trigger.name);
-
-      this.triggerColliders?.add(polygon);
-    });
-  }
-
   async create() {
+    // Scenes are reused by Phaser when they are started again, so clear the
+    // transition guard left behind by the last trip to the basement.
+    this.isTransitioning = false;
+
     super.create();
 
     // Disable all debug rendering
@@ -181,7 +64,21 @@ export class NightshadeArcadeScene extends ArcadeBaseScene {
 
     this.cameras.main.setBackgroundColor("#130b1f");
 
-    const _stairs = this.add.image(440, 47, "stairs");
+    this.add.image(440, 47, "stairs");
+
+    // Walking onto the staircase takes the player down to the basement. The
+    // trigger is the sprite's own 32x32 footprint (x 424–456, y 31–63), so
+    // standing on the landing south of the Tiled blocker (id50, y63) no longer
+    // fires it — the player has to step onto the steps, which are approached
+    // from the west, north of that blocker.
+    this.addStairsWarp({
+      id: "stairs-to-basement",
+      x: 424,
+      y: 31,
+      width: 32,
+      height: 32,
+      to: "nightshade-arcade-basement",
+    });
 
     // Create Raven NPC as the shop keeper with dynamic animation
     const ravenNpc = new PortalNPC(this, 60, 85, "raven");

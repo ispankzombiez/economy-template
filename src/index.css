@@ -31,25 +31,71 @@ body {
   }
 }
 
-.text-stroke {
-  -webkit-text-stroke: 1px #3e2731;
+/**
+ * Balance totals in the HUD, matched to the main game:
+ *
+ * - white fill with a heavy pure-black outline (the main game's 12 offsets).
+ *   Our copy used a brown #3e2731 outline *and* a 1px text stroke, which read
+ *   as a different typeface treatment from every other balance in the game.
+ * - the main game's own `Secondary` face. It is the same file the main game
+ *   loads; it is CORS-readable, so the arcade frame can request it directly
+ *   and falls back to the system font if it is ever unavailable.
+ */
+@font-face {
+  font-family: "Secondary";
+  src: url("https://sunflower-land.com/testnet-assets/fonts/Secondary.ttf")
+    format("truetype");
+  font-display: swap;
 }
 
 .balance-text {
   color: #ffffff;
-  font-size: 14px;
-  line-height: 1;
+  font-family: "Secondary", system-ui, sans-serif;
+  /* No font-size here: the totals inherit the `!text-[28px]` set on their
+     container. A `font-size` declaration on the span beats an inherited one
+     (important or not), and 14px is what made our numbers half the size of
+     the main game's. line-height is 20px — the main game's exact value for
+     its 28px balances, which is what keeps each bar hugging its number
+     instead of the row growing to fit a full 28px line box. */
+  line-height: 20px;
   text-shadow:
-    0 1px 0 #3e2731,
-    1px 0 0 #3e2731,
-    -1px 0 0 #3e2731,
-    0 -1px 0 #3e2731;
+    -1px -1px 0 #000000,
+    1px -1px 0 #000000,
+    -1px 1px 0 #000000,
+    1px 1px 0 #000000,
+    -2px 0 0 #000000,
+    2px 0 0 #000000,
+    0 -2px 0 #000000,
+    0 2px 0 #000000,
+    -2px -2px 0 #000000,
+    2px -2px 0 #000000,
+    -2px 2px 0 #000000,
+    2px 2px 0 #000000;
 }
 
+/**
+ * The two backdrop bars behind the totals rows.
+ *
+ * The main game paints these as flat black at 30% / 25% opacity — a see-through
+ * grey that lets the scene read through it. There is no background-image and no
+ * gradient on the element: what looks blue in a screenshot of the main game is
+ * its water showing *through* the bar, not the bar's own colour. Baking that in
+ * as a solid blue (which is what an earlier pass did) matches one screenshot and
+ * clashes with everything else the arcade floor happens to be doing behind the
+ * HUD. Heights and top offsets are the main game's own values — it pins each
+ * bar rather than centring it, which is what puts the edge where the player
+ * expects it relative to the number.
+ */
 .coins-bb-hud-backdrop {
-  border-radius: 4px 0 0 4px;
+  height: 19px;
+  top: 6px;
+  background-color: rgb(0 0 0);
+  opacity: 0.3;
 }
 
 .sfl-hud-backdrop {
-  border-radius: 4px 0 0 4px;
+  height: 21px;
+  top: 3px;
+  background-color: rgb(0 0 0);
+  opacity: 0.25;
 }

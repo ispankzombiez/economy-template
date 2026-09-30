@@ -45,6 +45,10 @@ export const OuterPanel: React.FC<React.PropsWithChildren<PanelProps>> = ({
   children,
   hasTabs,
   tabAlignment = "top",
+  // Consumed here (not spread onto the div) so React does not warn about an
+  // unknown `bumpkinParts` DOM attribute — callers pass it for parity with the
+  // main game, where the panel renders a portrait.
+  bumpkinParts: _bumpkinParts,
   ...divProps
 }) => {
   const { className, style, ...otherDivProps } = divProps;

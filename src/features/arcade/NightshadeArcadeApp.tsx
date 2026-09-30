@@ -5,8 +5,10 @@ import { NightshadeArcadePhaser } from "./NightshadeArcadePhaser";
 import { minigamesEventEmitter } from "./lib/minigamesEvents";
 import { nightshadeArcadeEvents } from "./lib/nightshadeArcadeEvents";
 import { useMinigameSession, useVipAccess } from "lib/portal";
+import { MmoRoomProvider, useMmoBumpkinJoin } from "lib/mmo";
 import { submitScore } from "lib/portal/api";
 import { getMinigamesApiUrl } from "lib/portal/url";
+import { getNightshadeArcadeSpawn } from "./lib/spawns";
 import {
   PLAY_TICKET_DAILY_CLAIM_ACTION,
   resolveActionAmounts,
@@ -23,16 +25,34 @@ import { NightshadeArcadeDevMint } from "./components/NightshadeArcadeDevMint";
 import { NightshadeArcadeNotice } from "./components/NightshadeArcadeNotice";
 import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
+import { NightshadeKohiDialog } from "./components/NightshadeKohiDialog";
+import { npcModalManager, type SpokenNpc } from "./lib/npcModalManager";
+
+/**
+ * The arcade's Colyseus `sceneId` — must match the key
+ * `NightshadeArcadeScene` starts with, because the room only mirrors players
+ * that carry the same one.
+ */
+const NIGHTSHADE_ARCADE_SCENE_ID = "nightshade-arcade";
 
 export const NightshadeArcadeApp: React.FC = () => {
-  const { jwt, actions, playerEconomy, economyMeta, dispatchAction } =
-    useMinigameSession();
+  const {
+    jwt,
+    actions,
+    playerEconomy,
+    economyMeta,
+    dispatchAction,
+    farmId,
+    playerData,
+  } = useMinigameSession();
   // Session first, Community API as a fallback: `farm.vip.expiresAt` is the only
   // signal. See `lib/portal/vip.ts` and `lib/portal/communityVip.ts`.
   const isVip = useVipAccess();
   const [tokenBalance, setTokenBalance] = useState(0);
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
   const [showShopModal, setShowShopModal] = useState(false);
+  // NPC dialogs, opened from the world by `npcModalManager.open(...)`.
+  const [npc, setNpc] = useState<SpokenNpc | undefined>(undefined);
   const [notice, setNotice] = useState<ArcadeNotice | null>(null);
   // Developer tools are gated on the Dev Key the server requires, not on a name
   // or an id the client can read - see `lib/devAccess.ts`.
@@ -50,6 +70,36 @@ export const NightshadeArcadeApp: React.FC = () => {
     [activeGameId],
   );
   const ActiveGameComponent = activeEntry?.component;
+
+  const sessionUsername = playerData?.resolvedProfile?.username;
+  const bumpkinJoin = useMmoBumpkinJoin();
+
+  /**
+   * Joins the shared production plaza room so everyone on this map sees each
+   * other, the same way `src/examples/tileJump` does: `lib/mmo` connects once
+   * and hands the room handle to the Phaser game through
+   * `MMO_SERVER_REGISTRY_KEY` (`NightshadeArcadePhaser`).
+   *
+   * `sceneId` is the grouping key — only clients that joined with the same
+   * value are mirrored, which isolates the arcade from the plaza and the other
+   * minigames. It rides along in every position packet too, so the basement
+   * announces its own scene key and walking down the stairs changes who can
+   * see you (see `ArcadeBaseScene.sendPositionToServer` / `syncPlayers`).
+   */
+  const mmoConnectOptions = useMemo(() => {
+    const spawn = getNightshadeArcadeSpawn();
+
+    return {
+      sceneId: NIGHTSHADE_ARCADE_SCENE_ID,
+      farmId,
+      // The name tag falls back to `#<farmId>` when the session carries no
+      // username, so send that same label instead of letting the room default
+      // it to "Guest" — `updateUsernames` would otherwise repaint the tag.
+      username: sessionUsername || `#${farmId}`,
+      bumpkin: bumpkinJoin,
+      spawn: { x: spawn.x, y: spawn.y },
+    };
+  }, [farmId, sessionUsername, bumpkinJoin]);
 
   const handleBack = () => {
     setActiveGameId(null);
@@ -178,15 +228,24 @@ export const NightshadeArcadeApp: React.FC = () => {
     };
   }, []);
 
+  // One listener, exactly like the main game's `NPCModals`.
+  useEffect(() => {
+    npcModalManager.listen((openedNpc) => setNpc(openedNpc));
+  }, []);
+
   /**
    * The entryway chests: **one** Play Ticket per player per day.
    *
-   * Both chests dispatch the same published action, whose `dailyCap: 1` is what
-   * makes the pair a single daily allowance rather than two — the second chest
-   * of the day is refused by the server, and the player is told so instead of
-   * getting a silent nothing. Nothing here decides whether the player *may* have
-   * the ticket; the rule engine does, which is why the popup reports the
-   * server's verdict rather than a guess.
+   * Both chests dispatch the same published action, whose `cooldownSeconds:
+   * 86400` is what makes the pair a single daily allowance rather than two — the
+   * second chest of the day is refused by the server, and the player is told so
+   * instead of getting a silent nothing. (Its `dailyCap: 1` is belt-and-braces:
+   * that cap counts against `dailyMinted`, which held no `Claim-Play-Ticket`
+   * entry on a day the chest had already paid out, so the cooldown in
+   * `rules[<actionId>].ranAt` is the rule that actually holds.)
+   * Nothing here decides whether the player *may* have the ticket; the rule
+   * engine does, which is why the popup reports the server's verdict rather
+   * than a guess.
    *
    * FLOWER purchases stay published on the host page as a top-up for a player who
    * has already claimed today, so the refusal points at them.
@@ -251,7 +310,9 @@ export const NightshadeArcadeApp: React.FC = () => {
   // its own back navigation via `onBack` — no hub-injected overlay is needed.
   return (
     <>
-      <NightshadeArcadePhaser />
+      <MmoRoomProvider connectOptions={mmoConnectOptions}>
+        <NightshadeArcadePhaser />
+      </MmoRoomProvider>
       <NightshadeArcadeHud extraRavenCoins={tokenBalance} />
       {activeEntry && ActiveGameComponent ? (
         <Modal show className="justify-stretch items-stretch bg-black/55 p-0">
@@ -266,6 +327,9 @@ export const NightshadeArcadeApp: React.FC = () => {
       ) : null}
       <Modal show={showShopModal} onHide={() => setShowShopModal(false)}>
         <NightshadeArcadeShop onClose={() => setShowShopModal(false)} />
+      </Modal>
+      <Modal show={npc === "kohi"} onHide={() => setNpc(undefined)}>
+        <NightshadeKohiDialog onClose={() => setNpc(undefined)} />
       </Modal>
       <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)}>
         {/* The dev mint lives in the chest popup, not the shop: the dev account

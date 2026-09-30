@@ -11,6 +11,7 @@ import {
 import flowerIcon from "../assets/flower_token.webp";
 import { PortalBasketButton } from "./PortalBasketButton";
 import { requestClosePortal } from "lib/portal/closePortal";
+import { isHiddenBalanceItem } from "lib/portal/playerEconomyItemHelpers";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { PIXEL_SCALE } from "lib/constants";
 import worldIcon from "example-assets/icons/world.png";
@@ -24,12 +25,67 @@ const formatter = new Intl.NumberFormat();
 /** How long the full FLOWER balance stays on screen after a click. */
 const FULL_BALANCE_HOLD_MS = 4000;
 
+/** Decimals shown on the totals at rest. */
+const BALANCE_DECIMALS = 2;
+
+/**
+ * A balance, written out in full.
+ *
+ * `String()` is the one formatter here that cannot round: it returns the
+ * shortest text that reads back as the exact same number. `Intl.NumberFormat`
+ * and `toFixed` both have to pick a cut point, and every cut point rounds —
+ * which is how a balance of 0.6 was being shown to players as 1. The
+ * exponential text `String()` produces for extreme magnitudes ("1e-7") is
+ * expanded by hand for the same reason: reaching for a formatter there would
+ * put the rounding back in.
+ */
+const toExactString = (value: number): string => {
+  const raw = String(value);
+  if (!/e/i.test(raw)) return raw;
+
+  const negative = raw.startsWith("-");
+  const [mantissa, exponentText] = (negative ? raw.slice(1) : raw).split(/e/i);
+  const shift = Number(exponentText);
+  const [whole, decimals = ""] = mantissa.split(".");
+  const digits = whole + decimals;
+  const point = whole.length + shift;
+
+  const plain =
+    point <= 0
+      ? `0.${"0".repeat(-point)}${digits}`
+      : point >= digits.length
+        ? `${digits}${"0".repeat(point - digits.length)}`
+        : `${digits.slice(0, point)}.${digits.slice(point)}`;
+
+  return negative ? `-${plain}` : plain;
+};
+
+/**
+ * Render a balance, cutting it off after `decimals` places if given.
+ *
+ * Digits are only ever *truncated*, never rounded, so the figure on screen is
+ * never worth more than the balance behind it. Pass `null` to show every digit
+ * the value actually has — that is what the click-to-reveal uses.
+ */
+const formatBalance = (value: number, decimals: number | null): string => {
+  const [integer, fraction = ""] = toExactString(value).split(".");
+  // Trailing zeros carry no information, so they go — but nothing is ever
+  // rounded up to fill their place.
+  const shown = (
+    decimals === null ? fraction : fraction.slice(0, decimals)
+  ).replace(/0+$/, "");
+  const grouped = formatter.format(Number(integer));
+  return shown ? `${grouped}.${shown}` : grouped;
+};
+
 const NightshadeArcadeBalances: React.FC<{
   flowers: number;
   ravenCoins: number;
 }> = ({ flowers, ravenCoins }) => {
-  // FLOWER is a long decimal; the arcade shows the whole number and only
-  // reveals the exact figure on click, for a few seconds.
+  // FLOWER carries far more precision than fits on the HUD, so the arcade
+  // truncates to 2 decimals and only reveals the exact figure on click, for a
+  // few seconds. Truncation rather than rounding: the shown number is never
+  // worth more than the balance behind it.
   const [showFullBalance, setShowFullBalance] = useState(false);
 
   useEffect(() => {
@@ -43,26 +99,30 @@ const NightshadeArcadeBalances: React.FC<{
 
   return (
     <div
-      className="relative flex items-center space-x-2 cursor-pointer !text-[28px] text-stroke"
+      className="flex cursor-pointer flex-col items-end space-y-1 !text-[28px]"
       onClick={() => setShowFullBalance(true)}
       title="Click to show the exact FLOWER balance"
     >
-      <div className="h-9 w-full bg-black opacity-25 absolute sfl-hud-backdrop -z-10" />
-      <span className="balance-text">
-        {flowers.toLocaleString(undefined, {
-          maximumFractionDigits: showFullBalance ? 8 : 0,
-        })}
-      </span>
-      <img alt="FLOWER" src={flowerIcon} style={{ width: 26 }} />
-      <div className="flex items-center space-x-2">
+      {/* The main game puts its coin-family totals on the top row. */}
+      <div className="relative flex items-center space-x-2">
+        <div className="coins-bb-hud-backdrop absolute h-9 w-full -z-10" />
         <span className="balance-text mt-0.5">
-          {formatter.format(ravenCoins)}
+          {formatBalance(ravenCoins, null)}
         </span>
         <img
           alt="RavenCoins"
           src={ravenCoinIcon}
           style={{ width: 25, height: 25 }}
         />
+      </div>
+
+      {/* FLOWER gets a row of its own underneath, as it does in the main game. */}
+      <div className="relative flex items-center space-x-2">
+        <div className="sfl-hud-backdrop absolute h-9 w-full -z-10" />
+        <span className="balance-text">
+          {formatBalance(flowers, showFullBalance ? null : BALANCE_DECIMALS)}
+        </span>
+        <img alt="FLOWER" src={flowerIcon} style={{ width: 26, height: 26 }} />
       </div>
     </div>
   );
@@ -111,6 +171,25 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
     balances: playerEconomy?.balances,
   });
 
+  /**
+   * What the basket is allowed to show, and why there are two rules.
+   *
+   * The arcade holds three kinds of bookkeeping balance a player should never see:
+   * the **Reward Attempt** voucher above, the **Dev Key** that gates the developer
+   * mint, and the eleven **Free Run Tokens** that ration the daily allowance. Only
+   * the first has a stable name we can resolve — a config that has not adopted the
+   * others would have no such key — so the two filters are deliberately different:
+   *
+   *  - `rewardAttemptToken` matches the voucher **by name**, which keeps working
+   *    on an economy that predates the editor flag;
+   *  - `isHiddenBalanceItem` reads `is_visible: false`, which is what the editor's
+   *    "Show in dashboard inventory" toggle publishes. The **landing-hub**
+   *    inventory is SFL's own UI and reads that same flag, so one toggle in the
+   *    editor is what keeps both inventories honest.
+   *
+   * Neither rule touches the balances: they are still minted, burned and
+   * `require`d exactly as before, they simply have no row here.
+   */
   const visibleInventoryEntries = useMemo(() => {
     const merged = new Map<string, number>();
 
@@ -126,17 +205,24 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
     appendEntries(playerEconomy.balances);
 
     // Hosted configs key items numerically (`"0"`), so a raw key in the list
-    // would read "0" instead of "Raven Coin".
-    const labelFor = (token: string) =>
-      economyMeta?.items?.[token]?.name ?? token;
+    // would read "0" instead of "Raven Coin". The session meta wins over
+    // `playerEconomy.items`, matching every resolver in `lib/ravenCoin`.
+    const catalogue = { ...playerEconomy?.items, ...economyMeta?.items };
+    const itemFor = (token: string) => catalogue[token];
+    const labelFor = (token: string) => itemFor(token)?.name ?? token;
 
     return Array.from(merged.entries())
-      .filter(([token]) => token !== rewardAttemptToken)
+      .filter(
+        ([token]) =>
+          token !== rewardAttemptToken &&
+          !isHiddenBalanceItem(itemFor(token)),
+      )
       .map(([token, amount]) => ({ token, label: labelFor(token), amount }))
       .sort((a, b) => b.amount - a.amount);
   }, [
     playerData.resolvedProfile.inventory,
     playerEconomy.balances,
+    playerEconomy?.items,
     economyMeta?.items,
     rewardAttemptToken,
   ]);
@@ -189,7 +275,11 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
           />
         </div>
 
-        <div className="absolute right-0 top-24 p-2.5 flex flex-col space-y-2.5">
+        {/* Sits directly under the totals — the rows end at 65px and this wrap
+            adds its own 10px padding, so top-16 (64px) leaves a 9px gap rather
+            than the 41px gap that top-24 used to leave. Kept as its own
+            container so the two never overlap, whatever the totals do. */}
+        <div className="absolute right-0 top-16 p-2.5 flex flex-col space-y-2.5">
           <PortalBasketButton onClick={() => setShowInventory(true)} />
         </div>
       </HudContainer>

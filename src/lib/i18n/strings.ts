@@ -49,6 +49,7 @@ export const EN_STRINGS: Record<string, string> = {
   "welcome.label": "Welcome",
   "detail.basket.empty": "Your basket is empty.",
   dismiss: "Dismiss",
+  "statements.tapCont": "Tap to continue",
 
   "minigame.uiResources.emptyActions":
     "This session has no economy actions yet. Add rules in the minigame editor or use the offline stub in UiResourcesApp.",

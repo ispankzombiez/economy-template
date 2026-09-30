@@ -40,6 +40,15 @@ export type PlayerEconomyBalanceItem = {
    * and appears in the dashboard production zone when the player owns it.
    */
   generator?: boolean;
+  /**
+   * The editor's "Show in dashboard inventory" toggle, published verbatim as
+   * `is_visible` (snake_case, unlike every other key here).
+   *
+   * The API omits the key for an item that is shown, so only an explicit
+   * `false` hides it — `undefined` means visible. This is a display flag, not a
+   * gate: a hidden item is still minted, burned and `require`d normally.
+   */
+  is_visible?: boolean;
   /** Starting balance for new farms (no persisted minigame doc yet). */
   initialBalance?: number;
 };

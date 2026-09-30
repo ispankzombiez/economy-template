@@ -2,7 +2,15 @@ import type { ComponentType } from "react";
 import type { RewardWinMeta } from "./games/adapters/portal";
 
 /** x/y coordinate pair used by spawn helpers */
-export type Coordinates = { x: number; y: number };
+export type Coordinates = {
+  x: number;
+  y: number;
+  /**
+   * Which way the player faces the moment they appear. Omitted = the
+   * container default (right).
+   */
+  facing?: "left" | "right";
+};
 
 /** Props passed to every local arcade game component */
 export interface ArcadeGameProps {

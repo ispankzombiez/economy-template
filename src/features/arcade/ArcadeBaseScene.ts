@@ -12,6 +12,7 @@ import { Footsteps } from "example-assets/sound-effects/soundEffects";
 import type { SceneId } from "features/world/sceneIds";
 import type { Player, PlazaRoomState } from "features/world/types/Room";
 import { translate } from "lib/i18n/translate";
+import { npcModalManager } from "./lib/npcModalManager";
 
 /** Minimal shape previously wired through xstate interpreters. */
 type MMOMachineInterpreter = {
@@ -30,12 +31,12 @@ import {
 
 const SQUARE_WIDTH = 16;
 
-type Coordinates = { x: number; y: number };
+type Coordinates = { x: number; y: number; facing?: "left" | "right" };
 type FactionName = "sunflorians" | "bumpkins" | "goblins" | "nightshades";
 
-// Stub modal managers - SFL world UI has been removed
+// Stub modal managers - SFL world UI has been removed. NPC dialogs are the
+// exception: they are wired up for real in `lib/npcModalManager.ts`.
 const interactableModalManager = { open: (_id: string) => {} };
-const npcModalManager = { open: (_npc: string) => {} };
 const playerModalManager = {
   open: (_opts: { id: number; clothing: any; experience: number }) => {},
 };
@@ -107,6 +108,19 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
   movementAngle: number | undefined;
   serverPosition: { x: number; y: number } = { x: 0, y: 0 };
   packetSentAt = 0;
+  /**
+   * Scene key carried by the last position packet. A floor swap has to be
+   * re-announced even when the player lands on the exact spot they left,
+   * because the room only mirrors players whose `sceneId` matches the scene
+   * you are looking at — this is what moves viewers between floors.
+   */
+  lastSentSceneId?: string;
+  /**
+   * Whether the room's chat/reaction listeners are attached for this run of
+   * the scene. The room is joined by the React side and handed over through
+   * the registry, so it can show up after `create()` has already run.
+   */
+  mmoListenersAttached = false;
 
   playerEntities: {
     [sessionId: string]: BumpkinContainer;
@@ -217,7 +231,14 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
         this.initialiseControls();
       }
 
-      const from = this.mmoService?.state.context.previousSceneId as SceneId;
+      // The standalone arcade has no MMO service, so the scene we warped in
+      // from is handed over by `scene.start(key, { from })` instead.
+      const sceneData = this.scene.settings.data as
+        | { from?: SceneId }
+        | undefined;
+
+      const from = (sceneData?.from ??
+        this.mmoService?.state.context.previousSceneId) as SceneId;
 
       let spawn = this.options.player.spawn;
 
@@ -228,6 +249,9 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
       this.createPlayer({
         x: spawn.x ?? 0,
         y: spawn.y ?? 0,
+        // Which way the player faces on arrival — the stairs spawns appear
+        // turned away from the steps, back into the room.
+        direction: spawn.facing,
         // gameService
         farmId: Number(this.id),
         faction: this.gameState.faction?.name,
@@ -409,6 +433,8 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
   }
 
   public initialiseMMO() {
+    if (this.mmoListenersAttached) return;
+
     if (this.options.mmo.url && this.options.mmo.serverId) {
       this.mmoService?.send("CONNECT", {
         url: this.options.mmo.url,
@@ -417,9 +443,13 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
     }
 
     const server = this.mmoServer;
+    // No room in the registry (yet) — nothing to listen to. `updateOtherPlayers`
+    // calls us again on the first frame the room turns up.
     if (!server) return;
 
-    const removeMessageListener = server.state.messages.onAdd((message) => {
+    this.mmoListenersAttached = true;
+
+    const removeMessageListener = server.state.messages?.onAdd?.((message) => {
       // Old message
       if (message.sentAt < Date.now() - 5000) {
         return;
@@ -440,7 +470,7 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
       }
     });
 
-    const removeReactionListener = server.state.reactions.onAdd((reaction) => {
+    const removeReactionListener = server.state.reactions?.onAdd?.((reaction) => {
       // Old message
       if (reaction.sentAt < Date.now() - 5000) {
         return;
@@ -467,9 +497,14 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
     // send the scene player is in
     // this.room.send()
 
-    this.events.on("shutdown", () => {
-      removeMessageListener();
-      removeReactionListener();
+    // `once`, not `on`: re-entering a floor restarts the same scene instance,
+    // and each run should attach its own listeners rather than stack another
+    // copy on top of the last. Clearing the flag lets that next run re-attach.
+    this.events.once("shutdown", () => {
+      this.mmoListenersAttached = false;
+
+      removeMessageListener?.();
+      removeReactionListener?.();
 
       window.removeEventListener(AUDIO_MUTED_EVENT as any, this.onAudioMuted);
     });
@@ -554,6 +589,7 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
   createPlayer({
     x,
     y,
+    direction,
     farmId,
     username,
     faction,
@@ -566,6 +602,7 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
     isCurrentPlayer: boolean;
     x: number;
     y: number;
+    direction?: "left" | "right";
     farmId: number;
     username?: string;
     faction?: string;
@@ -604,6 +641,7 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
       scene: this,
       x,
       y,
+      direction,
       clothing,
       name: npc,
       faction,
@@ -855,28 +893,41 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
   }
 
   sendPositionToServer() {
-    if (!this.currentPlayer) {
+    const server = this.mmoServer;
+    if (!server || !this.currentPlayer) {
       return;
     }
+
+    // Which floor this packet is for: the room mirrors players per scene, so
+    // this travels with the coordinates rather than being sent once on join.
+    const sceneId = this.scene.key;
 
     // sync player position to server
     if (
       // Hasn't sent to server recently
       Date.now() - this.packetSentAt > 1000 / SEND_PACKET_RATE &&
-      // Position has changed
+      // Position has changed, or the floor changed while standing still —
+      // walking down the stairs must move every other viewer to the basement
+      // with you, even if you arrive on the very tile you left.
       (this.serverPosition.x !== this.currentPlayer.x ||
-        this.serverPosition.y !== this.currentPlayer.y)
+        this.serverPosition.y !== this.currentPlayer.y ||
+        this.lastSentSceneId !== sceneId)
     ) {
       this.serverPosition = {
         x: this.currentPlayer.x,
         y: this.currentPlayer.y,
       };
+      this.lastSentSceneId = sceneId;
 
       this.packetSentAt = Date.now();
 
-      const server = this.mmoServer;
-      if (server) {
-        server.send(0, this.serverPosition);
+      try {
+        server.send(0, { ...this.serverPosition, sceneId });
+      } catch {
+        // The socket closed underneath us (connection dropped, or another
+        // session for the same farm took over). Sync resumes on the next move
+        // if it reconnects — this only stops the console filling with the
+        // WebSocket's own error.
       }
     }
   }
@@ -1050,10 +1101,23 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
       // this.registry.get("navigate")(`/world/${warpTo}`);
 
       // this.mmoService?.state.context.server?.send(0, { sceneId: warpTo });
-      this.mmoService?.send("SWITCH_SCENE", { sceneId: warpTo });
+      if (this.mmoService) {
+        this.mmoService.send("SWITCH_SCENE", { sceneId: warpTo });
+        return;
+      }
+
+      // No MMO service in this build — the arcade swaps its own Phaser
+      // scenes instead (e.g. the top-right stairs to the basement).
+      this.scene.start(warpTo, { from: this.sceneId });
     }
   }
   updateOtherPlayers() {
+    // The room is joined by the React side and can arrive after `create()`,
+    // so pick up its chat/reaction listeners on the first frame it exists.
+    if (this.options.mmo.enabled && !this.mmoListenersAttached) {
+      this.initialiseMMO();
+    }
+
     const server = this.mmoServer;
     if (!server) return;
 

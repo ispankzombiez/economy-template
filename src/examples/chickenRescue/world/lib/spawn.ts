@@ -1,4 +1,4 @@
-type Coordinates = { x: number; y: number };
+type Coordinates = { x: number; y: number; facing?: "left" | "right" };
 import type { SceneId } from "../sceneIds";
 import { CONFIG } from "lib/config";
 
@@ -47,6 +47,30 @@ export const SPAWNS: () => SpawnLocation = () => ({
     default: {
       x: 214 + nightshadeArcadeRandomXOffset,
       y: 450 + nightshadeArcadeRandomYOffset,
+    },
+    // Coming back up the stairs lands you just to the left of the top-right
+    // staircase, turned to face left back into the room. The body spans
+    // x 407–417 against the stair warp trigger (x 424–456, y 31–63).
+    "nightshade-arcade-basement": {
+      x: 412,
+      y: 47,
+      facing: "left",
+    },
+  },
+  "nightshade-arcade-basement": {
+    // Just to the left of the south-east staircase (x 344–376, y 208–240),
+    // facing left into the room. The body spans x 327–337 — 7px clear of the
+    // stair warp trigger, so arriving cannot immediately send the player back
+    // upstairs.
+    default: {
+      x: 332,
+      y: 224,
+      facing: "left",
+    },
+    "nightshade-arcade": {
+      x: 332,
+      y: 224,
+      facing: "left",
     },
   },
   bumpkin_house: {

@@ -7,6 +7,7 @@ export {
 } from "./connectProductionMmoRoom";
 export { createDefaultGuestBumpkin } from "./defaultGuestBumpkin";
 export { getOrCreateGuestFarmId } from "./guestIdentity";
+export { useMmoBumpkinJoin } from "./useMmoBumpkinJoin";
 export { MMO_PRODUCTION_PLAZA_ROOM } from "./servers";
 export {
   MmoRoomProvider,

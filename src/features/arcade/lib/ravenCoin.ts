@@ -296,10 +296,12 @@ function machineSuffix(machine: string): string {
 /**
  * The item name carrying a cabinet's free-run token.
  *
- * The economy has no "hidden item" flag, so the name is deliberately plain: it
- * appears in no arcade surface (the HUD renders the coin and Play Tickets by
- * name, and every action sets `showInShop: false`), but the portal-side economy
- * dashboard may still list the item, so it should not read as a collectable.
+ * The name is deliberately plain — `Free Run Token - Poker`, never something
+ * that reads as a prize — because it is bookkeeping rather than a collectable.
+ * The economy editor's "Show in dashboard inventory" toggle now publishes these
+ * as `is_visible: false`, which is what keeps them out of the landing-hub
+ * inventory; the plain name is what keeps them out of any surface that reads
+ * `items` without consulting that flag.
  */
 export function freeRunTokenItemName(machine?: string): string {
   return machine
@@ -441,9 +443,25 @@ export const PLAY_TICKET_SPEND_ACTION = "Mint-Play-Ticket";
 /**
  * The daily Play Ticket the entryway chests award: one per player per day.
  *
- * Published as a ranged mint with `dailyCap: 1`, so the *server* refuses the
- * second chest of the day. Both entryway chests dispatch this same action, which
- * is what makes the pair a single daily allowance rather than two.
+ * Both entryway chests dispatch this same action, which is what makes the pair a
+ * single daily allowance rather than two.
+ *
+ * ## Why a cooldown and not `dailyCap`
+ *
+ * The mint carries `dailyCap: 1` as well, but that is not what stopped the
+ * repeat: on the deployed build a claim went through on 2026-09-28 while
+ * `dailyMinted.minted` still held no `Claim-Play-Ticket` entry, so the cap had
+ * nothing to count and stayed open. The ledger is evidently per-action rather
+ * than universal — {@link RAVEN_COIN_MINT_ACTION} does refuse on its own cap
+ * (`400 Daily cap exceeded`), this one did not — so this action does not lean on
+ * it. The same reasoning is why the free-run grants above carry a cooldown.
+ *
+ * The once-per-day rule is therefore carried by `cooldownSeconds: 86400`, which
+ * the engine tracks in `rules[<actionId>].ranAt`. Verified live after
+ * publishing: a second claim returns `400 This action is on cooldown` and the
+ * ticket balance is unchanged. The player is told so instead of getting a silent
+ * nothing — see `NightshadeArcadeApp`'s chest handler for how that verdict is
+ * reported.
  *
  * This is the free source of Play Tickets. FLOWER purchases remain published on
  * the host page purely as a top-up for a player who has already claimed today.
