@@ -50,3 +50,12 @@ vite.config.ts.timestamp-*.mjs
 # generated locally by scripts/build-vip-index.mjs; published to the vip-data
 # branch by .github/workflows/vip-index.yml, never committed here
 vip-index.json
+
+# local scratch, never committed: reference art and a throwaway layout preview,
+# plus stray root-level copies of images that already live in
+# src/features/arcade/assets/
+/assests/
+/_stairs_preview.html
+/flower-icon.webp
+/kohi-dialog-image.webp
+/kohi_idle.webp
