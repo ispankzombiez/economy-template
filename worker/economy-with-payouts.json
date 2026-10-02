@@ -1,0 +1,823 @@
+{
+  "actions": {
+    "buy_nightshade_ticket": {
+      "burn": {
+        "0": {
+          "amount": 50
+        }
+      },
+      "mint": {
+        "1": {
+          "amount": 1
+        }
+      },
+      "type": "shop"
+    },
+    "Claim-Play-Ticket": {
+      "mint": {
+        "2": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Claim-Raven-Coin": {
+      "burn": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "0": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Dev-Mint-Play-Ticket": {
+      "require": {
+        "4": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "2": {
+          "min": 1,
+          "max": 10000,
+          "dailyCap": 999999999
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Arcade": {
+      "mint": {
+        "15": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-BarleyBreaker": {
+      "mint": {
+        "12": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Blackjack": {
+      "mint": {
+        "6": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Frogger": {
+      "mint": {
+        "14": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-GoblinInvaders": {
+      "mint": {
+        "10": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Gofish": {
+      "mint": {
+        "7": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-PacMan": {
+      "mint": {
+        "13": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Poker": {
+      "mint": {
+        "5": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-RavenBubbles": {
+      "mint": {
+        "16": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Solitaire": {
+      "mint": {
+        "9": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Tetris": {
+      "mint": {
+        "11": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Grant-Free-Run-Uno": {
+      "mint": {
+        "8": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-BarleyBreaker": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Blackjack": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Frogger": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-GoblinInvaders": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Gofish": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-PacMan": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Poker": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-RavenBubbles": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Solitaire": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Tetris": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Mint-Raven-Coin-Uno": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Arcade": {
+      "burn": {
+        "15": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-BarleyBreaker": {
+      "burn": {
+        "12": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Blackjack": {
+      "burn": {
+        "6": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Frogger": {
+      "burn": {
+        "14": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-GoblinInvaders": {
+      "burn": {
+        "10": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Gofish": {
+      "burn": {
+        "7": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-PacMan": {
+      "burn": {
+        "13": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Poker": {
+      "burn": {
+        "5": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-RavenBubbles": {
+      "burn": {
+        "16": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Solitaire": {
+      "burn": {
+        "9": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Tetris": {
+      "burn": {
+        "11": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Free-Run-Uno": {
+      "burn": {
+        "8": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Start-Ticket-Run": {
+      "burn": {
+        "2": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Void-Reward-Attempt": {
+      "burn": {
+        "3": {
+          "min": 1,
+          "max": 1000
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-10": {
+      "requireAbsent": ["18"],
+      "requireBelow": {
+        "18": 1
+      },
+      "mint": {
+        "0": {
+          "amount": 10
+        },
+        "18": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-50": {
+      "requireAbsent": ["19"],
+      "requireBelow": {
+        "19": 1
+      },
+      "mint": {
+        "0": {
+          "amount": 50
+        },
+        "19": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-100": {
+      "requireAbsent": ["20"],
+      "requireBelow": {
+        "20": 1
+      },
+      "mint": {
+        "0": {
+          "amount": 100
+        },
+        "20": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-PlayTicket-1": {
+      "requireAbsent": ["21"],
+      "requireBelow": {
+        "21": 1
+      },
+      "mint": {
+        "2": {
+          "amount": 1
+        },
+        "21": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-PlayTicket-3": {
+      "requireAbsent": ["22"],
+      "requireBelow": {
+        "22": 1
+      },
+      "mint": {
+        "2": {
+          "amount": 3
+        },
+        "22": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-BetaKey-1": {
+      "requireAbsent": ["23"],
+      "requireBelow": {
+        "23": 1
+      },
+      "mint": {
+        "17": {
+          "amount": 1
+        },
+        "23": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    }
+  },
+  "enabled": false,
+  "items": {
+    "0": {
+      "name": "Raven Coin",
+      "description": "A gold coin used in the Nightshade Arcade",
+      "image": "https://production-minigame-editor-assets.s3.us-east-1.amazonaws.com/minigames/Nightshade-Arcade/items/0.webp",
+      "id": 0,
+      "tradeable": true
+    },
+    "1": {
+      "name": "Nightshade Ticket",
+      "description": "A ticket usable in the Nightshade Arcade Raffles",
+      "image": "https://production-minigame-editor-assets.s3.us-east-1.amazonaws.com/minigames/nightshade-arcade/items/1.webp",
+      "id": 1
+    },
+    "2": {
+      "name": "Play Ticket",
+      "description": "use for 1 reward run on any arcade game",
+      "image": "https://production-minigame-editor-assets.s3.us-east-1.amazonaws.com/minigames/nightshade-arcade/items/2.png",
+      "id": 2
+    },
+    "3": {
+      "name": "Reward Attempt",
+      "description": "A reward run in progress. Opened against the free daily allowance or a Play Ticket, awaiting a win.",
+      "id": 3,
+      "is_visible": false,
+      "max": 1
+    },
+    "4": {
+      "name": "Dev Key",
+      "description": "iSPANK's Shiny Key",
+      "id": 4,
+      "is_visible": false,
+      "max": 1,
+      "supply": 1
+    },
+    "5": {
+      "name": "Free Run Token - Poker",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 5,
+      "is_visible": false,
+      "max": 1
+    },
+    "6": {
+      "name": "Free Run Token - Blackjack",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 6,
+      "is_visible": false,
+      "max": 1
+    },
+    "7": {
+      "name": "Free Run Token - Gofish",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 7,
+      "is_visible": false,
+      "max": 1
+    },
+    "8": {
+      "name": "Free Run Token - Uno",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 8,
+      "is_visible": false,
+      "max": 1
+    },
+    "9": {
+      "name": "Free Run Token - Solitaire",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 9,
+      "is_visible": false,
+      "max": 1
+    },
+    "10": {
+      "name": "Free Run Token - GoblinInvaders",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 10,
+      "is_visible": false,
+      "max": 1
+    },
+    "11": {
+      "name": "Free Run Token - Tetris",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 11,
+      "is_visible": false,
+      "max": 1
+    },
+    "12": {
+      "name": "Free Run Token - BarleyBreaker",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 12,
+      "is_visible": false,
+      "max": 1
+    },
+    "13": {
+      "name": "Free Run Token - PacMan",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 13,
+      "is_visible": false,
+      "max": 1
+    },
+    "14": {
+      "name": "Free Run Token - Frogger",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 14,
+      "is_visible": false,
+      "max": 1
+    },
+    "15": {
+      "name": "Free Run Token - Arcade",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 15,
+      "is_visible": false,
+      "max": 1
+    },
+    "16": {
+      "name": "Free Run Token - RavenBubbles",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 16,
+      "is_visible": false,
+      "max": 1
+    },
+    "17": {
+      "name": "Nightshade Arcade Beta Key",
+      "description": "A mark of early access to the Nightshade Arcade.",
+      "id": 17,
+      "tradeable": false,
+      "max": 1
+    },
+    "18": {
+      "name": "Payout Marker RC-10",
+      "description": "Internal arcade bookkeeping. Records that the Raven Coin x10 payout has been claimed.",
+      "id": 18,
+      "is_visible": false,
+      "max": 1
+    },
+    "19": {
+      "name": "Payout Marker RC-50",
+      "description": "Internal arcade bookkeeping. Records that the Raven Coin x50 payout has been claimed.",
+      "id": 19,
+      "is_visible": false,
+      "max": 1
+    },
+    "20": {
+      "name": "Payout Marker RC-100",
+      "description": "Internal arcade bookkeeping. Records that the Raven Coin x100 payout has been claimed.",
+      "id": 20,
+      "is_visible": false,
+      "max": 1
+    },
+    "21": {
+      "name": "Payout Marker PT-1",
+      "description": "Internal arcade bookkeeping. Records that the Play Ticket x1 payout has been claimed.",
+      "id": 21,
+      "is_visible": false,
+      "max": 1
+    },
+    "22": {
+      "name": "Payout Marker PT-3",
+      "description": "Internal arcade bookkeeping. Records that the Play Ticket x3 payout has been claimed.",
+      "id": 22,
+      "is_visible": false,
+      "max": 1
+    },
+    "23": {
+      "name": "Payout Marker BK-1",
+      "description": "Internal arcade bookkeeping. Records that the Nightshade Arcade Beta Key payout has been claimed.",
+      "id": 23,
+      "is_visible": false,
+      "max": 1
+    }
+  },
+  "purchases": {
+    "ticket_1": {
+      "flower": 5,
+      "amount": 1,
+      "itemId": 2
+    },
+    "ticket_2": {
+      "flower": 25,
+      "amount": 6,
+      "itemId": 2
+    },
+    "ticket_3": {
+      "flower": 50,
+      "amount": 15,
+      "itemId": 2
+    },
+    "ticket_4": {
+      "flower": 100,
+      "amount": 30,
+      "itemId": 2
+    }
+  },
+  "descriptions": {
+    "title": "Nightshade Arcade",
+    "subtitle": "no lights or flash photography",
+    "welcome": "Welcome to the Nightshade Arcade",
+    "rules": "Play games to collect 'Raven Coins' and turn them in for prizes."
+  },
+  "playUrl": "https://nightshade-arcade.economies.sunflower-land.com",
+  "mainCurrencyToken": "0"
+}

@@ -9,19 +9,6 @@ export type ArcadeNotice = {
   tone?: "good" | "bad";
 };
 
-type NightshadeArcadeNoticeProps = {
-  notice: ArcadeNotice | null;
-  onClose: () => void;
-  /**
-   * Extra content shown between the message and the OK button.
-   *
-   * This is where the entryway chests hand the developer Play Ticket mint to the
-   * dev account (`NightshadeArcadeDevMint`): one dialog, the chest's result
-   * above and the mint form below, dismissed by the same OK.
-   */
-  children?: React.ReactNode;
-};
-
 /**
  * The arcade's one-at-a-time popup.
  *
@@ -29,12 +16,16 @@ type NightshadeArcadeNoticeProps = {
  * out whether today's Play Ticket was still there. It is deliberately modal and
  * single-button: the chest is a physical click in the world, so the answer has to
  * be something they cannot miss and cannot get out of sync with.
+ *
+ * Single-purpose on purpose. It used to accept extra content, which is how the
+ * developer Play Ticket mint ended up sharing this dialog with the daily chest —
+ * so a developer checking the ticket also got a mint form, and the dialog had two
+ * jobs. The developer tools are under Settings → Developer now.
  */
-export const NightshadeArcadeNotice: React.FC<NightshadeArcadeNoticeProps> = ({
-  notice,
-  onClose,
-  children,
-}) => (
+export const NightshadeArcadeNotice: React.FC<{
+  notice: ArcadeNotice | null;
+  onClose: () => void;
+}> = ({ notice, onClose }) => (
   <Modal show={notice !== null} onHide={onClose}>
     <div className="w-full max-w-sm rounded bg-[#1f1529] p-4 text-white">
       <h2
@@ -47,7 +38,6 @@ export const NightshadeArcadeNotice: React.FC<NightshadeArcadeNoticeProps> = ({
       <p className="mt-2 text-xs leading-relaxed text-[#dfc7f1]">
         {notice?.body}
       </p>
-      {children}
       <div className="mt-4">
         <Button onClick={onClose}>OK</Button>
       </div>

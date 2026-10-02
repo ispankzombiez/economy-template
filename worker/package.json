@@ -1,0 +1,15 @@
+{
+  "name": "nightshade-rewards-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Reward request list for the Nightshade Arcade. Holds a list and verifies who is asking; never touches token balances.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

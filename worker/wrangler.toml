@@ -1,0 +1,50 @@
+# Nightshade Arcade reward worker — Cloudflare config
+#
+# Setup order (see README.md for the click-by-click version):
+#   1. npx wrangler kv namespace create REWARDS
+#   2. paste the printed id into [[kv_namespaces]] below
+#   3. npm install
+#   4. npx wrangler deploy
+
+name = "nightshade-rewards"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+# ------------------------------------------------------------------
+# Storage
+# ------------------------------------------------------------------
+# Paste the "id" that `wrangler kv namespace create REWARDS` prints here.
+# The placeholder below will make the first deploy fail loudly, on purpose.
+[[kv_namespaces]]
+binding = "REWARDS"
+id = "51acbdb2ee5c40b08a6d49a15055a5c1"
+
+# ------------------------------------------------------------------
+# Settings
+# ------------------------------------------------------------------
+[vars]
+# Which Sunflower Land environment this worker talks to: "mainnet" or "dev".
+#
+# This is deliberately a worker setting and not something a request can send.
+# If the client could choose the API host, anyone could point this worker at a
+# server they control and be told they are any farm they like. Do not move this
+# into the request path.
+API_ENV = "mainnet"
+
+# Extra browser origins allowed to call the worker, comma separated.
+# The arcade's own origin and the local dev ports are already built in, so you
+# only need this for something like a staging domain.
+# ALLOWED_ORIGINS = "https://example.com"
+
+# ------------------------------------------------------------------
+# Notes
+# ------------------------------------------------------------------
+# There are no secrets in this worker, and that is the point.
+#
+# Identity comes from the player's own portal JWT, which is checked against
+# Sunflower Land on every request. There is no API key to store, rotate, or
+# accidentally ship in the game bundle.
+#
+# KV is eventually consistent: a write can take up to ~60s to become visible in
+# another region. Harmless here, because actually paying out is guarded by the
+# published button's own requireAbsent, not by this list.

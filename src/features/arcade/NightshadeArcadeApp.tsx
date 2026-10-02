@@ -18,12 +18,14 @@ import {
   resolveRewardAttemptTokenKey,
   supportsFreeRunOpens,
 } from "./lib/ravenCoin";
-import { resolveDevAccess } from "./lib/devAccess";
 import type { RewardWinMeta } from "./games/adapters/portal";
 import { NightshadeArcadeHud } from "./components/NightshadeArcadeHud";
-import { NightshadeArcadeDevMint } from "./components/NightshadeArcadeDevMint";
 import { NightshadeArcadeNotice } from "./components/NightshadeArcadeNotice";
 import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
+import {
+  ArcadeSettingsPanel,
+  type ArcadeSettingsPage,
+} from "./components/ArcadeSettingsPanel";
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
 import { NightshadeKohiDialog } from "./components/NightshadeKohiDialog";
 import { npcModalManager, type SpokenNpc } from "./lib/npcModalManager";
@@ -54,16 +56,11 @@ export const NightshadeArcadeApp: React.FC = () => {
   // NPC dialogs, opened from the world by `npcModalManager.open(...)`.
   const [npc, setNpc] = useState<SpokenNpc | undefined>(undefined);
   const [notice, setNotice] = useState<ArcadeNotice | null>(null);
-  // Developer tools are gated on the Dev Key the server requires, not on a name
-  // or an id the client can read - see `lib/devAccess.ts`.
-  const isDev = useMemo(
-    () =>
-      resolveDevAccess({
-        economyMeta,
-        items: playerEconomy?.items,
-        balances: playerEconomy?.balances,
-      }),
-    [economyMeta, playerEconomy?.items, playerEconomy?.balances],
+  // Settings owns the developer tools now. `null` means closed; the page itself is
+  // gated on the Dev Key inside `ArcadeSettingsPanel`, which is also where the
+  // server-enforced reasoning lives — see `lib/devAccess.ts`.
+  const [settingsPage, setSettingsPage] = useState<ArcadeSettingsPage | null>(
+    null,
   );
   const activeEntry = useMemo(
     () => (activeGameId ? getGameEntry(activeGameId) : undefined),
@@ -313,7 +310,10 @@ export const NightshadeArcadeApp: React.FC = () => {
       <MmoRoomProvider connectOptions={mmoConnectOptions}>
         <NightshadeArcadePhaser />
       </MmoRoomProvider>
-      <NightshadeArcadeHud extraRavenCoins={tokenBalance} />
+      <NightshadeArcadeHud
+        extraRavenCoins={tokenBalance}
+        onOpenSettings={() => setSettingsPage("main")}
+      />
       {activeEntry && ActiveGameComponent ? (
         <Modal show className="justify-stretch items-stretch bg-black/55 p-0">
           <div className="relative h-full w-full overflow-hidden">
@@ -331,12 +331,20 @@ export const NightshadeArcadeApp: React.FC = () => {
       <Modal show={npc === "kohi"} onHide={() => setNpc(undefined)}>
         <NightshadeKohiDialog onClose={() => setNpc(undefined)} />
       </Modal>
-      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)}>
-        {/* The dev mint lives in the chest popup, not the shop: the dev account
-            clicks a chest at the front entryway and gets the mint form in the
-            same dialog as the chest's result. */}
-        {isDev ? <NightshadeArcadeDevMint /> : null}
-      </NightshadeArcadeNotice>
+      {/* The chest popup is a single-purpose dialog: one question, one button.
+          It used to double as the home of the dev mint, which meant a developer
+          opening a chest to check the daily ticket also got a mint form in the
+          same dialog. The developer tools live under Settings → Developer now,
+          behind the Dev Key. */}
+      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)} />
+
+      {settingsPage ? (
+        <ArcadeSettingsPanel
+          page={settingsPage}
+          onNavigate={setSettingsPage}
+          onClose={() => setSettingsPage(null)}
+        />
+      ) : null}
     </>
   );
 };

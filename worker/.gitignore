@@ -1,0 +1,15 @@
+# Wrangler / npm install output.
+#
+# The root `.gitignore` anchors `/node_modules` to the repository root, so it does
+# NOT cover this folder's own `node_modules`. Without this file a local
+# `npm install` here would stage the entire wrangler dependency tree.
+node_modules/
+
+# Wrangler's local dev state (.wrangler/state, SQLite KV replicas).
+.wrangler/
+
+# Secrets. There are none committed by design — identity comes from the player's
+# own game token, so this worker holds no credential worth protecting. The file
+# stays as a guard for anyone who adds a `.dev.vars` while testing.
+.dev.vars
+.env

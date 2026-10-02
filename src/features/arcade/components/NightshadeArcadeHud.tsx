@@ -10,6 +10,7 @@ import {
 } from "../lib/ravenCoin";
 import flowerIcon from "../assets/flower_token.webp";
 import { PortalBasketButton } from "./PortalBasketButton";
+import { ArcadeSettingsButton } from "./ArcadeSettingsButton";
 import { requestClosePortal } from "lib/portal/closePortal";
 import { isHiddenBalanceItem } from "lib/portal/playerEconomyItemHelpers";
 import { SUNNYSIDE } from "example-assets/sunnyside";
@@ -18,12 +19,63 @@ import worldIcon from "example-assets/icons/world.png";
 
 type NightshadeArcadeHudProps = {
   extraRavenCoins: number;
+  /** Opens the settings panel. The HUD owns the button, not the pages. */
+  onOpenSettings: () => void;
 };
 
 const formatter = new Intl.NumberFormat();
 
 /** How long the full FLOWER balance stays on screen after a click. */
 const FULL_BALANCE_HOLD_MS = 4000;
+
+/**
+ * Copy via the async Clipboard API. Returns false instead of throwing, so the
+ * caller can fall through to `execCommand` without a try/catch.
+ *
+ * Resolves false rather than throwing on rejection: this is a convenience on a
+ * HUD label, and a rejected clipboard write is an expected state (see
+ * `copyFarmId` below), not an error worth propagating.
+ */
+async function copyViaClipboardApi(value: string): Promise<boolean> {
+  try {
+    if (!navigator.clipboard?.writeText) return false;
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Copy by selecting a throwaway textarea and running the legacy `copy` command.
+ *
+ * Deprecated, and the reason it is here is that it is the only copy path that
+ * works when the document is not focused — which `writeText` refuses to do. The
+ * textarea is positioned off-screen rather than hidden with `display: none`,
+ * because a non-rendered element cannot be selected and the command would then
+ * copy nothing while still reporting success.
+ */
+function copyViaExecCommand(value: string): boolean {
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "-9999px";
+  textarea.style.opacity = "0";
+
+  document.body.appendChild(textarea);
+
+  try {
+    textarea.select();
+    textarea.setSelectionRange(0, value.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
+}
 
 /** Decimals shown on the totals at rest. */
 const BALANCE_DECIMALS = 2;
@@ -130,6 +182,7 @@ const NightshadeArcadeBalances: React.FC<{
 
 export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
   extraRavenCoins,
+  onOpenSettings,
 }) => {
   const { farmId, playerEconomy, farm, playerData, economyMeta } =
     useMinigameSession();
@@ -158,6 +211,62 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
     playerData.resolvedProfile.balance ?? farm.balance,
   );
   const [showInventory, setShowInventory] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+
+  /**
+   * The farm number, when the session actually resolved one.
+   *
+   * `farmId` is 0 until the session lands and until the portal profile or JWT
+   * supplies a real one (`resolveFarmId` in `lib/portal/playerData` returns 0 when
+   * it finds nothing). Printing "Farm #0" would be worse than printing nothing,
+   * and someone could then paste 0 into the dev form and queue a reward to a farm
+   * that does not exist.
+   *
+   * Printed as bare digits, with no thousands separators, because this is a value
+   * to be copied rather than read: it goes into the dev form's farm-number box,
+   * and `Number("1,128,976,301,583,508")` is `NaN`. The 16 digits are hard to
+   * transcribe by eye either way, so the click-to-copy is what makes this
+   * usable — the grouping was only ever a legibility aid that cost correctness.
+   */
+  const hasFarmId = Number.isFinite(farmId) && farmId > 0;
+
+  /**
+   * Copy the farm number.
+   *
+   * `navigator.clipboard.writeText` is the obvious call and it fails here. It
+   * rejects with `NotAllowedError: Document is not focused` whenever the game
+   * window does not hold OS focus — which is the normal state for a tab the
+   * player has backgrounded, for a second monitor, and for a browser window that
+   * lost focus to devtools. Measured, not assumed: on this page `writeText`
+   * rejected exactly that way while `document.execCommand("copy")` returned true.
+   *
+   * So the fallback is the older `execCommand` path, driven from a throwaway
+   * textarea. It is deprecated but it is still the only thing that works without
+   * document focus, and it is what makes this button dependable.
+   *
+   * Both paths are attempted and only a success is reported. A "Copied!" that did
+   * not copy is worse than no feedback at all, because the player stops trying and
+   * pastes the wrong thing into the dev form.
+   */
+  const copyFarmId = async (value: string) => {
+    // Ordered deliberately: the API first because it is the modern path and does
+    // not need a temporary node, `execCommand` second because it is the one that
+    // survives an unfocused document. `execCommand` is also tried when the API is
+    // *missing* rather than only when it rejects, so both paths run in sequence
+    // and the first success wins.
+    const copiedOk = (await copyViaClipboardApi(value)) || copyViaExecCommand(value);
+
+    if (copiedOk) {
+      setCopied(true);
+    } else {
+      setCopyFailed(true);
+    }
+    window.setTimeout(() => {
+      setCopied(false);
+      setCopyFailed(false);
+    }, FULL_BALANCE_HOLD_MS);
+  };
 
   /**
    * The Reward Attempt voucher is an internal in-flight marker for a paid run,
@@ -261,11 +370,38 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
           />
         </div>
 
+        {/* Identity block, top-left. The farm number is here because it is the
+            only thing a player needs to hand over when someone sends them a
+            reward, and reading a 16-digit number off a screenshot is a miserable
+            way to do it. Click to copy.
+
+            Shown only when the session actually resolved a farm: `farmId` is 0
+            before the session lands (see `resolveFarmId`), and printing "Farm #
+            0" would be worse than printing nothing. */}
         <div className="absolute left-3 top-3 rounded bg-black/55 px-3 py-2 text-xs text-white">
           <div className="font-semibold">
             {playerData.resolvedProfile.username ?? `Farmer #${farmId}`}
           </div>
-          <div className="text-[11px] text-[#e6bfd4]">Nightshade Arcade</div>
+
+          {hasFarmId ? (
+            <button
+              type="button"
+              className={`mt-0.5 cursor-pointer text-left text-[11px] hover:underline ${
+                copyFailed ? "text-red-300" : "text-[#8fe3a0]"
+              }`}
+              title="Copy farm number"
+              onClick={(e) => {
+                e.stopPropagation();
+                void copyFarmId(String(farmId));
+              }}
+            >
+              {copied
+                ? "Copied!"
+                : copyFailed
+                  ? "Copy failed — select it"
+                  : `Farm #${farmId}`}
+            </button>
+          ) : null}
         </div>
 
         <div className="absolute right-0 top-0 p-2.5">
@@ -281,6 +417,15 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
             container so the two never overlap, whatever the totals do. */}
         <div className="absolute right-0 top-16 p-2.5 flex flex-col space-y-2.5">
           <PortalBasketButton onClick={() => setShowInventory(true)} />
+        </div>
+
+        {/* Settings lives in its own bottom-right corner rather than stacked under
+            the inventory: the top-right column is already balances-then-inventory,
+            and a third round button there crowds the numbers players actually read
+            mid-run. Bottom-right is empty on every arcade scene and mirrors where
+            the main game parks its own utility buttons. */}
+        <div className="absolute bottom-3 right-3">
+          <ArcadeSettingsButton onClick={onOpenSettings} />
         </div>
       </HudContainer>
 

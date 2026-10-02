@@ -21,6 +21,10 @@ export const SUNNYSIDE = {
     sad: `${B()}/icons/sad.png`,
     happy: `${B()}/icons/happy.png`,
     search: `${B()}/icons/search.png`,
+    // The main game's own settings glyph, so the arcade's settings button is the
+    // same icon players already know from the HUD. Same path on the same CDN.
+    // (`hammer` above is the mark on the Developer row.)
+    settings: `${B()}/icons/settings.png`,
   },
   decorations: {
     skull: `${B()}/decorations/skull.webp`,

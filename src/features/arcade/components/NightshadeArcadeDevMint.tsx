@@ -12,20 +12,26 @@ import {
 /**
  * Developer-only Play Ticket mint: type a number, press Mint.
  *
- * Renders as a **panel inside the chest popup** (`NightshadeArcadeNotice`),
- * which is where the arcade owner wanted the dev mint to live — the player
- * clicks a chest at the front entryway, and the dev account gets the mint form
- * in the same dialog as the chest's result. It brings no modal or close button
- * of its own; the notice's single OK button dismisses the whole thing.
+ * Renders inside the settings panel's **developer** page, which only exists for
+ * a Dev Key holder. It brings no modal of its own — the settings panel's Back
+ * button leaves it.
  *
  * Uncapped by the owner's decision — the dev account mints as many tickets as
  * it needs, as many times as it needs them. `min`/`max`/`dailyCap` are read
  * back from the published rule purely so the input never asks for a number the
  * rule engine will reject outright (`Amount for 2 must be between 1 and 10000`).
  *
- * Note the username gate in `lib/devAccess.ts` is a UI gate only: a modified
- * client can dispatch this action without ever rendering this panel. Delete the
- * action from the economy before launch.
+ * Lives under Settings → Developer, behind the Dev Key, rather than in the chest
+ * popup it used to share with the daily Play Ticket claim. Only rendered from
+ * there — this component has no visibility logic of its own.
+ *
+ * Colours are dark on the light `Panel`, matching every other panel in the arcade.
+ * They were amber-on-dark for the dark chest popup this no longer renders in.
+ *
+ * The panel's own visibility is a UI gate: a modified client can dispatch this
+ * action without ever rendering it. What actually stops a non-owner is the
+ * server-side `require` on the Dev Key balance documented in `lib/devAccess.ts`
+ * — the rule engine refuses the mint before any of this is drawn.
  */
 export const NightshadeArcadeDevMint: React.FC = () => {
   const { actions, economyMeta, playerEconomy, dispatchAction, apiError } =
@@ -90,19 +96,19 @@ export const NightshadeArcadeDevMint: React.FC = () => {
   };
 
   return (
-    <div className="mt-3 rounded border border-amber-400/40 bg-amber-400/10 p-3">
-      <h3 className="text-xs font-semibold text-amber-200">
+    <div className="rounded border border-[#7a4b52]/30 bg-white/30 p-3">
+      <h3 className="text-xs font-semibold text-black">
         Dev: Mint Play Tickets
       </h3>
 
       {!published ? (
-        <p className="mt-1 text-[11px] text-red-300">
+        <p className="mt-1 text-[11px] text-red-800">
           No <code>{DEV_PLAY_TICKET_MINT_ACTION}</code> action is published, so
           there is nothing to dispatch. Publish it in the economy editor first.
         </p>
       ) : (
         <>
-          <label className="mt-2 block text-xs text-[#dfc7f1]">
+          <label className="mt-2 block text-xs text-black">
             How many Play Tickets?
             <input
               type="number"
@@ -111,11 +117,11 @@ export const NightshadeArcadeDevMint: React.FC = () => {
               max={perCallMax}
               value={rawAmount}
               onChange={(e) => setRawAmount(e.target.value)}
-              className="mt-1 w-full rounded border border-white/20 bg-black/40 p-2 text-sm"
+              className="mt-1 w-full rounded border border-[#7a4b52]/40 bg-white/70 p-2 text-sm text-[#3e2731]"
             />
           </label>
 
-          <p className="mt-2 text-[11px] text-[#c9e5ff]">
+          <p className="mt-2 text-[11px] text-black">
             Holding {held}.{" "}
             {perCallMax === undefined
               ? "No per-mint limit published."
@@ -126,7 +132,7 @@ export const NightshadeArcadeDevMint: React.FC = () => {
           </p>
 
           {!inRange && rawAmount.trim() !== "" ? (
-            <p className="mt-1 text-[11px] text-amber-300">
+            <p className="mt-1 text-[11px] text-red-800">
               {perCallMax === undefined
                 ? `Enter a whole number of at least ${limits?.min ?? 1}.`
                 : `Enter a whole number between ${limits?.min ?? 1} and ${perCallMax.toLocaleString()}.`}
@@ -136,14 +142,14 @@ export const NightshadeArcadeDevMint: React.FC = () => {
           {feedback ? (
             <p
               className={`mt-2 text-xs ${
-                feedback.tone === "good" ? "text-[#8fe3a0]" : "text-red-300"
+                feedback.tone === "good" ? "text-green-800" : "text-red-800"
               }`}
             >
               {feedback.text}
             </p>
           ) : null}
           {apiError && !feedback ? (
-            <p className="mt-2 text-xs text-red-300">{apiError}</p>
+            <p className="mt-2 text-xs text-red-800">{apiError}</p>
           ) : null}
 
           <div className="mt-3">
