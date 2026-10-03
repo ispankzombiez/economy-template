@@ -27,7 +27,9 @@ export type MinigameType =
   | "goblin-invaders"
   | "tetris"
   | "pac-man"
-  | "frogger";
+  | "frogger"
+  | "raven-bubbles"
+  | "sunflower-brawler";
 
 interface MinigameEvent {
   type: MinigameType;

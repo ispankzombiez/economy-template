@@ -9,7 +9,9 @@ import React, {
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
+import { FitStage } from "components/ui/FitStage";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
+import { TouchMoveBar, useIsTouchDevice } from "components/ui/TouchControls";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
@@ -31,7 +33,7 @@ import {
 const _portalState = (state: PortalMachineState) => state.context.state;
 
 const panelClassName =
-  "mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden";
+  "mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden";
 
 const ARENA_WIDTH = 760;
 const ARENA_HEIGHT = 560;
@@ -50,12 +52,23 @@ const WIDE_PADDLE_DURATION_MS = 18000;
 const SLOW_BALL_DURATION_MS = 12000;
 const SLOW_BALL_MULTIPLIER = 0.82;
 const DROP_SPEED = 140;
-const POWERUP_MAX_BALLS = 3;
 const BRICK_COLS = 13;
 const BRICK_WIDTH = 50;
 const BRICK_HEIGHT = 18;
 const BRICK_GAP = 4;
 const MAX_BOUNCE_ANGLE = Math.PI / 3;
+
+/**
+ * The floor on how far a *short window* may shrink the arena.
+ *
+ * It does not apply to width — `FitStage` always fits the width exactly, so a
+ * floor can never push the arena off the side of its container. This is here for
+ * the other case: a short landscape window where the height budget runs out
+ * first. Past 0.38 the arena is a size worth playing and the panel scrolls;
+ * below it there is nothing left to aim in, so the board stops shrinking and the page
+ * scrolls instead.
+ */
+const MIN_STAGE_SCALE = 0.38;
 
 const INTERCEPTED_CODES = new Set([
   "ArrowLeft",
@@ -187,8 +200,51 @@ const getPaddleWidth = (runtime: Runtime) => {
   return runtime.widePaddleMs > 0 ? WIDE_PADDLE_WIDTH : PADDLE_WIDTH;
 };
 
+/**
+ * The paddle's travel, in arena pixels.
+ *
+ * One clamp for both input paths: the tick below and the touch bar's scrub
+ * handler both land here, so a dragged finger and a held arrow key stop at the
+ * same two walls rather than the touch path growing a second, looser range.
+ */
+const clampPaddleX = (x: number, paddleWidth: number) =>
+  clamp(x, SIDE_GUTTER, ARENA_WIDTH - SIDE_GUTTER - paddleWidth);
+
 const getTemplateForWave = (wave: number) => {
   return WAVE_TEMPLATES[(wave - 1) % WAVE_TEMPLATES.length];
+};
+
+/**
+ * Spread a multiball across the reference ball's heading.
+ *
+ * The original's feel is that the ball you were already watching keeps its
+ * momentum and simply *becomes several*. So the heading is taken from a live
+ * ball rather than invented, and the new balls are rotated a few degrees either
+ * side of it: enough to separate them within a frame or two, not so much that
+ * they read as a different shot. Offsets are in radians about the reference
+ * heading, applied in order so consecutive drops peel off alternately.
+ *
+ * `offset` is in radians; the caller passes the index so the spread does not
+ * restart from the same side every time.
+ */
+const MULTIBALL_FAN = [-0.34, 0.34, -0.68, 0.68, -1.02, 1.02, -1.36, 1.36];
+
+const fanAngle = (heading: number, index: number): number => {
+  const offset = MULTIBALL_FAN[index % MULTIBALL_FAN.length];
+  // Reflect rather than accumulate, so a long run of multiballs keeps fanning
+  // outwards instead of winding the whole volley round to the back of the room.
+  return heading + offset * (1 + Math.floor(index / MULTIBALL_FAN.length));
+};
+
+/**
+ * The heading a ball is currently travelling, in the same convention the
+ * paddle launch uses: 0 is straight up.
+ */
+const ballHeading = (ball: Ball): number => {
+  const speed = Math.hypot(ball.vx, ball.vy);
+  if (speed < 0.001) return -Math.PI / 2;
+  const angle = Math.atan2(ball.vx, -ball.vy);
+  return Number.isFinite(angle) ? angle : -Math.PI / 2;
 };
 
 const getPseudoRandom = (
@@ -294,6 +350,8 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
 
   const todaysDifficulty = useMemo(() => getBarleyBreakerDifficulty(), []);
 
+  const isTouchDevice = useIsTouchDevice();
+
   const [mode, setMode] = useState<BarleyBreakerMode | null>(null);
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
@@ -395,6 +453,47 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
     });
   }, [activeDifficulty]);
 
+  // The touch bar's fire button stands in for `Space`. The keyboard is the one
+  // place that already knows how to launch, so the button dispatches the same
+  // `keydown`/`keyup` pair the key itself sends and the handler above runs it —
+  // no second launch path to keep in step with the first.
+  const launchFromTouch = useCallback(() => {
+    for (const type of ["keydown", "keyup"] as const) {
+      window.dispatchEvent(
+        new KeyboardEvent(type, {
+          code: "Space",
+          key: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  }, []);
+
+  // `TouchMoveBar` reports where the finger is across the strip as an absolute
+  // 0..1 ratio, and that maps straight onto the paddle's travel — absolute
+  // rather than the per-frame nudge the polled `ArrowLeft`/`ArrowRight` give,
+  // because a paddle that creeps sideways is a paddle that is always behind the
+  // ball. This only writes `paddleX`; the tick then carries the held ball with
+  // it, so nothing downstream learns there is a second input path.
+  const scrubPaddle = useCallback((ratio: number) => {
+    setRuntime((previous) => {
+      if (!previous || previous.gameOver) return previous;
+
+      const paddleWidth = getPaddleWidth(previous);
+      const leftmost = SIDE_GUTTER;
+      const rightmost = ARENA_WIDTH - SIDE_GUTTER - paddleWidth;
+
+      return {
+        ...previous,
+        paddleX: clampPaddleX(
+          leftmost + ratio * (rightmost - leftmost),
+          paddleWidth,
+        ),
+      };
+    });
+  }, []);
+
   const tick = useCallback(
     (dtMs: number) => {
       setRuntime((previous) => {
@@ -409,10 +508,9 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
           pressedKeysRef.current.has("ArrowRight") ||
           pressedKeysRef.current.has("KeyD");
         const direction = (movingRight ? 1 : 0) - (movingLeft ? 1 : 0);
-        const paddleX = clamp(
+        const paddleX = clampPaddleX(
           previous.paddleX + direction * PADDLE_SPEED * dt,
-          SIDE_GUTTER,
-          ARENA_WIDTH - SIDE_GUTTER - currentPaddleWidth,
+          currentPaddleWidth,
         );
 
         let score: number = previous.score;
@@ -590,45 +688,51 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
         if (collectedExtraLife) {
           lives = Math.min(activeDifficulty.startingLives + 1, lives + 1);
         }
-        if (
-          collectedMultiball &&
-          balls.length > 0 &&
-          balls.length < POWERUP_MAX_BALLS
-        ) {
-          const referenceBall = balls.find((ball) => !ball.stuck) ?? balls[0];
+        if (collectedMultiball && balls.length > 0) {
+          // Fan out from a ball that is actually moving, and **keep every ball
+          // already on the table with its own velocity untouched**.
+          //
+          // This used to rebuild the array from scratch into exactly three
+          // balls aimed at fixed angles, which threw away both the momentum and
+          // the count: collecting a second multiball with eight balls out in
+          // play collapsed them to three, and every ball in the volley snapped
+          // to a heading the player never hit. "All balls follow the inertia of
+          // the ball that was already travelling" is the whole point of the
+          // pickup, so the heading is read off a live ball and each new one is
+          // rotated a few degrees off it.
+          const live = balls.filter((ball) => !ball.stuck);
+          const referenceBall = live[0] ?? balls[0];
           const speed = Math.max(
             160,
             Math.hypot(referenceBall.vx, referenceBall.vy) ||
               getWaveBallSpeed(activeDifficulty, wave),
           );
-          const centerX = referenceBall.x;
-          const centerY = referenceBall.y;
+
+          // Two extra balls per pickup. No cap: the ceiling that used to sit at
+          // three is what stopped a good position from paying off, and every
+          // ball is just another 12-line loop in the tick.
+          const extrasPerPickup = 2;
+          // Seeded off the highest id already on the table rather than the
+          // clock: two multiball drops can land on the same frame, and
+          // `Date.now()` would then hand both the same id and React would drop
+          // a ball from the list as a duplicate key.
+          let nextId = balls.reduce((max, ball) => Math.max(max, ball.id), 0) + 1;
+
           balls = [
-            {
-              id: referenceBall.id,
-              x: centerX,
-              y: centerY,
-              vx: -speed * 0.7,
-              vy: -Math.abs(speed * 0.72),
-              stuck: false,
-            },
-            {
-              id: Date.now() + 101,
-              x: centerX,
-              y: centerY,
-              vx: 0,
-              vy: -speed,
-              stuck: false,
-            },
-            {
-              id: Date.now() + 202,
-              x: centerX,
-              y: centerY,
-              vx: speed * 0.7,
-              vy: -Math.abs(speed * 0.72),
-              stuck: false,
-            },
-          ].slice(0, POWERUP_MAX_BALLS);
+            ...balls,
+            ...Array.from({ length: extrasPerPickup }, (_, index) => {
+              const heading = fanAngle(ballHeading(referenceBall), index);
+              const ball: Ball = {
+                id: nextId++,
+                x: referenceBall.x,
+                y: referenceBall.y,
+                vx: Math.sin(heading) * speed,
+                vy: -Math.cos(heading) * speed,
+                stuck: false,
+              };
+              return ball;
+            }),
+          ];
         }
 
         const nextSpeedMultiplier = slowBallMs > 0 ? SLOW_BALL_MULTIPLIER : 1;
@@ -818,7 +922,11 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
               today&apos;s daily difficulty.
             </div>
             <div className="mt-1">
-              Controls: Arrow keys or A/D to move, Space to launch the barley.
+              {/* Touch players never see the keyboard, so naming it here would
+                  describe controls they cannot reach. */}
+              {isTouchDevice
+                ? "Controls: drag the bar to move, tap LAUNCH to fire the barley."
+                : "Controls: Arrow keys or A/D to move, Space to launch the barley."}
             </div>
           </InnerPanel>
 
@@ -948,20 +1056,49 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </div>
 
-          <div className="mx-auto flex flex-col md:flex-row items-start gap-3">
+          {/* Controls */}
+          {/* Sits in the same column as the arena rather than beside it, so
+              `FitStage` counts it as chrome: it sums the height of the board's
+              siblings, and stacked above the board on a phone that height is
+              real screen the arena has to be measured against. */}
+          <div className="flex justify-center md:justify-start shrink-0">
             <div className="w-full md:w-[190px] rounded border border-white/20 bg-black/40 px-3 py-3 text-xs text-slate-200 space-y-1">
               <div className="font-semibold text-slate-100">Controls</div>
-              <div>Move Left: A / Left</div>
-              <div>Move Right: D / Right</div>
-              <div>Launch: Space</div>
+              {/* The panel sits directly above the arena, so on a phone it is
+                  the first thing read — it must not describe a keyboard the
+                  player has not got. */}
+              {isTouchDevice ? (
+                <>
+                  <div>Move: drag the bar</div>
+                  <div>Launch: tap LAUNCH</div>
+                </>
+              ) : (
+                <>
+                  <div>Move Left: A / Left</div>
+                  <div>Move Right: D / Right</div>
+                  <div>Launch: Space</div>
+                </>
+              )}
               <div>Exit: Exit Button</div>
             </div>
+          </div>
 
+          {/* Arena */}
+          {/* `FitStage` scales the arena down to whatever is actually left for
+              it, and measures the chrome it shares the screen with rather than
+              assuming a size: the arena is 760px wide, so on a phone it was
+              being laid out at full size inside a phone-width popup and clipped
+              by it. Bricks, drops, balls and the paddle are all positioned in
+              arena pixels from the top-left of this element, so nothing
+              downstream changes — only the scale the whole board is drawn at. */}
+          <FitStage
+            width={ARENA_WIDTH}
+            height={ARENA_HEIGHT}
+            minScale={MIN_STAGE_SCALE}
+          >
             <div
-              className="relative rounded border border-slate-500 bg-slate-950 overflow-hidden"
+              className="relative h-full w-full rounded border border-slate-500 bg-slate-950 overflow-hidden"
               style={{
-                width: `${ARENA_WIDTH}px`,
-                height: `${ARENA_HEIGHT}px`,
                 background:
                   "linear-gradient(180deg, rgba(15, 23, 42, 0.95) 0%, rgba(2, 6, 23, 1) 100%)",
               }}
@@ -1106,7 +1243,31 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
                 </div>
               )}
             </div>
-          </div>
+          </FitStage>
+
+          {/* Touch controls */}
+          {/* Barley Breaker was keyboard-only, which made the cabinet
+              unplayable on a phone. `TouchMoveBar` is deliberately not a second
+              input path for the keys: its fire button sends the `Space` pair the
+              keyboard already handles, and its scrub maps the finger onto the
+              same `clampPaddleX` range the `ArrowLeft`/`ArrowRight` poll moves
+              within, so the paddle behaves identically whichever one drives it.
+              It is a *sibling* of the stage rather than a child of it, which is
+              the point: `FitStage` sums the height of the board's siblings, so
+              the bar's height is already being held back from the arena and
+              adding a `reserve` for it as well would count it twice.
+              `shrink-0` keeps the flex column from squashing it. Gated on
+              `(pointer: coarse)`, so a desktop player keeps the keyboard and
+              gets no bar in front of them. */}
+          {isTouchDevice && !runtime.gameOver && (
+            /* `sticky bottom-0`: on a short phone the panel scrolls, and a
+               control bar that scrolls off the bottom is a control bar the
+               player cannot reach. Verified at 320×640, where Pac-Man's down
+               key sat 26px below the fold and simply stopped responding. */
+            <div className="sticky bottom-0 z-10 shrink-0 bg-slate-950/95 py-1">
+              <TouchMoveBar onScrub={scrubPaddle} onFire={launchFromTouch} />
+            </div>
+          )}
 
           <div className="rounded border border-slate-700 bg-slate-900/70 p-3 text-xs text-slate-300 flex flex-wrap items-center justify-between gap-2">
             <div>

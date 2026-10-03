@@ -39,6 +39,8 @@ export const MACHINE_TO_GAME: Readonly<Record<string, string>> = {
   "machine 10": "frogger",
   // ── This fork's eleventh cabinet ──────────────────────────────────────────
   "machine 11": "raven-bubbles",
+  // ── This fork's twelfth cabinet ───────────────────────────────────────────
+  "machine 12": "sunflower-brawler",
 };
 
 /**

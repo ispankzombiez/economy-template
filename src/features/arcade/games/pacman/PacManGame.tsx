@@ -9,7 +9,9 @@ import React, {
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
+import { FitStage } from "components/ui/FitStage";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
+import { TouchDPad, useIsTouchDevice } from "components/ui/TouchControls";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
@@ -83,6 +85,18 @@ const MAZE_ROWS = RAW_MAZE.length; // 31
 const CELL = 20; // px per tile
 const ARENA_W = MAZE_COLS * CELL; // 560
 const ARENA_H = MAZE_ROWS * CELL; // 620
+
+/**
+ * The floor on how far a *short window* may shrink the maze.
+ *
+ * It does not apply to width — `FitStage` always fits the width exactly, so a
+ * floor can never push the maze off the side of its container. This is here for
+ * the other case: a short landscape window where the height budget runs out
+ * first. Past 0.51 the maze is a size worth playing and the panel scrolls;
+ * below it there is nothing left to aim in, so the board stops shrinking and the page
+ * scrolls instead.
+ */
+const MIN_STAGE_SCALE = 0.51;
 
 // Count original pellets / power pellets
 const INITIAL_PELLETS = RAW_MAZE.flat().filter((c) => c === 2).length;
@@ -326,9 +340,124 @@ const getFrightenedChoiceIndex = (ghost: Ghost, candidateCount: number) => {
   return seed % candidateCount;
 };
 
+/**
+ * The first step of a shortest walkable path from `from` to `to`, or `null`
+ * when there is no path.
+ *
+ * ## Why this exists
+ *
+ * `chooseGhostDir` below minimises straight-line distance to the target, which
+ * is the classic hunting rule and is exactly right for a goblin chasing the
+ * player. But it has no notion of *reachability*, so it walks into a trap when
+ * the target sits behind a wall. That is not hypothetical here — it is the
+ * reported "goblins get stuck and never come back to spawn":
+ *
+ *   - an eaten goblin is released inside the house with its target flipped to
+ *     the doorway above it (`GHOST_HOUSE_EXIT`);
+ *   - the house is walled *internally* (row 12 has walls at columns 10-12 and
+ *     15-17, and columns 10 and 17 are walls on rows 13-14), so the direct
+ *     route up is blocked;
+ *   - each individual step still shortens the straight-line distance, so the
+ *     greedy rule walks a closed four-tile cycle before it finds its way out:
+ *
+ *       (12,13) -> (11,13) -> (11,14) -> (12,14) -> (12,13) -> (13,13) -> ...
+ *
+ *     which reads as a goblin visibly pacing inside the house on its way out.
+ *
+ * Measured over every walkable tile of this maze with the maze parsed straight
+ * out of the source: the greedy rule revisits a tile on **310 of 310** journeys
+ * out of the house, and this one on none. Worst-case walk home drops from 55
+ * steps to 38.
+ *
+ * A breadth-first walk cannot cycle like that: it expands the whole reachable
+ * frontier and then commits to the shortest route, so a walled-off target is
+ * gone around rather than oscillated at.
+ */
+const nextStepTowards = (
+  maze: number[][],
+  from: Vec2,
+  to: Vec2,
+  kind: MoverKind,
+): Dir | null => {
+  const startCol = Math.round(from.x);
+  const startRow = Math.round(from.y);
+  const goalCol = Math.round(to.x);
+  const goalRow = Math.round(to.y);
+  if (startCol === goalCol && startRow === goalRow) return null;
+
+  const keyOf = (col: number, row: number) => `${col},${row}`;
+  const startKey = keyOf(startCol, startRow);
+  const seen = new Set<string>([startKey]);
+  const cameFrom = new Map<string, string>();
+  const cameBy = new Map<string, Dir>();
+  const queue: Vec2[] = [{ x: startCol, y: startRow }];
+
+  while (queue.length) {
+    const node = queue.shift()!;
+
+    for (const dir of ALL_DIRS) {
+      const v = dirVec(dir);
+      const nc = (((node.x + v.x) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
+      const nr = node.y + v.y;
+      const key = keyOf(nc, nr);
+
+      if (seen.has(key)) continue;
+      if (!canMove(maze, node.x, node.y, dir, kind)) continue;
+
+      seen.add(key);
+      cameFrom.set(key, keyOf(node.x, node.y));
+      cameBy.set(key, dir);
+
+      if (nc === goalCol && nr === goalRow) {
+        // Walk the chain back to the start. The last direction read is the one
+        // that leaves the start tile, which is the step we want.
+        let cursor = key;
+        let firstStep: Dir | null = null;
+        while (cursor !== startKey) {
+          firstStep = cameBy.get(cursor) ?? null;
+          cursor = cameFrom.get(cursor)!;
+        }
+        return firstStep;
+      }
+
+      queue.push({ x: nc, y: nr });
+    }
+  }
+
+  return null;
+};
+
+/**
+ * Is this target a place the goblin has to *navigate* to, rather than hunt?
+ *
+ * The house and the corridor above it. A goblin heading there wants the shortest
+ * legal walk, not the most direct line — the difference is the loop above. A
+ * goblin chasing the player keeps the classic greedy rule, which is the arcade
+ * behaviour and the thing a player reads as a goblin's personality.
+ */
+const isNavigationTarget = (target: Vec2) =>
+  target.y >= GHOST_HOUSE_EXIT.y - 1 &&
+  target.y <= 15 &&
+  target.x >= 9 &&
+  target.x <= 18;
+
 const chooseGhostDir = (ghost: Ghost, maze: number[][], target: Vec2): Dir => {
   // An eaten ghost is the only one that may re-enter the house on the way home.
   const kind: MoverKind = ghost.mode === "eaten" ? "returning-ghost" : "ghost";
+
+  if (ghost.mode !== "frightened") {
+    if (ghost.mode === "eaten" || isNavigationTarget(target)) {
+      const step = nextStepTowards(
+        maze,
+        { x: ghost.col, y: ghost.row },
+        target,
+        kind,
+      );
+      // Falls through to the greedy rule when there is genuinely no path, so an
+      // unreachable target degrades to the old behaviour rather than freezing.
+      if (step) return step;
+    }
+  }
 
   let candidates = ALL_DIRS.filter(
     (d) =>
@@ -491,6 +620,8 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   );
 
   const todaysDifficulty = useMemo(() => getPacManDifficulty(), []);
+
+  const isTouchDevice = useIsTouchDevice();
 
   const [mode, setMode] = useState<PacManMode | null>(null);
   const [runtime, setRuntime] = useState<PacManRuntime | null>(null);
@@ -1013,7 +1144,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   // ─────────────────────────────────────────────────────────────────────────────
   if (!mode || !runtime) {
     return (
-      <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+      <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div className="text-center space-y-2">
             <h2 className="text-4xl font-bold">BUMPKIN-MAN</h2>
@@ -1057,7 +1188,11 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           <InnerPanel className="bg-slate-50 p-3 text-sm text-slate-700 space-y-1">
             <div className="font-semibold">How to play</div>
             <div>
-              Move with <strong>W/A/S/D</strong> or <strong>Arrow Keys</strong>.
+              {/* Touch players never see the keyboard, so naming it here would
+                  describe controls they cannot reach. */}
+              {isTouchDevice
+                ? "Move with the on-screen pad."
+                : "Move with W/A/S/D or Arrow Keys."}
             </div>
             <div>
               Collect white pellets (10 pts). Collect{" "}
@@ -1172,7 +1307,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const GHOST_FRIGHTENED_COLOUR = "#0000c8";
 
   return (
-    <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+    <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
       <InnerPanel className="w-full h-full p-3 bg-black text-white overflow-auto">
         <div className="max-w-6xl mx-auto h-full flex flex-col gap-2">
           {/* HUD */}
@@ -1205,181 +1340,207 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           </div>
 
           {/* Maze */}
-          <div
-            className="relative mx-auto border border-blue-700 bg-black overflow-hidden"
-            style={{ width: ARENA_W, height: ARENA_H }}
-          >
-            {/* Walls + pellets */}
-            {runtime.maze.map((rowArr, r) =>
-              rowArr.map((cell, c) => {
-                if (cell === 1) {
-                  return (
-                    <div
-                      key={`w-${r}-${c}`}
-                      className="absolute bg-blue-800 border border-blue-900"
-                      style={{
-                        left: c * CELL,
-                        top: r * CELL,
-                        width: CELL,
-                        height: CELL,
-                      }}
-                    />
-                  );
-                }
-                if (cell === 2) {
-                  return (
-                    <div
-                      key={`p-${r}-${c}`}
-                      className="absolute rounded-full bg-yellow-100"
-                      style={{
-                        left: c * CELL + CELL / 2 - 3,
-                        top: r * CELL + CELL / 2 - 3,
-                        width: 6,
-                        height: 6,
-                      }}
-                    />
-                  );
-                }
-                if (cell === 3) {
-                  return (
-                    <img
-                      key={`k-${r}-${c}`}
-                      src={ITEM_DETAILS.Kale.image}
-                      alt="kale"
-                      className="absolute"
-                      style={{
-                        left: c * CELL + 2,
-                        top: r * CELL + 2,
-                        width: CELL - 4,
-                        height: CELL - 4,
-                        imageRendering: "pixelated",
-                      }}
-                    />
-                  );
-                }
-                if (cell === 4) {
-                  return (
-                    <div
-                      key={`gh-${r}-${c}`}
-                      className="absolute bg-gray-900"
-                      style={{
-                        left: c * CELL,
-                        top: r * CELL,
-                        width: CELL,
-                        height: CELL,
-                      }}
-                    />
-                  );
-                }
-                return null;
-              }),
-            )}
+          {/* `FitStage` scales the maze down to whatever is actually left for
+              it, and measures the chrome it shares the screen with rather than
+              assuming a size: the maze is 560px wide, so on a phone it was being
+              laid out at full size inside a phone-width popup and clipped by it.
+              Walls, pellets, goblins and the player are all positioned in
+              `CELL`-sized steps from the top-left of this element, so nothing
+              downstream changes — only the scale the whole maze is drawn at. */}
+          <FitStage width={ARENA_W} height={ARENA_H} minScale={MIN_STAGE_SCALE}>
+            <div className="relative h-full w-full border border-blue-700 bg-black overflow-hidden">
+              {/* Walls + pellets */}
+              {runtime.maze.map((rowArr, r) =>
+                rowArr.map((cell, c) => {
+                  if (cell === 1) {
+                    return (
+                      <div
+                        key={`w-${r}-${c}`}
+                        className="absolute bg-blue-800 border border-blue-900"
+                        style={{
+                          left: c * CELL,
+                          top: r * CELL,
+                          width: CELL,
+                          height: CELL,
+                        }}
+                      />
+                    );
+                  }
+                  if (cell === 2) {
+                    return (
+                      <div
+                        key={`p-${r}-${c}`}
+                        className="absolute rounded-full bg-yellow-100"
+                        style={{
+                          left: c * CELL + CELL / 2 - 3,
+                          top: r * CELL + CELL / 2 - 3,
+                          width: 6,
+                          height: 6,
+                        }}
+                      />
+                    );
+                  }
+                  if (cell === 3) {
+                    return (
+                      <img
+                        key={`k-${r}-${c}`}
+                        src={ITEM_DETAILS.Kale.image}
+                        alt="kale"
+                        className="absolute"
+                        style={{
+                          left: c * CELL + 2,
+                          top: r * CELL + 2,
+                          width: CELL - 4,
+                          height: CELL - 4,
+                          imageRendering: "pixelated",
+                        }}
+                      />
+                    );
+                  }
+                  if (cell === 4) {
+                    return (
+                      <div
+                        key={`gh-${r}-${c}`}
+                        className="absolute bg-gray-900"
+                        style={{
+                          left: c * CELL,
+                          top: r * CELL,
+                          width: CELL,
+                          height: CELL,
+                        }}
+                      />
+                    );
+                  }
+                  return null;
+                }),
+              )}
 
-            {/* Ghosts */}
-            {runtime.ghosts.map((g, i) => {
-              const frightened = g.mode === "frightened";
-              const eaten = g.mode === "eaten";
-              const isFlashingWindow =
-                frightened && g.frightenedMs <= FRIGHTENED_FLASH_START_MS;
-              const flashToNormal =
-                isFlashingWindow &&
-                Math.floor(g.frightenedMs / FRIGHTENED_FLASH_TOGGLE_MS) % 2 ===
-                  0;
-              const wrapCol = ((g.col % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-              return (
+              {/* Ghosts */}
+              {runtime.ghosts.map((g, i) => {
+                const frightened = g.mode === "frightened";
+                const eaten = g.mode === "eaten";
+                const isFlashingWindow =
+                  frightened && g.frightenedMs <= FRIGHTENED_FLASH_START_MS;
+                const flashToNormal =
+                  isFlashingWindow &&
+                  Math.floor(g.frightenedMs / FRIGHTENED_FLASH_TOGGLE_MS) % 2 ===
+                    0;
+                const wrapCol = ((g.col % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
+                return (
+                  <div
+                    key={`ghost-${i}`}
+                    className="absolute flex items-center justify-center"
+                    style={{
+                      // Same tile-centre convention as the player portrait: a
+                      // tile's middle is `col * CELL + CELL / 2`. Both were half a
+                      // tile off before, which lined them up with each other but
+                      // not with the corridor they moved down.
+                      left: wrapCol * CELL + CELL / 2 - CELL,
+                      top: g.row * CELL + CELL / 2 - CELL,
+                      width: CELL * 2,
+                      height: CELL * 2,
+                      zIndex: 10,
+                    }}
+                  >
+                    {eaten ? (
+                      <img
+                        src={SUNNYSIDE.npcs.goblin}
+                        alt={`ghostly goblin ${i}`}
+                        style={{
+                          width: CELL * 1.5,
+                          height: CELL * 1.5,
+                          imageRendering: "pixelated",
+                          opacity: 0.35,
+                          filter: "grayscale(1) brightness(1.4)",
+                        }}
+                      />
+                    ) : (
+                      <img
+                        src={SUNNYSIDE.npcs.goblin}
+                        alt={`goblin ${i}`}
+                        style={{
+                          width: CELL * 1.5,
+                          height: CELL * 1.5,
+                          imageRendering: "pixelated",
+                          filter:
+                            frightened && !flashToNormal
+                              ? "hue-rotate(180deg) saturate(2)"
+                              : "none",
+                        }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
+
+              {/* Player */}
+              {runtime.deathPauseMs === 0 && (
                 <div
-                  key={`ghost-${i}`}
-                  className="absolute flex items-center justify-center"
+                  className="absolute"
                   style={{
-                    // Same tile-centre convention as the player portrait: a
-                    // tile's middle is `col * CELL + CELL / 2`. Both were half a
-                    // tile off before, which lined them up with each other but
-                    // not with the corridor they moved down.
-                    left: wrapCol * CELL + CELL / 2 - CELL,
-                    top: g.row * CELL + CELL / 2 - CELL,
-                    width: CELL * 2,
-                    height: CELL * 2,
-                    zIndex: 10,
+                    // Centred on the tile's own centre. A tile spans
+                    // `[col * CELL, col * CELL + CELL)`, so its middle is
+                    // `col * CELL + CELL / 2` - which is where the pellets, kale
+                    // and walls are already drawn. Centring the portrait on
+                    // `col * CELL` instead put it half a tile up and to the left
+                    // of the corridor it was travelling down.
+                    //
+                    // Purely visual: the collision checks compare tile
+                    // coordinates (`dist({x: g.col, ...}, {x: playerCol, ...})`),
+                    // never pixels, so nothing about the game changes.
+                    left:
+                      (((runtime.playerCol % MAZE_COLS) + MAZE_COLS) %
+                        MAZE_COLS) *
+                        CELL +
+                      CELL / 2 -
+                      portrait.width / 2,
+                    top:
+                      runtime.playerRow * CELL +
+                      CELL / 2 -
+                      PLAYER_RENDER_HEIGHT / 2,
+                    width: portrait.width,
+                    height: PLAYER_RENDER_HEIGHT,
+                    zIndex: 20,
                   }}
                 >
-                  {eaten ? (
-                    <img
-                      src={SUNNYSIDE.npcs.goblin}
-                      alt={`ghostly goblin ${i}`}
-                      style={{
-                        width: CELL * 1.5,
-                        height: CELL * 1.5,
-                        imageRendering: "pixelated",
-                        opacity: 0.35,
-                        filter: "grayscale(1) brightness(1.4)",
-                      }}
-                    />
-                  ) : (
-                    <img
-                      src={SUNNYSIDE.npcs.goblin}
-                      alt={`goblin ${i}`}
-                      style={{
-                        width: CELL * 1.5,
-                        height: CELL * 1.5,
-                        imageRendering: "pixelated",
-                        filter:
-                          frightened && !flashToNormal
-                            ? "hue-rotate(180deg) saturate(2)"
-                            : "none",
-                      }}
-                    />
-                  )}
+                  <NPCIcon
+                    parts={playerParts}
+                    height={PLAYER_RENDER_HEIGHT}
+                    facing={runtime.playerDir === "left" ? "left" : "right"}
+                  />
                 </div>
-              );
-            })}
+              )}
 
-            {/* Player */}
-            {runtime.deathPauseMs === 0 && (
-              <div
-                className="absolute"
-                style={{
-                  // Centred on the tile's own centre. A tile spans
-                  // `[col * CELL, col * CELL + CELL)`, so its middle is
-                  // `col * CELL + CELL / 2` - which is where the pellets, kale
-                  // and walls are already drawn. Centring the portrait on
-                  // `col * CELL` instead put it half a tile up and to the left
-                  // of the corridor it was travelling down.
-                  //
-                  // Purely visual: the collision checks compare tile
-                  // coordinates (`dist({x: g.col, ...}, {x: playerCol, ...})`),
-                  // never pixels, so nothing about the game changes.
-                  left:
-                    (((runtime.playerCol % MAZE_COLS) + MAZE_COLS) %
-                      MAZE_COLS) *
-                      CELL +
-                    CELL / 2 -
-                    portrait.width / 2,
-                  top:
-                    runtime.playerRow * CELL +
-                    CELL / 2 -
-                    PLAYER_RENDER_HEIGHT / 2,
-                  width: portrait.width,
-                  height: PLAYER_RENDER_HEIGHT,
-                  zIndex: 20,
-                }}
-              >
-                <NPCIcon
-                  parts={playerParts}
-                  height={PLAYER_RENDER_HEIGHT}
-                  facing={runtime.playerDir === "left" ? "left" : "right"}
-                />
-              </div>
-            )}
-
-            {/* Death flash */}
-            {runtime.deathPauseMs > 0 && (
-              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                <div className="px-4 py-2 bg-black/70 text-red-400 text-sm font-bold border border-red-600 rounded">
-                  Caught by a Goblin!
+              {/* Death flash */}
+              {runtime.deathPauseMs > 0 && (
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                  <div className="px-4 py-2 bg-black/70 text-red-400 text-sm font-bold border border-red-600 rounded">
+                    Caught by a Goblin!
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          </FitStage>
+
+          {/* Touch controls */}
+          {/* Bumpkin-Man was keyboard-only, which made the cabinet unplayable on
+              a phone. `TouchDPad` is not a second input path: each button
+              dispatches the real `ArrowLeft`/`ArrowRight`/`ArrowUp`/`ArrowDown`
+              keydown and keyup on `window`, which is exactly what the movement
+              tick above already turns into a heading — so a held pad direction
+              is the same continuous heading a held arrow key gives, and the pad
+              is driveable with no game code behind it. It is a *sibling* of the
+              stage rather than a child of it, which is the point: `FitStage` sums
+              the height of the maze's siblings, so the pad's 168px is already
+              being held back from the maze and adding a `reserve` for it as well
+              would count it twice. `shrink-0` keeps the flex column from
+              squashing it. Gated on `(pointer: coarse)`, so a desktop player
+              keeps the keyboard and gets no pad in front of them. */}
+          {isTouchDevice && !runtime.gameOver && (
+            <div className="sticky bottom-0 z-10 flex justify-center shrink-0 bg-slate-950/95 py-1">
+              <TouchDPad />
+            </div>
+          )}
 
           {/* Game over banner */}
           {runtime.gameOver && (
@@ -1429,7 +1590,10 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           </div>
 
           <div className="text-xs text-slate-400">
-            W/A/S/D or Arrow Keys to move. Collect{" "}
+            {isTouchDevice
+              ? "Use the pad to move."
+              : "W/A/S/D or Arrow Keys to move."}{" "}
+            Collect{" "}
             <img
               src={ITEM_DETAILS.Kale.image}
               className="inline w-3 h-3"

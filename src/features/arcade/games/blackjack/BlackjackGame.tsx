@@ -37,7 +37,7 @@ import {
 // ─── Shared panel size (matches poker) ───────────────────────────────────────
 
 const bjPanelClassName =
-  "mx-auto w-[min(96vw,1100px)] h-[min(92vh,860px)] overflow-hidden";
+  "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
 
 // ─── Reducer ─────────────────────────────────────────────────────────────────
 
@@ -526,14 +526,23 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
 
   // ─── Rules popover ────────────────────────────────────────────────────────
 
+  // The button is 44x44 so a thumb can find it; the *circle* stays 28px.
+  //
+  // `h-7 w-7` measured 28px at a 358px viewport, which was the only sub-44px
+  // control Blackjack had, and growing the circle itself to 44px would put it
+  // over the HUD's "Bet" cell. So the circle becomes an inner span pinned to
+  // the button's own top-right corner — `items-start justify-end` — which
+  // leaves it at exactly the pixel it was already at, inside a 44x44 target.
   const renderRulesButton = () => (
     <div className="absolute right-4 top-4 z-20">
       <button
         type="button"
         onClick={() => setShowRules((v) => !v)}
-        className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-700 bg-white text-sm font-bold text-gray-800 shadow"
+        className="flex h-11 w-11 items-start justify-end"
       >
-        i
+        <span className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-gray-700 bg-white text-sm font-bold text-gray-800 shadow">
+          i
+        </span>
       </button>
 
       {showRules && (

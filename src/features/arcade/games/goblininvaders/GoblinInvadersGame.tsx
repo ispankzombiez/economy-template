@@ -9,7 +9,9 @@ import React, {
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
+import { FitStage } from "components/ui/FitStage";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
+import { TouchMoveBar, useIsTouchDevice } from "components/ui/TouchControls";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import spaceInvaderMap from "../../assets/space-invader-map.json";
@@ -83,6 +85,18 @@ const MYSTERY_SHIP_RESPAWN_MAX_MS = 16000;
 const LIFE_LOSS_PAUSE_MS = 1800;
 const PLAYER_BLINK_INTERVAL_MS = 120;
 
+/**
+ * The floor on how far a *short window* may shrink the arena.
+ *
+ * It does not apply to width — `FitStage` always fits the width exactly, so a
+ * floor can never push the arena off the side of its container. This is here for
+ * the other case: a short landscape window where the height budget runs out
+ * first. Past 0.38 the arena is a size worth playing and the panel scrolls;
+ * below it there is nothing left to aim in, so the board stops shrinking and the page
+ * scrolls instead.
+ */
+const MIN_STAGE_SCALE = 0.38;
+
 const INTERCEPTED_CODES = new Set([
   "ArrowLeft",
   "ArrowRight",
@@ -124,6 +138,11 @@ type MysteryShip = {
 
 type GoblinInvadersRuntime = {
   playerX: number;
+  /**
+   * Where the touch bar is asking the ship to be, chased by the tick at
+   * `PLAYER_SPEED` rather than applied outright. `null` when nothing is chasing.
+   */
+  playerTargetX: number | null;
   /** Which way the player's bumpkin portrait faces, so it can turn. */
   playerFacing: "left" | "right";
   score: number;
@@ -309,6 +328,7 @@ const createMysteryShip = (): MysteryShip => ({
 
 const createInitialRuntime = (): GoblinInvadersRuntime => ({
   playerX: ARENA_WIDTH / 2 - PLAYER_SIZE / 2,
+  playerTargetX: null,
   playerFacing: "right",
   score: 0,
   lives: 3,
@@ -330,6 +350,15 @@ const createInitialRuntime = (): GoblinInvadersRuntime => ({
 const clamp = (value: number, min: number, max: number) => {
   return Math.max(min, Math.min(max, value));
 };
+
+/**
+ * The ship's travel, in arena pixels.
+ *
+ * One clamp for both input paths: the tick below and the touch bar's scrub
+ * handler both land here, so a dragged finger and a held arrow key stop at the
+ * same two walls rather than the touch path growing a second, looser range.
+ */
+const clampPlayerX = (x: number) => clamp(x, 0, ARENA_WIDTH - PLAYER_SIZE);
 
 const getEnemyPoints = (row: number) => {
   if (row === 0) return ENEMY_POINTS_TOP;
@@ -370,6 +399,8 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
   );
 
   const todaysDifficulty = useMemo(() => getGoblinInvadersDifficulty(), []);
+
+  const isTouchDevice = useIsTouchDevice();
 
   const [mode, setMode] = useState<GoblinInvadersMode | null>(null);
   const [runtime, setRuntime] = useState<GoblinInvadersRuntime | null>(null);
@@ -475,6 +506,46 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     });
   }, []);
 
+  // The touch bar's fire button stands in for `Space`. The keyboard is the one
+  // place that already knows how to shoot — it owns the one-shot-in-flight rule
+  // and the respawn pause — so the button dispatches the same `keydown`/`keyup`
+  // pair the key itself sends and the handler above runs it. No second fire
+  // path, and therefore nothing to keep in step with the first.
+  const shootFromTouch = useCallback(() => {
+    for (const type of ["keydown", "keyup"] as const) {
+      window.dispatchEvent(
+        new KeyboardEvent(type, {
+          code: "Space",
+          key: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }
+  }, []);
+
+  // `TouchMoveBar` reports where the finger sits across the strip as an
+  // absolute 0..1 ratio, and that maps straight onto the ship's travel —
+  // absolute rather than the per-frame creep the polled
+  // `ArrowLeft`/`ArrowRight` give, because this cabinet is about parking under
+  // a column to line a shot up, and a ship that walks there at a fixed rate
+  // arrives after the column has already stepped. This only writes `playerX`,
+  // through the same `clampPlayerX` the keyboard path clamps with, so nothing
+  // downstream learns there is a second input path.
+  const scrubPlayer = useCallback((ratio: number) => {
+    setRuntime((previous) => {
+      if (!previous || previous.gameOver) return previous;
+
+      // Sets a *target*, not the position. The tick walks toward it at
+      // `PLAYER_SPEED`, so the ship can still be parked under the finger but
+      // cannot cross the arena between two frames.
+      return {
+        ...previous,
+        playerTargetX: clampPlayerX(ratio * (ARENA_WIDTH - PLAYER_SIZE)),
+      };
+    });
+  }, []);
+
   useEffect(() => {
     if (typeof document === "undefined") return;
 
@@ -552,6 +623,15 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
       // keeps looking the way the player was last going instead of snapping back
       // to centre whenever the key is released.
       let playerFacing = previous.playerFacing;
+      let playerTargetX = previous.playerTargetX;
+
+      if (leftPressed || rightPressed) {
+        // A held key is a direct order, so it cancels any touch target that was
+        // still being chased — otherwise the ship would keep drifting toward a
+        // finger position the player had already steered away from.
+        playerTargetX = null;
+      }
+
       if (leftPressed) {
         playerX -= PLAYER_SPEED * dt;
         playerFacing = "left";
@@ -560,7 +640,28 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
         playerX += PLAYER_SPEED * dt;
         playerFacing = "right";
       }
-      playerX = clamp(playerX, 0, ARENA_WIDTH - PLAYER_SIZE);
+
+      // Chase the touch target at the keyboard's own speed.
+      //
+      // The scrub reports where the finger is, and applying that directly tele-
+      // ports the ship: a thumb flicked across the strip crossed all 718px
+      // between frames, which made lining up a shot on a column impossible and
+      // read as the ship teleporting. Moving at `PLAYER_SPEED` keeps absolute
+      // positioning — the ship still ends up under the finger — while giving it
+      // the same handling as the keyboard.
+      if (!leftPressed && !rightPressed && playerTargetX !== null) {
+        const distance = playerTargetX - playerX;
+        const step = PLAYER_SPEED * dt;
+        if (Math.abs(distance) <= step) {
+          playerX = playerTargetX;
+          playerTargetX = null;
+        } else {
+          playerX += Math.sign(distance) * step;
+          playerFacing = distance < 0 ? "left" : "right";
+        }
+      }
+
+      playerX = clampPlayerX(playerX);
 
       let shieldCells = previous.shieldCells;
       let mysteryShip = previous.mysteryShip;
@@ -917,6 +1018,7 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
         ...previous,
         playerX,
         playerFacing,
+        playerTargetX,
         score,
         lives,
         wave,
@@ -992,7 +1094,7 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
 
   if (!mode || !runtime) {
     return (
-      <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+      <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div className="text-center space-y-2">
             <h2 className="text-4xl font-bold">GOBLIN INVADERS</h2>
@@ -1041,7 +1143,11 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
               {todaysDifficulty.maxWaves} waves.
             </div>
             <div className="mt-1">
-              Controls: A/D or Arrow keys to move, Space to fire.
+              {/* Touch players never see the keyboard, so naming it here would
+                  describe controls they cannot reach. */}
+              {isTouchDevice
+                ? "Controls: drag the bar to move, tap FIRE to shoot."
+                : "Controls: A/D or Arrow keys to move, Space to fire."}
             </div>
           </InnerPanel>
 
@@ -1145,14 +1251,14 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     Math.floor(runtime.respawnPauseMs / PLAYER_BLINK_INTERVAL_MS) % 2 === 0;
 
   return (
-    <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+    <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
       <InnerPanel className="w-full h-full p-3 md:p-4 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white overflow-auto">
         <div className="max-w-6xl mx-auto h-full flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
             <div className="font-bold text-lg">
               GOBLIN INVADERS - {activeDifficulty.label}
             </div>
-            <div className="flex gap-2 items-center">
+            <div className="flex flex-wrap gap-2 items-center">
               <span className="px-2 py-1 rounded bg-slate-700">
                 Mode: {mode}
               </span>
@@ -1171,133 +1277,172 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </div>
 
-          <div
-            className="relative mx-auto rounded border border-slate-500 bg-slate-950 overflow-hidden"
-            style={{
-              width: `${ARENA_WIDTH}px`,
-              height: `${ARENA_HEIGHT}px`,
-              backgroundImage: `linear-gradient(to bottom, rgba(2, 6, 23, 0.2), rgba(2, 6, 23, 0.25)), url(${arenaBackgroundUrl || SUNNYSIDE.brand.water_landing})`,
-              backgroundSize: "100% 100%",
-              backgroundPosition: "center",
-            }}
+          {/* Arena */}
+          {/* `FitStage` scales the arena down to whatever is actually left for
+              it, and measures the chrome it shares the screen with rather than
+              assuming a size: the arena is 760px wide, so on a phone it was
+              being laid out at full size inside a phone-width popup and clipped
+              by it. Invaders, shields, shots and the ship are all positioned in
+              arena pixels from the top-left of this element, so nothing
+              downstream changes — only the scale the whole board is drawn at. */}
+          <FitStage
+            width={ARENA_WIDTH}
+            height={ARENA_HEIGHT}
+            minScale={MIN_STAGE_SCALE}
           >
-            {runtime.mysteryShip.active && (
-              <img
-                src={SUNNYSIDE.npcs.goblin}
-                className="absolute"
-                style={{
-                  width: `${MYSTERY_SHIP_WIDTH}px`,
-                  height: `${MYSTERY_SHIP_HEIGHT}px`,
-                  left: `${runtime.mysteryShip.x}px`,
-                  top: `${MYSTERY_SHIP_Y}px`,
-                  imageRendering: "pixelated",
-                  filter: "hue-rotate(250deg) saturate(160%) brightness(1.3)",
-                }}
-                alt="Mystery ship"
-              />
-            )}
-
-            {runtime.enemies
-              .filter((enemy) => enemy.alive)
-              .map((enemy) => (
+            <div
+              className="relative h-full w-full rounded border border-slate-500 bg-slate-950 overflow-hidden"
+              style={{
+                backgroundImage: `linear-gradient(to bottom, rgba(2, 6, 23, 0.2), rgba(2, 6, 23, 0.25)), url(${arenaBackgroundUrl || SUNNYSIDE.brand.water_landing})`,
+                backgroundSize: "100% 100%",
+                backgroundPosition: "center",
+              }}
+            >
+              {runtime.mysteryShip.active && (
                 <img
-                  key={enemy.id}
                   src={SUNNYSIDE.npcs.goblin}
                   className="absolute"
                   style={{
-                    width: `${ENEMY_WIDTH}px`,
-                    height: `${ENEMY_HEIGHT}px`,
-                    left: `${enemy.x}px`,
-                    top: `${enemy.y}px`,
+                    width: `${MYSTERY_SHIP_WIDTH}px`,
+                    height: `${MYSTERY_SHIP_HEIGHT}px`,
+                    left: `${runtime.mysteryShip.x}px`,
+                    top: `${MYSTERY_SHIP_Y}px`,
                     imageRendering: "pixelated",
+                    filter: "hue-rotate(250deg) saturate(160%) brightness(1.3)",
                   }}
-                  alt="Goblin invader"
+                  alt="Mystery ship"
+                />
+              )}
+
+              {runtime.enemies
+                .filter((enemy) => enemy.alive)
+                .map((enemy) => (
+                  <img
+                    key={enemy.id}
+                    src={SUNNYSIDE.npcs.goblin}
+                    className="absolute"
+                    style={{
+                      width: `${ENEMY_WIDTH}px`,
+                      height: `${ENEMY_HEIGHT}px`,
+                      left: `${enemy.x}px`,
+                      top: `${enemy.y}px`,
+                      imageRendering: "pixelated",
+                    }}
+                    alt="Goblin invader"
+                  />
+                ))}
+
+              {runtime.shieldCells.map((cell) => (
+                <div
+                  key={cell.id}
+                  className="absolute"
+                  style={{
+                    width: `${SHIELD_CELL_SIZE}px`,
+                    height: `${SHIELD_CELL_SIZE}px`,
+                    left: `${cell.x}px`,
+                    top: `${cell.y}px`,
+                    background:
+                      cell.hp === 3
+                        ? "#86efac"
+                        : cell.hp === 2
+                          ? "#4ade80"
+                          : "#16a34a",
+                    boxShadow: "inset 0 0 0 1px rgba(2, 6, 23, 0.35)",
+                  }}
                 />
               ))}
 
-            {runtime.shieldCells.map((cell) => (
-              <div
-                key={cell.id}
-                className="absolute"
-                style={{
-                  width: `${SHIELD_CELL_SIZE}px`,
-                  height: `${SHIELD_CELL_SIZE}px`,
-                  left: `${cell.x}px`,
-                  top: `${cell.y}px`,
-                  background:
-                    cell.hp === 3
-                      ? "#86efac"
-                      : cell.hp === 2
-                        ? "#4ade80"
-                        : "#16a34a",
-                  boxShadow: "inset 0 0 0 1px rgba(2, 6, 23, 0.35)",
-                }}
-              />
-            ))}
-
-            {runtime.playerShots.map((shot) => (
-              <div
-                key={shot.id}
-                className="absolute"
-                style={{
-                  width: "4px",
-                  height: "18px",
-                  left: `${shot.x}px`,
-                  top: `${shot.y}px`,
-                  background:
-                    "linear-gradient(180deg, #ffffff 0%, #ffe066 40%, #ff8800 100%)",
-                  borderRadius: "2px",
-                  boxShadow: "0 0 5px 2px rgba(255, 210, 60, 0.8)",
-                }}
-              />
-            ))}
-
-            {runtime.enemyShots.map((shot) => (
-              <img
-                key={shot.id}
-                src={ITEM_DETAILS.Potato.image}
-                className="absolute"
-                style={{
-                  width: "14px",
-                  height: "14px",
-                  left: `${shot.x}px`,
-                  top: `${shot.y}px`,
-                  imageRendering: "pixelated",
-                }}
-                alt="Enemy projectile"
-              />
-            ))}
-
-            <div
-              className="absolute"
-              style={{
-                // Centred on the collision box and bottom-aligned so the bumpkin
-                // sits on the same line. The box is `bumpkinPortraitBox(...)`
-                // wide so the canvas - whose width is measured from the sheet -
-                // can be centred inside it.
-                width: `${portrait.width}px`,
-                height: `${PLAYER_RENDER_HEIGHT}px`,
-                left: `${runtime.playerX + PLAYER_SIZE / 2 - portrait.width / 2}px`,
-                top: `${PLAYER_Y + PLAYER_SIZE - PLAYER_RENDER_HEIGHT}px`,
-              }}
-            >
-              {isPlayerVisible && (
-                <NPCIcon
-                  parts={playerParts}
-                  height={PLAYER_RENDER_HEIGHT}
-                  facing={runtime.playerFacing}
+              {runtime.playerShots.map((shot) => (
+                <div
+                  key={shot.id}
+                  className="absolute"
+                  style={{
+                    width: "4px",
+                    height: "18px",
+                    left: `${shot.x}px`,
+                    top: `${shot.y}px`,
+                    background:
+                      "linear-gradient(180deg, #ffffff 0%, #ffe066 40%, #ff8800 100%)",
+                    borderRadius: "2px",
+                    boxShadow: "0 0 5px 2px rgba(255, 210, 60, 0.8)",
+                  }}
                 />
+              ))}
+
+              {runtime.enemyShots.map((shot) => (
+                <img
+                  key={shot.id}
+                  src={ITEM_DETAILS.Potato.image}
+                  className="absolute"
+                  style={{
+                    width: "14px",
+                    height: "14px",
+                    left: `${shot.x}px`,
+                    top: `${shot.y}px`,
+                    imageRendering: "pixelated",
+                  }}
+                  alt="Enemy projectile"
+                />
+              ))}
+
+              <div
+                className="absolute"
+                style={{
+                  // Centred on the collision box and bottom-aligned so the bumpkin
+                  // sits on the same line. The box is `bumpkinPortraitBox(...)`
+                  // wide so the canvas - whose width is measured from the sheet -
+                  // can be centred inside it.
+                  width: `${portrait.width}px`,
+                  height: `${PLAYER_RENDER_HEIGHT}px`,
+                  left: `${runtime.playerX + PLAYER_SIZE / 2 - portrait.width / 2}px`,
+                  top: `${PLAYER_Y + PLAYER_SIZE - PLAYER_RENDER_HEIGHT}px`,
+                }}
+              >
+                {isPlayerVisible && (
+                  <NPCIcon
+                    parts={playerParts}
+                    height={PLAYER_RENDER_HEIGHT}
+                    facing={runtime.playerFacing}
+                  />
+                )}
+              </div>
+
+              {runtime.respawnPauseMs > 0 && (
+                <div className="absolute inset-0 pointer-events-none grid place-items-center">
+                  <div className="px-3 py-1 rounded bg-black/60 text-xs text-yellow-300 border border-yellow-500/40">
+                    Recovering...
+                  </div>
+                </div>
               )}
             </div>
+          </FitStage>
 
-            {runtime.respawnPauseMs > 0 && (
-              <div className="absolute inset-0 pointer-events-none grid place-items-center">
-                <div className="px-3 py-1 rounded bg-black/60 text-xs text-yellow-300 border border-yellow-500/40">
-                  Recovering...
-                </div>
-              </div>
-            )}
-          </div>
+          {/* Touch controls */}
+          {/* Goblin Invaders was keyboard-only, which made the cabinet
+              unplayable on a phone. `TouchMoveBar` is deliberately not a second
+              input path: its fire button sends the `Space` pair the keyboard
+              already handles, and its scrub maps the finger onto the same
+              `clampPlayerX` range the `ArrowLeft`/`ArrowRight` poll moves
+              within, so the ship behaves identically whichever one drives it.
+              It is a *sibling* of the stage rather than a child of it, which is
+              the point: `FitStage` sums the height of the board's siblings, so
+              the bar's height is already being held back from the arena and
+              adding a `reserve` for it as well would count it twice.
+              `shrink-0` keeps the flex column from squashing it. Gated on
+              `(pointer: coarse)` so a desktop player keeps the keyboard, and on
+              `!gameOver` so the bar is not sitting under a finished run. */}
+          {isTouchDevice && !runtime.gameOver && (
+            /* `sticky bottom-0`: on a short phone the panel scrolls, and a
+               control bar that scrolls off the bottom is a control bar the
+               player cannot reach. */
+            <div className="sticky bottom-0 z-10 shrink-0 bg-slate-950/95 py-1">
+              <TouchMoveBar
+                onScrub={scrubPlayer}
+                onFire={shootFromTouch}
+                fireLabel="FIRE"
+              />
+            </div>
+          )}
 
           {runtime.gameOver && (
             <div
@@ -1329,9 +1474,11 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
           </div>
 
           <div className="text-xs text-slate-300">
-            Move with A/D or Arrow keys. Press Space to shoot. Enemy speed and
-            fire rate increase as waves progress. Use shields for cover and
-            shoot the mystery ship for bonus points.
+            {isTouchDevice
+              ? "Drag the bar to move, tap FIRE to shoot."
+              : "Move with A/D or Arrow keys. Press Space to shoot."}{" "}
+            Enemy speed and fire rate increase as waves progress. Use shields
+            for cover and shoot the mystery ship for bonus points.
           </div>
 
           {showExitConfirm && (

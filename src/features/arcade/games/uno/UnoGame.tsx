@@ -29,7 +29,7 @@ import {
 // ─── Panel size ──────────────────────────────────────────────────────────────
 
 const unoPanelClassName =
-  "mx-auto w-[min(96vw,1100px)] h-[min(92vh,860px)] overflow-hidden";
+  "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
 
 // ─── Suit image map (matches existing games) ─────────────────────────────────
 
@@ -928,7 +928,20 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
 
   return (
     <OuterPanel className={unoPanelClassName}>
-      <InnerPanel className="relative w-full h-full p-4 md:p-5 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
+      {/* `overflow-y-auto`, not `overflow-hidden`, and the hand row below is
+          `flex-none` below `md`. Both were measured at a 358px viewport.
+
+          `hidden` clipped the ~300px by which the column overflowed the panel,
+          which put the discard pile and the game log out of reach. Making the
+          panel scroll is only half of it, though: the hand row was
+          `flex-1 min-h-0`, which is right on a desktop panel because it has
+          leftover space to grow into — but on a phone every other row already
+          exceeds the panel, so `flex-1` (basis 0, shrink 1) had nothing to
+          grow into and collapsed to **zero height**. Your own hand, the only
+          thing you tap, rendered at 0px. `flex-none` lets it take its natural
+          height below `md` and keeps the desktop fill-the-gap behaviour above
+          it. */}
+      <InnerPanel className="relative w-full h-full p-4 md:p-5 overflow-y-auto bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
         <div className="max-w-6xl mx-auto h-full flex flex-col gap-3">
           {/* Header */}
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
@@ -1054,10 +1067,13 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
               {renderCard(topCard)}
             </div>
             {isPlayerTurn && (
+              /* `py-3`, not `py-2`: this is the only other control in the game
+                 besides the cards themselves, and at `py-2` it measured 36px
+                 tall — under the 44px a thumb can be relied on to hit. */
               <button
                 type="button"
                 onClick={handlePlayerDraw}
-                className="px-4 py-2 bg-slate-600 text-white rounded hover:bg-slate-500 active:scale-95 transition-all text-sm font-semibold"
+                className="px-4 py-3 bg-slate-600 text-white rounded hover:bg-slate-500 active:scale-95 transition-all text-sm font-semibold"
               >
                 {gameState.pendingDrawCount > 0
                   ? `Draw ${gameState.pendingDrawCount}`
@@ -1066,8 +1082,10 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
             )}
           </div>
 
-          {/* Player hand */}
-          <div className="flex-1 min-h-0">
+          {/* Player hand. `flex-none` below `md` — see the panel above: at phone
+              width `flex-1` had no free space to grow into and gave this row
+              a 0px height, hiding the hand off the bottom of the panel. */}
+          <div className="flex-none md:flex-1 md:min-h-0">
             <p className="text-xs uppercase text-slate-400 mb-1">
               Your Hand ({playerHand.length} cards)
               {isPlayerTurn && (

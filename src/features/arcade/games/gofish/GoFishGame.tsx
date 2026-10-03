@@ -20,7 +20,7 @@ import {
 } from "./session";
 
 const goFishPanelClassName =
-  "mx-auto w-[min(96vw,1100px)] h-[min(92vh,860px)] overflow-hidden";
+  "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
 
 const RANK_ORDER: CardRank[] = [
   "2",
@@ -648,7 +648,18 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
 
   return (
     <OuterPanel className={goFishPanelClassName}>
-      <InnerPanel className="relative w-full h-full p-4 md:p-5 overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
+      {/* `overflow-y-auto`, not `overflow-hidden`.
+
+          At phone width the column below measures ~1050px of content against
+          the ~710px this panel has left once its borders and padding are
+          taken, and `hidden` threw the difference away instead of scrolling it:
+          *Your Hand* — the only thing in this game the player taps — came out
+          237px below the fold, with the game log a further 351px under that.
+          Measured at a 358px viewport, so Go Fish could not be played at all.
+
+          The panel scrolls instead, which is what Poker's, Blackjack's and
+          Solitaire's already do. */}
+      <InnerPanel className="relative w-full h-full p-4 md:p-5 overflow-y-auto bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white">
         <div className="max-w-6xl mx-auto h-full space-y-3">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div>

@@ -33,9 +33,65 @@ export abstract class ArcadeTiledScene extends ArcadeBaseScene {
         thumb: this.add.circle(0, 0, 7, 0xffffff, 0.2).setDepth(1000000000),
         forceMin: 2,
       });
+
+      this.bindJoystickRelease();
     }
 
     super.initialiseControls();
+  }
+
+  /**
+   * Make sure a lifted finger cannot leave the stick held down.
+   *
+   * `updatePlayer` reads `joystick.force` **every frame** and uses it as the
+   * walking direction, so a joystick left holding a non-zero force walks the
+   * avatar until a wall stops it. The reported symptom was exactly that:
+   * leaving a cabinet and finding the avatar already off in one direction.
+   *
+   * The `VirtualJoystick` plugin only clears itself from `scene.input`'s
+   * `pointerup`, and that is not enough. A finger that lifts while a cabinet's
+   * popup has the pointer delivers its `pointerup` to the popup, not the scene,
+   * and `TouchCursor` can be left mid-drag when its pointer is released out from
+   * under it. Either way the force survives and nothing in the plugin will ever
+   * clear it.
+   *
+   * So the release is driven from every source that can end a gesture —
+   * `pointerup`, `pointercancel`, losing window focus, and the document being
+   * hidden (a phone call, or browser chrome eating the gesture). Toggling
+   * `setEnable` is how the plugin itself drops a held pointer, so this goes
+   * through the same door rather than poking at `force` directly.
+   *
+   * Bound on the window so a lift is caught even when the scene never sees it,
+   * and unbound on shutdown because these scenes restart on every floor change —
+   * a leaked listener would accumulate one more per visit.
+   */
+  private bindJoystickRelease() {
+    const release = () => {
+      const joystick = this.joystick;
+      if (!joystick) return;
+      // Nothing held: leaving it alone keeps the thumb where the player left it.
+      if (!joystick.pointer) return;
+
+      joystick.setEnable(false);
+      joystick.setEnable(true);
+    };
+
+    const events: Array<[string, () => void]> = [
+      ["pointerup", release],
+      ["pointercancel", release],
+      ["blur", release],
+    ];
+    for (const [event, handler] of events) {
+      window.addEventListener(event, handler);
+    }
+    document.addEventListener("visibilitychange", release);
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      for (const [event, handler] of events) {
+        window.removeEventListener(event, handler);
+      }
+      document.removeEventListener("visibilitychange", release);
+    });
   }
 
   // Override initialiseMap to use correct margin/spacing for custom arcade tilesheet

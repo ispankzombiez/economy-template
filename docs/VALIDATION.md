@@ -39,6 +39,7 @@ Before calling a mini-game **shippable**, a human must manually confirm the chec
 
 - [ ] World tiles and pickups use **`@sl-assets`** via **`icons.config.ts` / `resources.config.ts`** (see **`src/examples/pacman/pacman.config.ts`** if you ship that example), not ad-hoc URLs or `Graphics`-drawn stand-ins.
 - [ ] Bumpkin roles use **`BumpkinContainer`** (animation CDN + silhouette), not primitive shapes.
+  - *Arcade cabinets are the documented exception.* **Sunflower Brawler** draws its fighters straight from the animation CDN (`animations.sunflower-land.com`, via `npcSheetUrl` in `fighters.ts`) and its stage from the committed `nightshade-arcade-tilesheet.png`, because a side-scroller needs the raw frame sheets rather than a silhouetted container. Its boss uses `src/features/arcade/assets/big_goblin.png`, committed art copied in from Sunflower Land's `RetreatScene`. The rule it still has to honour is the *spirit* of the line: real character art, never primitive-shape stand-ins — `renderMatch` does fall back to a coloured body for an actor whose sheet has not arrived, but that is a load-time degrade, not the shipped look.
 
 ### Performance (smoke)
 

@@ -1,4 +1,4 @@
-﻿/* eslint-disable react/jsx-no-literals */
+/* eslint-disable react/jsx-no-literals */
 import React, {
   useCallback,
   useContext,
@@ -9,7 +9,9 @@ import React, {
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
+import { FitStage } from "components/ui/FitStage";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
+import { TouchDPad, useIsTouchDevice } from "components/ui/TouchControls";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useVipAccess } from "../adapters/useVipAccess";
@@ -29,12 +31,12 @@ import {
   isFroggerRewardRunAvailable,
 } from "./session";
 
-// â”€â”€ World layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// COLS Ã— CELL = arena width. VIEWPORT_ROWS shown at once via scrolling camera.
+// ── World layout ──────────────────────────────────────────────────────────────
+// COLS × CELL = arena width. VIEWPORT_ROWS shown at once via scrolling camera.
 // WORLD_ROWS is the total map height. Player travels from bottom (row 29) to
 // the home row (row 0) to earn a phase bonus, then resets for more phases.
 const COLS = 14;
-const CELL = 54; // px per tile â€” bigger for better visibility
+const CELL = 54; // px per tile — bigger for better visibility
 const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
 
 /**
@@ -58,7 +60,21 @@ const ARENA_W = COLS * CELL; // 756 px
 const ARENA_H = VIEWPORT_ROWS * CELL; // 594 px
 const WORLD_H = WORLD_ROWS * CELL; // 1620 px
 
-// Player movement speed (pixels per second) â€” feels like "regular area"
+/**
+ * The floor on how far the arena may be scaled down.
+ *
+ * The arena is 756px wide, so on every phone the *width* sets the scale and not
+ * the height: a 320px viewport leaves `FitStage` 288px once its own frame
+ * padding is taken out, which is 0.38 of the board. A floor above that is the
+ * thing clipping the arena — which is the one outcome a floor exists to prevent
+ * — and a floor below it only buys a smaller board, so 0.38 is the highest one
+ * that is still safe. It is what a short landscape window falls back to: past
+ * here the arena is a legitimate size and the panel scrolls, where below it
+ * there is nothing left to aim in.
+ */
+const MIN_STAGE_SCALE = 0.38;
+
+// Player movement speed (pixels per second) — feels like "regular area"
 const PLAYER_SPEED = 130;
 const DIFFICULTY_SCORE_STEP = 1200;
 const FRAGILE_LOG_BASE_CHANCE = 0.3;
@@ -71,7 +87,7 @@ const CHECKPOINT_BONUS = 100; // reaching row 17 (mid-safe) for first time per p
 const HOME_BONUS = 500; // reaching row 0 during each loop band
 const DEATH_PAUSE_MS = 1800;
 
-// Row type lookup â€” row 0 = top (home), row 29 = bottom (start)
+// Row type lookup — row 0 = top (home), row 29 = bottom (start)
 type RowType = "home" | "safe" | "road" | "river" | "checkpoint";
 const ROW_TYPES: RowType[] = [
   "home", // 0
@@ -91,7 +107,7 @@ const ROW_TYPES: RowType[] = [
   "road",
   "road",
   "road", // 12-16
-  "checkpoint", // 17  (mid safe â€” bonus checkpoint)
+  "checkpoint", // 17  (mid safe — bonus checkpoint)
   "river",
   "river",
   "river",
@@ -110,7 +126,7 @@ const HOME_ROW = 0;
 const START_ROW = 29;
 const CHECKPOINT_ROW = 17;
 
-// â”€â”€ Visual config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Visual config ─────────────────────────────────────────────────────────────
 const LANE_COLORS: Record<RowType, string> = {
   home: "#c8971a",
   safe: "#2d6b2d",
@@ -119,7 +135,7 @@ const LANE_COLORS: Record<RowType, string> = {
   checkpoint: "#3a6b22",
 };
 
-// â”€â”€ Entity types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Entity types ──────────────────────────────────────────────────────────────
 type GoblinEntity = {
   id: number;
   worldRow: number;
@@ -171,7 +187,7 @@ type FroggerRuntime = {
   reason?: string;
 };
 
-// â”€â”€ Entity builders â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Entity builders ───────────────────────────────────────────────────────────
 const clamp = (v: number, lo: number, hi: number) =>
   Math.max(lo, Math.min(hi, v));
 
@@ -405,10 +421,10 @@ const createRuntime = (difficulty: FroggerDifficulty): FroggerRuntime => {
   };
 };
 
-// â”€â”€ xstate selector â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── xstate selector ───────────────────────────────────────────────────────────
 const _portalState = (state: PortalMachineState) => state.context.state;
 
-// â”€â”€ Component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ── Component ─────────────────────────────────────────────────────────────────
 export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
   onClose,
 }) => {
@@ -422,6 +438,8 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
   );
 
   const todaysDifficulty = useMemo(() => getFroggerDifficulty(), []);
+
+  const isTouchDevice = useIsTouchDevice();
 
   const [mode, setMode] = useState<FroggerMode | null>(null);
   const [runtime, setRuntime] = useState<FroggerRuntime | null>(null);
@@ -443,7 +461,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
   /** Centering box for the portrait, whose own width is measured at runtime. */
   const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
-  // â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Helpers ────────────────────────────────────────────────────────────────
   const returnToMenu = useCallback(() => {
     setShowExitConfirm(false);
     setShowPracticePrompt(false);
@@ -492,7 +510,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     startRewardRun: () => startSession("reward"),
   });
 
-  // â”€â”€ Tick â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Tick ──────────────────────────────────────────────────────────────────
   const tick = useCallback(
     (prev: FroggerRuntime, dtMs: number): FroggerRuntime => {
       if (prev.gameOver) return prev;
@@ -507,11 +525,11 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         prev.score,
       );
 
-      // â”€â”€ Death pause â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Death pause ────────────────────────────────────────────────────────
       if (prev.deathPauseMs > 0) {
         const rem = prev.deathPauseMs - dtMs;
         if (rem > 0) return { ...prev, deathPauseMs: rem, elapsedMs: nowMs };
-        // Resume â€” player already reset
+        // Resume — player already reset
         return {
           ...prev,
           deathPauseMs: 0,
@@ -520,7 +538,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         };
       }
 
-      // â”€â”€ Move goblins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Move goblins ───────────────────────────────────────────────────────
       const eliteChanceNow = getEliteGoblinChance(prev.score, prev.loopLevel);
       const newGoblins: GoblinEntity[] = prev.goblins.map((g) => {
         const rawNext = g.x + g.dir * g.speed * pressureMult * dt;
@@ -541,7 +559,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         return { ...g, x: nx };
       });
 
-      // â”€â”€ Move logs + carry player on river â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Move logs + carry player on river ──────────────────────────────────
       let carriedDx = 0;
       const playerVirtualRow = Math.floor(prev.playerCY / CELL);
       const playerRowIndex = mod(playerVirtualRow, WORLD_ROWS);
@@ -603,7 +621,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         return next;
       });
 
-      // â”€â”€ Player movement (fluid / velocity-based) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Player movement (fluid / velocity-based) ───────────────────────────
       const keys = pressedKeysRef.current;
       let dx = 0;
       let dy = 0;
@@ -635,7 +653,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
       const newRowIndex = mod(newVirtualRow, WORLD_ROWS);
       const newLoopBand = getLoopBand(newVirtualRow);
 
-      // â”€â”€ Score for advancing upward â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Score for advancing upward ──────────────────────────────────────────
       let {
         score,
         highestProgressVirtualRow,
@@ -660,7 +678,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         homeLoopToken = newLoopBand;
       }
 
-      // â”€â”€ Goblin collision (pixel hitbox) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Goblin collision (pixel hitbox) ─────────────────────────────────────
       const hitShrink = PLAYER_SIZE * 0.15;
       const pLeft = newCX - PLAYER_SIZE / 2 + hitShrink;
       const pRight = newCX + PLAYER_SIZE / 2 - hitShrink;
@@ -694,7 +712,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         }
       }
 
-      // â”€â”€ River (water) collision â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── River (water) collision ─────────────────────────────────────────────
       if (!killedBy && isRiver(newVirtualRow)) {
         const sunkUnderPlayer = sunkThisTick.some(
           (s) =>
@@ -716,7 +734,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         }
       }
 
-      // â”€â”€ Handle death â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Handle death ───────────────────────────────────────────────────────
       if (killedBy) {
         const newLives = prev.lives - 1;
         const resetVirtualRow = newVirtualRow + (START_ROW - newRowIndex);
@@ -754,7 +772,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
         };
       }
 
-      // â”€â”€ Smooth camera â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ── Smooth camera ─────────────────────────────────────────────────────
       const targetCamY = newCY - (ARENA_H - CELL * 0.5);
       const newCamY =
         prev.cameraY + (targetCamY - prev.cameraY) * Math.min(1, dt * 8);
@@ -787,7 +805,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     [activeDifficulty],
   );
 
-  // â”€â”€ RAF loop â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── RAF loop ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mode || !runtime || runtime.gameOver) {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
@@ -811,7 +829,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     };
   }, [mode, runtime?.gameOver, tick]);
 
-  // â”€â”€ Reward submission â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Reward submission ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!runtime?.gameOver || mode !== "reward" || rewardGrantedRef.current)
       return;
@@ -827,14 +845,14 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     rewardGrantedRef.current = true;
   }, [mode, portalService, runtime]);
 
-  // â”€â”€ Unmount cleanup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Unmount cleanup ────────────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
   }, []);
 
-  // â”€â”€ Keyboard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Keyboard ──────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!runtime) return;
 
@@ -868,10 +886,10 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     };
   }, [!!runtime]);
 
-  // â”€â”€ Menu â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Menu ──────────────────────────────────────────────────────────────────
   if (!mode || !runtime) {
     return (
-      <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+      <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div className="text-center space-y-2">
             <h2 className="text-4xl font-bold">FROGGER</h2>
@@ -916,8 +934,16 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
           <InnerPanel className="bg-slate-50 p-3 text-sm text-slate-700 space-y-1">
             <div className="font-semibold">How to play</div>
             <div>
-              Move freely with <strong>W/A/S/D</strong> or{" "}
-              <strong>Arrow Keys</strong>.
+              {/* Touch players never see the keyboard, so naming it here would
+                  describe controls they cannot reach. */}
+              {isTouchDevice ? (
+                "Move freely with the on-screen pad."
+              ) : (
+                <>
+                  Move freely with <strong>W/A/S/D</strong> or{" "}
+                  <strong>Arrow Keys</strong>.
+                </>
+              )}
             </div>
             <div>
               Dodge goblins on the road. Ride floating logs across the river.
@@ -1030,7 +1056,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     );
   }
 
-  // â”€â”€ In-game render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── In-game render ─────────────────────────────────────────────────────────
   const camY = runtime.cameraY;
   const firstVisibleVirtualRow = Math.floor(camY / CELL);
   const lastVisibleVirtualRow = firstVisibleVirtualRow + VIEWPORT_ROWS + 2;
@@ -1040,7 +1066,7 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
     mod(HOME_ROW - playerVirtualRow, WORLD_ROWS) / WORLD_ROWS;
 
   return (
-    <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+    <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
       <InnerPanel className="w-full h-full p-3 bg-[#0a0a1a] text-white overflow-auto">
         <div className="max-w-6xl mx-auto h-full flex flex-col gap-2">
           {/* HUD */}
@@ -1068,263 +1094,294 @@ export const FroggerGame: React.FC<{ onClose?: () => void }> = ({
           </div>
 
           {/* World viewport */}
-          <div
-            className="relative mx-auto overflow-hidden"
-            style={{
-              width: ARENA_W,
-              height: ARENA_H,
-              boxShadow: "0 0 24px 4px rgba(0,0,0,0.8)",
-              border: "2px solid #334",
-            }}
-          >
-            {/* Lane background rows */}
-            {Array.from({ length: VIEWPORT_ROWS + 2 }).map((_, offsetIdx) => {
-              const row = firstVisibleVirtualRow + offsetIdx;
-              const rowIndex = mod(row, WORLD_ROWS);
-              const type = getRowType(row);
-              const screenY = row * CELL - camY;
-              const color = LANE_COLORS[type];
+          {/* `FitStage` scales the arena down to whatever is actually left for
+              it, and measures the chrome it shares the screen with rather than
+              assuming a size: the arena is 756px wide, so on a phone the board
+              was being laid out at full size inside a phone-width popup and
+              clipped by it. The camera, the lanes and the collision maths all
+              read `ARENA_W`/`ARENA_H`, so nothing downstream changes — only the
+              scale the whole board is drawn at. */}
+          <FitStage width={ARENA_W} height={ARENA_H} minScale={MIN_STAGE_SCALE}>
+            <div
+              className="relative h-full w-full overflow-hidden"
+              style={{
+                boxShadow: "0 0 24px 4px rgba(0,0,0,0.8)",
+                border: "2px solid #334",
+              }}
+            >
+              {/* Lane background rows */}
+              {Array.from({ length: VIEWPORT_ROWS + 2 }).map((_, offsetIdx) => {
+                const row = firstVisibleVirtualRow + offsetIdx;
+                const rowIndex = mod(row, WORLD_ROWS);
+                const type = getRowType(row);
+                const screenY = row * CELL - camY;
+                const color = LANE_COLORS[type];
 
-              return (
-                <div
-                  key={`bg-${row}`}
-                  className="absolute"
-                  style={{
-                    left: 0,
-                    top: screenY,
-                    width: ARENA_W,
-                    height: CELL,
-                    backgroundColor: color,
-                    borderBottom: "1px solid rgba(0,0,0,0.2)",
-                  }}
-                >
-                  {/* Road lane markings */}
-                  {type === "road" && (
-                    <div
-                      className="absolute top-1/2 left-0 right-0"
-                      style={{ height: 2, marginTop: -1 }}
-                    >
-                      {Array.from({ length: 14 }).map((_, i) => (
-                        <div
-                          key={i}
-                          className="absolute"
-                          style={{
-                            left: i * 54,
-                            top: 0,
-                            width: 26,
-                            height: 2,
-                            backgroundColor: "rgba(255,255,200,0.15)",
-                          }}
-                        />
-                      ))}
-                    </div>
-                  )}
-                  {/* River wave shimmer */}
-                  {type === "river" && (
-                    <div
-                      className="absolute inset-0 opacity-20"
-                      style={{
-                        background:
-                          "repeating-linear-gradient(90deg, transparent 0, transparent 30px, rgba(255,255,255,0.4) 30px, rgba(255,255,255,0.4) 32px)",
-                      }}
-                    />
-                  )}
-                  {/* Home glow */}
-                  {type === "home" && (
-                    <div
-                      className="absolute inset-0"
-                      style={{
-                        boxShadow: "inset 0 0 20px rgba(255, 196, 80, 0.22)",
-                      }}
-                    ></div>
-                  )}
-                  {/* Safe zone edge highlight lines */}
-                  {(type === "safe" || type === "checkpoint") &&
-                    rowIndex !== START_ROW && (
+                return (
+                  <div
+                    key={`bg-${row}`}
+                    className="absolute"
+                    style={{
+                      left: 0,
+                      top: screenY,
+                      width: ARENA_W,
+                      height: CELL,
+                      backgroundColor: color,
+                      borderBottom: "1px solid rgba(0,0,0,0.2)",
+                    }}
+                  >
+                    {/* Road lane markings */}
+                    {type === "road" && (
                       <div
-                        className="absolute bottom-0 left-0 right-0"
+                        className="absolute top-1/2 left-0 right-0"
+                        style={{ height: 2, marginTop: -1 }}
+                      >
+                        {Array.from({ length: 14 }).map((_, i) => (
+                          <div
+                            key={i}
+                            className="absolute"
+                            style={{
+                              left: i * 54,
+                              top: 0,
+                              width: 26,
+                              height: 2,
+                              backgroundColor: "rgba(255,255,200,0.15)",
+                            }}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {/* River wave shimmer */}
+                    {type === "river" && (
+                      <div
+                        className="absolute inset-0 opacity-20"
                         style={{
-                          height: 1,
-                          backgroundColor: "rgba(255,255,255,0.12)",
+                          background:
+                            "repeating-linear-gradient(90deg, transparent 0, transparent 30px, rgba(255,255,255,0.4) 30px, rgba(255,255,255,0.4) 32px)",
                         }}
                       />
                     )}
-                  {rowIndex === START_ROW && (
-                    <div
-                      className="absolute inset-0 opacity-35"
-                      style={{
-                        background:
-                          "repeating-linear-gradient(90deg, transparent 0, transparent 20px, rgba(255,255,255,0.18) 20px, rgba(255,255,255,0.18) 22px)",
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
+                    {/* Home glow */}
+                    {type === "home" && (
+                      <div
+                        className="absolute inset-0"
+                        style={{
+                          boxShadow: "inset 0 0 20px rgba(255, 196, 80, 0.22)",
+                        }}
+                      ></div>
+                    )}
+                    {/* Safe zone edge highlight lines */}
+                    {(type === "safe" || type === "checkpoint") &&
+                      rowIndex !== START_ROW && (
+                        <div
+                          className="absolute bottom-0 left-0 right-0"
+                          style={{
+                            height: 1,
+                            backgroundColor: "rgba(255,255,255,0.12)",
+                          }}
+                        />
+                      )}
+                    {rowIndex === START_ROW && (
+                      <div
+                        className="absolute inset-0 opacity-35"
+                        style={{
+                          background:
+                            "repeating-linear-gradient(90deg, transparent 0, transparent 20px, rgba(255,255,255,0.18) 20px, rgba(255,255,255,0.18) 22px)",
+                        }}
+                      />
+                    )}
+                  </div>
+                );
+              })}
 
-            {/* Logs */}
-            {runtime.logs
-              .filter((l) => !isLogSunk(l, runtime.elapsedMs))
-              .map((l) => {
+              {/* Logs */}
+              {runtime.logs
+                .filter((l) => !isLogSunk(l, runtime.elapsedMs))
+                .map((l) => {
+                  const rowCopies: number[] = [];
+                  for (
+                    let vr = firstVisibleVirtualRow;
+                    vr <= lastVisibleVirtualRow;
+                    vr += 1
+                  ) {
+                    if (mod(vr, WORLD_ROWS) === l.worldRow) rowCopies.push(vr);
+                  }
+
+                  return rowCopies.flatMap((vr) => {
+                    const screenY = vr * CELL - camY;
+                    return getWrappedCopies(l.x, l.width).map((ox, ci) => {
+                      const armed =
+                        l.kind === "fragile" && l.sinkAtMs !== undefined;
+                      const remainingMs =
+                        armed && l.sinkAtMs
+                          ? Math.max(0, l.sinkAtMs - runtime.elapsedMs)
+                          : 0;
+                      const warningPulse = armed && remainingMs < 1000;
+                      return (
+                        <div
+                          key={`${l.id}-${vr}-${ci}`}
+                          className="absolute"
+                          style={{
+                            left: ox,
+                            top: screenY + 8,
+                            width: l.width,
+                            height: CELL - 16,
+                            backgroundColor:
+                              l.kind === "fragile" ? "#b7792d" : "#6B3A1F",
+                            border:
+                              l.kind === "fragile"
+                                ? "2px solid #d9a66a"
+                                : "2px solid #9C6B3A",
+                            borderRadius: 4,
+                            boxShadow: warningPulse
+                              ? "0 0 10px rgba(255,210,120,0.7), inset 0 3px 0 rgba(255,255,255,0.2)"
+                              : "inset 0 3px 0 rgba(255,255,255,0.15)",
+                            zIndex: 2,
+                          }}
+                        >
+                          {Array.from({ length: Math.floor(l.width / 18) }).map(
+                            (_, gi) => (
+                              <div
+                                key={gi}
+                                className="absolute"
+                                style={{
+                                  left: gi * 18 + 6,
+                                  top: 4,
+                                  width: 2,
+                                  height: CELL - 24,
+                                  backgroundColor: "rgba(0,0,0,0.25)",
+                                  borderRadius: 1,
+                                }}
+                              />
+                            ),
+                          )}
+                        </div>
+                      );
+                    });
+                  });
+                })}
+
+              {/* Goblins */}
+              {runtime.goblins.map((g) => {
                 const rowCopies: number[] = [];
                 for (
                   let vr = firstVisibleVirtualRow;
                   vr <= lastVisibleVirtualRow;
                   vr += 1
                 ) {
-                  if (mod(vr, WORLD_ROWS) === l.worldRow) rowCopies.push(vr);
+                  if (mod(vr, WORLD_ROWS) === g.worldRow) rowCopies.push(vr);
                 }
 
                 return rowCopies.flatMap((vr) => {
                   const screenY = vr * CELL - camY;
-                  return getWrappedCopies(l.x, l.width).map((ox, ci) => {
-                    const armed =
-                      l.kind === "fragile" && l.sinkAtMs !== undefined;
-                    const remainingMs =
-                      armed && l.sinkAtMs
-                        ? Math.max(0, l.sinkAtMs - runtime.elapsedMs)
-                        : 0;
-                    const warningPulse = armed && remainingMs < 1000;
-                    return (
-                      <div
-                        key={`${l.id}-${vr}-${ci}`}
-                        className="absolute"
+                  return getWrappedCopies(g.x, g.width).map((ox, ci) => (
+                    <div
+                      key={`${g.id}-${vr}-${ci}`}
+                      className="absolute flex items-center justify-center"
+                      style={{
+                        left: ox,
+                        top: screenY,
+                        width: g.width,
+                        height: CELL,
+                        zIndex: 5,
+                      }}
+                    >
+                      <img
+                        src={SUNNYSIDE.npcs.goblin}
+                        alt=""
                         style={{
-                          left: ox,
-                          top: screenY + 8,
-                          width: l.width,
-                          height: CELL - 16,
-                          backgroundColor:
-                            l.kind === "fragile" ? "#b7792d" : "#6B3A1F",
-                          border:
-                            l.kind === "fragile"
-                              ? "2px solid #d9a66a"
-                              : "2px solid #9C6B3A",
-                          borderRadius: 4,
-                          boxShadow: warningPulse
-                            ? "0 0 10px rgba(255,210,120,0.7), inset 0 3px 0 rgba(255,255,255,0.2)"
-                            : "inset 0 3px 0 rgba(255,255,255,0.15)",
-                          zIndex: 2,
+                          width: CELL - 6,
+                          height: CELL - 6,
+                          imageRendering: "pixelated",
+                          transform: g.dir === -1 ? "scaleX(-1)" : undefined,
+                          filter:
+                            g.kind === "elite"
+                              ? "drop-shadow(0 2px 4px rgba(200,0,0,0.8)) hue-rotate(240deg) saturate(2.5) brightness(1.15)"
+                              : "drop-shadow(0 2px 4px rgba(0,0,0,0.6))",
                         }}
-                      >
-                        {Array.from({ length: Math.floor(l.width / 18) }).map(
-                          (_, gi) => (
-                            <div
-                              key={gi}
-                              className="absolute"
-                              style={{
-                                left: gi * 18 + 6,
-                                top: 4,
-                                width: 2,
-                                height: CELL - 24,
-                                backgroundColor: "rgba(0,0,0,0.25)",
-                                borderRadius: 1,
-                              }}
-                            />
-                          ),
-                        )}
-                      </div>
-                    );
-                  });
+                      />
+                    </div>
+                  ));
                 });
               })}
 
-            {/* Goblins */}
-            {runtime.goblins.map((g) => {
-              const rowCopies: number[] = [];
-              for (
-                let vr = firstVisibleVirtualRow;
-                vr <= lastVisibleVirtualRow;
-                vr += 1
-              ) {
-                if (mod(vr, WORLD_ROWS) === g.worldRow) rowCopies.push(vr);
-              }
+              {/* Player */}
+              {runtime.deathPauseMs === 0 && (
+                <div
+                  className="absolute"
+                  style={{
+                    // Centred on the collision box and bottom-aligned so the
+                    // bumpkin stands on the same lane. The box is
+                    // `bumpkinPortraitBox(...)` wide so the canvas - whose width
+                    // is measured from the sheet - can be centred inside it.
+                    left: runtime.playerCX - portrait.width / 2,
+                    top:
+                      runtime.playerCY -
+                      camY +
+                      PLAYER_SIZE / 2 -
+                      PLAYER_RENDER_HEIGHT,
+                    width: portrait.width,
+                    height: PLAYER_RENDER_HEIGHT,
+                    zIndex: 20,
+                    filter: "drop-shadow(0 3px 6px rgba(0,0,0,0.7))",
+                  }}
+                >
+                  <NPCIcon
+                    parts={playerParts}
+                    height={PLAYER_RENDER_HEIGHT}
+                    facing={runtime.playerFacing}
+                  />
+                </div>
+              )}
 
-              return rowCopies.flatMap((vr) => {
-                const screenY = vr * CELL - camY;
-                return getWrappedCopies(g.x, g.width).map((ox, ci) => (
-                  <div
-                    key={`${g.id}-${vr}-${ci}`}
-                    className="absolute flex items-center justify-center"
-                    style={{
-                      left: ox,
-                      top: screenY,
-                      width: g.width,
-                      height: CELL,
-                      zIndex: 5,
-                    }}
-                  >
-                    <img
-                      src={SUNNYSIDE.npcs.goblin}
-                      alt=""
-                      style={{
-                        width: CELL - 6,
-                        height: CELL - 6,
-                        imageRendering: "pixelated",
-                        transform: g.dir === -1 ? "scaleX(-1)" : undefined,
-                        filter:
-                          g.kind === "elite"
-                            ? "drop-shadow(0 2px 4px rgba(200,0,0,0.8)) hue-rotate(240deg) saturate(2.5) brightness(1.15)"
-                            : "drop-shadow(0 2px 4px rgba(0,0,0,0.6))",
-                      }}
-                    />
+              {/* Death overlay */}
+              {runtime.deathPauseMs > 0 && (
+                <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-30 pointer-events-none">
+                  <div className="px-5 py-3 bg-black/80 border-2 border-red-500 rounded-lg text-red-300 font-bold text-sm">
+                    {runtime.reason ?? "You died!"}
                   </div>
-                ));
-              });
-            })}
+                </div>
+              )}
 
-            {/* Player */}
-            {runtime.deathPauseMs === 0 && (
+              {/* Progress bar on right edge */}
               <div
-                className="absolute"
-                style={{
-                  // Centred on the collision box and bottom-aligned so the
-                  // bumpkin stands on the same lane. The box is
-                  // `bumpkinPortraitBox(...)` wide so the canvas - whose width
-                  // is measured from the sheet - can be centred inside it.
-                  left: runtime.playerCX - portrait.width / 2,
-                  top:
-                    runtime.playerCY -
-                    camY +
-                    PLAYER_SIZE / 2 -
-                    PLAYER_RENDER_HEIGHT,
-                  width: portrait.width,
-                  height: PLAYER_RENDER_HEIGHT,
-                  zIndex: 20,
-                  filter: "drop-shadow(0 3px 6px rgba(0,0,0,0.7))",
-                }}
+                className="absolute right-0 top-0 bottom-0 w-2 bg-black/30"
+                style={{ zIndex: 25 }}
               >
-                <NPCIcon
-                  parts={playerParts}
-                  height={PLAYER_RENDER_HEIGHT}
-                  facing={runtime.playerFacing}
+                <div
+                  className="absolute bottom-0 w-full bg-yellow-400 transition-all"
+                  style={{
+                    height: `${loopBandProgress * 100}%`,
+                    opacity: 0.85,
+                  }}
                 />
               </div>
-            )}
-
-            {/* Death overlay */}
-            {runtime.deathPauseMs > 0 && (
-              <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-30 pointer-events-none">
-                <div className="px-5 py-3 bg-black/80 border-2 border-red-500 rounded-lg text-red-300 font-bold text-sm">
-                  {runtime.reason ?? "You died!"}
-                </div>
-              </div>
-            )}
-
-            {/* Progress bar on right edge */}
-            <div
-              className="absolute right-0 top-0 bottom-0 w-2 bg-black/30"
-              style={{ zIndex: 25 }}
-            >
-              <div
-                className="absolute bottom-0 w-full bg-yellow-400 transition-all"
-                style={{
-                  height: `${loopBandProgress * 100}%`,
-                  opacity: 0.85,
-                }}
-              />
             </div>
-          </div>
+          </FitStage>
+
+          {/* Touch controls */}
+          {/* Frogger was keyboard-only, which made the cabinet unplayable on a
+              phone. `TouchDPad` is not a second input path: each button
+              dispatches the real `ArrowLeft`/`ArrowRight`/`ArrowUp`/`ArrowDown`
+              keydown and keyup on `window`, which is exactly what the movement
+              tick above already polls — so the pad is driveable with no game
+              code behind it. It is a *sibling* of the stage rather than a child
+              of it, which is the point: `FitStage` sums the height of the board's
+              siblings, so the pad's 168px is already being held back from the
+              arena and adding a `reserve` for it as well would count it twice.
+              `shrink-0` keeps the flex column from squashing it. Gated on
+              `(pointer: coarse)`, so a desktop player keeps the keyboard and
+              gets no pad in front of them.
+
+              No down arrow: Frogger is a one-way trip up the screen, so
+              `ArrowDown` is not a direction that can be travelled. Offering it
+              would put a button in the middle of the thumb's arc that cannot do
+              anything. */}
+          {isTouchDevice && !runtime.gameOver && (
+            <div className="sticky bottom-0 z-10 flex justify-center shrink-0 bg-slate-950/95 py-1">
+              <TouchDPad directions={["up", "left", "right"]} />
+            </div>
+          )}
 
           {/* Game over */}
           {runtime.gameOver && (

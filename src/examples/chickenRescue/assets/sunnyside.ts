@@ -21,6 +21,10 @@ export const SUNNYSIDE = {
     sad: `${B()}/icons/sad.png`,
     happy: `${B()}/icons/happy.png`,
     search: `${B()}/icons/search.png`,
+    // Sunflower Brawler: the projectile sprites and the impact mark.
+    lightning: `${B()}/icons/lightning.png`,
+    expression_attack: `${B()}/icons/expression_attack.png`,
+    angry: `${B()}/icons/angry.png`,
     // The main game's own settings glyph, so the arcade's settings button is the
     // same icon players already know from the HUD. Same path on the same CDN.
     // (`hammer` above is the mark on the Developer row.)

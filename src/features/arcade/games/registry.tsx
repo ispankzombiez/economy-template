@@ -9,6 +9,7 @@ import { GoblinInvadersGame } from "./goblininvaders/GoblinInvadersGame";
 import { PacManGame } from "./pacman/PacManGame";
 import { FroggerGame } from "./frogger/FroggerGame";
 import { RavenBubblesGame } from "./ravenbubbles/RavenBubblesGame";
+import { SunflowerBrawlerGame } from "./sunflowerbrawler/SunflowerBrawlerGame";
 import { withArcadeProps } from "./adapters/withArcadeProps";
 import type { ArcadeGameEntry } from "../types";
 
@@ -146,6 +147,15 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(RavenBubblesGame, "raven-bubbles"),
+  },
+  {
+    id: "sunflower-brawler",
+    name: "Sunflower Brawler",
+    description: "Five waves down a scrolling street, ending in the Big Goblin.",
+    tokenReward: 1,
+    status: "available",
+    backingType: "local",
+    component: withArcadeProps(SunflowerBrawlerGame, "sunflower-brawler"),
   },
 ];
 

@@ -35,7 +35,7 @@ import {
 } from "./types";
 
 const solitairePanelClassName =
-  "mx-auto w-[min(98vw,1200px)] h-[min(95vh,900px)] overflow-hidden";
+  "mx-auto w-full max-w-[1200px] h-[min(95vh,900px)] overflow-hidden";
 
 const _portalState = (state: PortalMachineState) => state.context.state;
 
@@ -93,10 +93,46 @@ const colorBorder: Record<CardSuit, string> = {
   Radish: "border-slate-400",
 };
 
-const FACE_DOWN_OVERLAP_CLASS = "-mt-[52px]";
-const FACE_UP_AFTER_FACE_DOWN_OVERLAP_CLASS = "-mt-[68px]";
-const FACE_UP_STACK_OVERLAP_CLASS = "-mt-[60px]";
-const FACE_UP_TOP_CARD_OVERLAP_CLASS = "-mt-[28px]";
+/**
+ * How much of each stacked card stays visible, as a negative top margin.
+ *
+ * ## Why they are responsive
+ *
+ * A pile's height is `card height + (cards - 1) x reveal`, and a tableau pile
+ * can legitimately hold all 13 cards, so these four numbers decide whether the
+ * board fits a phone at all. Measured per role in the browser at 320x640, on a
+ * 56px phone card, each negative margin leaves this much of the card showing:
+ *
+ * | role                          | phone class        | reveal | desktop reveal |
+ * |-------------------------------|--------------------|--------|----------------|
+ * | card buried under a face-down | `-mt-[50px]`       | 6px    | 28px           |
+ * | first face-up on a face-down  | `-mt-[50px]`       | 6px    | 12px           |
+ * | playable card of a stack      | `-mt-8`            | 24px   | 52px           |
+ * | rest of a face-up run         | `-mt-[50px]`       | 6px    | 20px           |
+ *
+ * The phone reveal is 6px because that is what a full pile needs. Measured at
+ * 320x640: the column is 578px tall, the header, stock row, action buttons and
+ * hint line take 216 of it, and the seven piles share two rows of the
+ * remaining 362 — 175px per pile, of which 156 is the stack area once the 14px
+ * label, 8px of padding and 2px of border are taken off it. The most expensive
+ * legal pile is six face-down then seven face-up, and at a 6px reveal it costs
+ * 56 + 5x6 + 6 + 24 + 5x6 = 146 of the 156 available.
+ *
+ * At the 8px reveal this shipped first with, the same pile costs
+ * 56 + 5x8 + 6 + 24 + 5x8 = 166 — ten more than the pile has — so the last two
+ * cards of a full pile hung out of the bottom of their own pile, past the
+ * panel's own edge, which is the one thing the layout is for. The desktop
+ * figures are untouched: an 80px card with a 20px reveal reads exactly as it
+ * always did.
+ *
+ * The cost is that a buried card is a thinner strip on a phone than on a
+ * monitor — 6px shows its border and the top of its corner. Every pile's
+ * playable card, the one that is actually tapped, is drawn in full.
+ */
+const FACE_DOWN_OVERLAP_CLASS = "-mt-[50px] md:-mt-[52px]";
+const FACE_UP_AFTER_FACE_DOWN_OVERLAP_CLASS = "-mt-[50px] md:-mt-[68px]";
+const FACE_UP_STACK_OVERLAP_CLASS = "-mt-[50px] md:-mt-[60px]";
+const FACE_UP_TOP_CARD_OVERLAP_CLASS = "-mt-8 md:-mt-[28px]";
 const MAX_UNDOS_PER_GAME = 3;
 
 const suitImages: Record<CardSuit, string> = {
@@ -958,18 +994,33 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
     completeRewardIfNeeded();
   }
 
+  // ## Why the card box is two CSS variables
+  //
+  // A card's width and height are read in four places — the face, the back, the
+  // stock/foundation buttons and the waste fan — and the pile overlap maths
+  // above is derived from the height. Declaring the size once on the play area
+  // (`--card-w` / `--card-h`, one pair of `md:` overrides) is what keeps the
+  // fan, the pile slots and the cards from drifting apart at a third size.
+  //
+  // 44 x 56 on a phone rather than the desktop's 56 x 80: seven piles across a
+  // 320px viewport is 37px each, so the tableau cannot be one row at *any*
+  // phone card size — see the tableau's note. Within the four columns it does
+  // get, 44 is exactly the floor a thumb can be relied on to find, and the
+  // corner suit icons are scaled with it too - SquareIcon takes its size in
+  // game pixels rather than classes, so a 0.62 transform is what stops an 18px
+  // icon covering 42% of a 44px card and colliding with the rank in the middle.
   const renderCard = (card: Card, highlight = false) => {
     return (
       <div
-        className={`w-14 h-20 border-2 ${colorBorder[card.suit]} ${colorBg[card.suit]} ${colorText[card.suit]} rounded p-1 relative shadow ${highlight ? "ring-2 ring-yellow-300" : ""}`}
+        className={`w-[var(--card-w)] h-[var(--card-h)] border-2 ${colorBorder[card.suit]} ${colorBg[card.suit]} ${colorText[card.suit]} rounded p-1 relative shadow ${highlight ? "ring-2 ring-yellow-300" : ""}`}
       >
-        <div className="absolute top-1 left-1">
+        <div className="absolute top-1 left-1 scale-[0.62] md:scale-100">
           <SquareIcon icon={suitImages[card.suit]} width={7} />
         </div>
-        <div className="absolute bottom-1 right-1 rotate-180">
+        <div className="absolute bottom-1 right-1 scale-[0.62] md:scale-100 rotate-180">
           <SquareIcon icon={suitImages[card.suit]} width={7} />
         </div>
-        <span className="absolute inset-0 grid place-items-center text-xl font-bold leading-none">
+        <span className="absolute inset-0 grid place-items-center text-base md:text-xl font-bold leading-none">
           {card.rank}
         </span>
       </div>
@@ -977,7 +1028,7 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
   };
 
   const renderCardBack = () => (
-    <div className="w-14 h-20 border border-white/40 rounded bg-slate-700 grid place-items-center text-sm text-slate-200">
+    <div className="w-[var(--card-w)] h-[var(--card-h)] border border-white/40 rounded bg-slate-700 grid place-items-center text-sm text-slate-200">
       ?
     </div>
   );
@@ -1162,22 +1213,27 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
   return (
     <OuterPanel className={solitairePanelClassName}>
       <InnerPanel className="w-full h-full p-3 md:p-4 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white overflow-auto">
-        <div className="max-w-7xl mx-auto h-full flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
-            <div className="font-bold text-lg">
+        {/* The card box, declared once. Every card face, back, stock and
+            foundation reads it, so the pile overlaps above stay true. */}
+        <div className="max-w-7xl mx-auto h-full flex flex-col gap-2 md:gap-3 [--card-w:44px] [--card-h:56px] md:[--card-w:56px] md:[--card-h:80px]">
+          {/* Compressed on a phone for the same reason as Tetris': the five
+              chips at `px-2 py-1 text-sm` wrapped to two 28px rows and the
+              header alone was 100px of a 578px column. */}
+          <div className="flex flex-wrap items-center justify-between gap-1 md:gap-2 text-sm">
+            <div className="font-bold text-sm md:text-lg">
               SOLITAIRE - {activeDifficulty.label}
             </div>
-            <div className="flex gap-2 items-center">
-              <span className="px-2 py-1 rounded bg-slate-700">
+            <div className="flex flex-wrap gap-1 md:gap-2 items-center">
+              <span className="px-1 md:px-2 py-0 md:py-1 text-[10px] md:text-sm rounded bg-slate-700">
                 Mode: {sessionMode}
               </span>
-              <span className="px-2 py-1 rounded bg-slate-700">
+              <span className="px-1 md:px-2 py-0 md:py-1 text-[10px] md:text-sm rounded bg-slate-700">
                 Moves: {gameState.moves}
               </span>
-              <span className="px-2 py-1 rounded bg-slate-700">
+              <span className="px-1 md:px-2 py-0 md:py-1 text-[10px] md:text-sm rounded bg-slate-700">
                 Foundation: {progressCount}/52
               </span>
-              <span className="px-2 py-1 rounded bg-slate-700">
+              <span className="px-1 md:px-2 py-0 md:py-1 text-[10px] md:text-sm rounded bg-slate-700">
                 Redeals: {gameState.passesRemaining}
               </span>
             </div>
@@ -1194,13 +1250,32 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           )}
 
-          <div className="grid grid-cols-2 md:grid-cols-7 gap-2 items-start">
+          {/* Stock, waste and the four foundations: **one** row of six from `md` up
+              and on a phone too.
+
+              ## Why the actions left this grid
+
+              It was the seventh cell of a `grid-cols-2 md:grid-cols-7`, and on a
+              phone that grid put Stock/Waste on row 1, two foundations on row 2,
+              two on row 3 and the actions on row 4 — four rows, measured 502px,
+              because each cell carried a card *and* a label *and*, in the
+              actions cell, three stacked 50px buttons. Two thirds of that was the
+              label text and the button chrome, not the game.
+
+              Six slots across 320px is 44px each, which is exactly the 44px a
+              thumb can be relied on to find, so the cards themselves do fit —
+              they just have to be the only thing in the row. `md:` puts the
+              actions back into the same grid as a seventh column, which is
+              where they have always been on a desktop. */}
+          <div className="grid grid-cols-6 md:grid-cols-7 gap-px md:gap-2 items-start">
             <div className="space-y-1">
-              <div className="text-xs uppercase text-slate-300">Stock</div>
+              <div className="text-[9px] md:text-xs uppercase text-slate-300">
+                Stock
+              </div>
               <button
                 type="button"
                 onClick={drawFromStock}
-                className="w-14 h-20 border border-white/40 rounded bg-slate-700 hover:bg-slate-600 grid place-items-center text-xs"
+                className="w-[var(--card-w)] h-[var(--card-h)] border border-white/40 rounded bg-slate-700 hover:bg-slate-600 grid place-items-center text-[10px] md:text-xs"
               >
                 {gameState.stock.length > 0
                   ? `${gameState.stock.length}`
@@ -1211,11 +1286,21 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
             </div>
 
             <div className="space-y-1">
-              <div className="text-xs uppercase text-slate-300">Waste</div>
+              <div className="text-[9px] md:text-xs uppercase text-slate-300">
+                Waste
+              </div>
               {activeDifficulty.drawCount === 3 ? (
+                /* The three-card fan is 92 x 80 today, which is wider than a
+                   44px slot: at a 24px step it is 44 + 48 = 92 and would
+                   overlap the foundation beside it. The step is a variable of
+                   its own so it can shrink with the card rather than being a
+                   second hard-coded pair of numbers. */
                 <div
-                  className="relative"
-                  style={{ width: "92px", height: "80px" }}
+                  className="relative [--fan-step:0px] md:[--fan-step:32px]"
+                  style={{
+                    width: "calc(var(--card-w) + 2 * var(--fan-step))",
+                    height: "var(--card-h)",
+                  }}
                   onClick={selectWaste}
                 >
                   {gameState.waste.length === 0
@@ -1231,7 +1316,7 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
                               key={card.rank + card.suit}
                               className="absolute"
                               style={{
-                                left: `${i * 32}px`,
+                                left: `calc(${i} * var(--fan-step))`,
                                 top: 0,
                                 pointerEvents: isTop ? "auto" : "none",
                                 zIndex: i,
@@ -1270,11 +1355,13 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
 
               return (
                 <div key={suit} className="space-y-1">
-                  <div className="text-xs uppercase text-slate-300">{suit}</div>
+                  <div className="text-[9px] md:text-xs uppercase text-slate-300">
+                    {suit}
+                  </div>
                   <button
                     type="button"
                     onClick={() => moveSelectedToFoundation(suit)}
-                    className="w-14 h-20 rounded border border-white/30 bg-slate-700/70 grid place-items-center"
+                    className="w-[var(--card-w)] h-[var(--card-h)] rounded border border-white/30 bg-slate-700/70 grid place-items-center"
                   >
                     {top ? (
                       <div>{renderCard(top)}</div>
@@ -1286,7 +1373,11 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
               );
             })}
 
-            <div className="space-y-1">
+            {/* The desktop's copy of the three actions: the seventh column of
+                this same grid, exactly where it has always been. The phone's row
+                below is the other one — one element per breakpoint rather than
+                two grids, so the buttons cannot drift apart. */}
+            <div className="hidden md:block space-y-1">
               <div className="text-xs uppercase text-slate-300">Actions</div>
               <Button
                 onClick={undoMove}
@@ -1312,15 +1403,71 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </div>
 
-          <div className="mt-1 grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
+          {/* The three actions, as their own row on a phone and back inside the
+              grid above from `md` up. `Button` renders `w-full` unless its
+              className carries a width, so the phone row needs `flex-1 w-auto`
+              to split the width three ways; `md:flex-none md:w-full` restores
+              the stacked desktop column, because `flex-1` sets
+              `flex-basis: 0%` and would otherwise beat `width` there too. */}
+          <div className="flex flex-nowrap md:hidden gap-1.5">
+            <Button
+              onClick={undoMove}
+              disabled={undosRemaining === 0 || undoCount === 0}
+              className="flex-1 w-auto text-xs"
+            >
+              Undo ({undosRemaining})
+            </Button>
+            <Button
+              onClick={autoMoveToFoundation}
+              className="flex-1 w-auto text-xs"
+            >
+              Auto
+            </Button>
+            {onClose && (
+              <Button
+                onClick={() => {
+                  if (solved) {
+                    returnToMenu();
+                    return;
+                  }
+
+                  setShowExitConfirm(true);
+                }}
+                className="flex-1 w-auto text-xs"
+              >
+                Exit
+              </Button>
+            )}
+          </div>
+
+          {/* The seven tableau piles.
+
+              ## Why four across on a phone and not seven
+
+              Seven piles across the 274px a 320px viewport leaves for content
+              is 37px each, and the floor for a card a thumb can find is 44px —
+              so a single row is not available at any card size that is legal to
+              tap. `grid-cols-4` gives 64px columns for a 48px card and wraps
+              into two rows of four and three, which is what every phone Klondike
+              does.
+
+              The cost is height: two pile rows at once. At 320x640 the whole
+              column is 578px and the pile rows get ~330 of it between them,
+              which is what sizes the reveal in the overlap constants above —
+              13 cards (the most a Klondike pile can hold) at 10px of reveal is
+              64 + 120 = 184px of stack in a 200px slot.
+
+              From `lg` up this is the original `grid-cols-7`, one row, one
+              280px min-height — the desktop is untouched. */}
+          <div className="mt-0.5 md:mt-1 grid grid-cols-4 lg:grid-cols-7 gap-1 md:gap-2 flex-1 lg:flex-none min-h-0">
             {gameState.tableau.map((pile, pileIndex) => (
               <button
                 type="button"
                 key={`tableau-${pileIndex}`}
                 onClick={() => moveSelectedToTableau(pileIndex)}
-                className="min-h-[280px] rounded border border-slate-600 bg-slate-900/40 p-1 text-left flex flex-col"
+                className="min-h-[172px] md:min-h-[280px] rounded border border-slate-600 bg-slate-900/40 p-1 text-left flex flex-col"
               >
-                <div className="text-[10px] uppercase text-slate-400 mb-1">
+                <div className="text-[9px] md:text-[10px] uppercase text-slate-400 mb-0.5 md:mb-1">
                   Pile {pileIndex + 1}
                 </div>
                 <div className="flex flex-col items-center justify-start h-full">
@@ -1371,9 +1518,18 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
             ))}
           </div>
 
-          <div className="text-xs text-slate-300">
-            Click a card to select it, then click a tableau pile or foundation
-            to move. Empty tableau piles only accept Kings.
+          {/* One line on a phone, the full two-sentence version from `md` up. At
+              `text-xs` across 274px the original wraps to three lines and eats
+              48px of the vertical budget the pile rows need; what survives is
+              the part that is not obvious from looking at it. */}
+          <div className="text-[10px] md:text-xs text-slate-300 leading-tight">
+            <span className="md:hidden">
+              Tap a card, then a pile. Empty piles take Kings only.
+            </span>
+            <span className="hidden md:inline">
+              Click a card to select it, then click a tableau pile or foundation
+              to move. Empty tableau piles only accept Kings.
+            </span>
             {selectedCard && (
               <span className="ml-2 text-yellow-300">
                 Selected: {selectedCard.rank} of {selectedCard.suit}

@@ -9,6 +9,7 @@ import React, {
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
+import { FitStage } from "components/ui/FitStage";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import { useVipAccess } from "../adapters/useVipAccess";
@@ -16,8 +17,12 @@ import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import {
+  COLS,
   getRavenBubblesDifficulty,
+  INITIAL_ROWS,
   isRavenBubblesRewardRunAvailable,
+  POINTS_PER_DROP,
+  POINTS_PER_POP,
   RAVEN_BUBBLES_DIFFICULTIES,
   RAVEN_BUBBLES_RAVEN_COIN_REWARD,
   type RavenBubblesDifficulty,
@@ -33,30 +38,45 @@ const _portalState = (state: PortalMachineState) => state.context.state;
  * bubble to the right, which is what makes the cluster maths (and the look)
  * the original game's.
  */
-const COLS = 10;
 const MAX_ROWS = 13;
 const RADIUS = 18;
 const DIAMETER = RADIUS * 2;
 const ROW_HEIGHT = RADIUS * Math.sqrt(3);
+/**
+ * The ceiling slab, drawn in a band above row 0 so it is always visible.
+ *
+ * The grid has to start below it, or the slab would render off the top of the
+ * playfield and be clipped away — which is how the ceiling came to be invisible
+ * in the first place.
+ */
+const CEILING_THICKNESS = 12;
 /** One radius wider than `COLS` bubbles so the shifted odd rows still fit. */
 const PLAYFIELD_WIDTH = COLS * DIAMETER + RADIUS;
-const PLAYFIELD_HEIGHT = 470;
+const PLAYFIELD_HEIGHT = 470 + CEILING_THICKNESS;
 const SHOOTER_X = PLAYFIELD_WIDTH / 2;
 const SHOOTER_Y = PLAYFIELD_HEIGHT - 32;
 /** A bubble resting on this row has crossed the line and ends the run. */
 const DANGER_ROW = 11;
-const DANGER_LINE_Y = RADIUS + DANGER_ROW * ROW_HEIGHT + RADIUS;
-const INITIAL_ROWS = 5;
+/** Longest the dotted aim guide is drawn, in px. */
+const MAX_GUIDE_PX = 240;
 /** Shots before the ceiling drops a row — the original's pressure valve. */
 const SHOTS_PER_DROP = 15;
+/**
+ * Seconds before the ceiling drops a row regardless of how many shots were
+ * fired.
+ *
+ * The shot counter alone lets a player stall indefinitely: sit and think for
+ * five minutes and the ceiling never moves. This is the same drop on a second
+ * trigger, so the pressure is on the clock as well as on the shooting. Whichever
+ * comes first wins, and whichever fired resets the other.
+ */
+const CEILING_SECONDS = 30;
 const SHOT_SPEED = 950;
 /** Longest a single physics substep may travel, in px. See the flight loop. */
 const MAX_STEP_PX = 5;
 /** Aim is measured from straight up, in radians. */
 const MIN_AIM = -1.15;
 const MAX_AIM = 1.15;
-const POINTS_PER_POP = 30;
-const POINTS_PER_DROP = 60;
 const MIN_CLUSTER = 3;
 
 // ── Bubbles ──────────────────────────────────────────────────────────────────
@@ -97,30 +117,60 @@ type Grid = Cell[][];
 const emptyGrid = (): Grid =>
   Array.from({ length: MAX_ROWS }, () => Array<Cell>(COLS).fill(null));
 
-const cellX = (row: number, col: number) =>
-  RADIUS + col * DIAMETER + (row % 2 === 1 ? RADIUS : 0);
-const cellY = (row: number) => RADIUS + row * ROW_HEIGHT;
+/**
+ * Every other row is shifted half a bubble to the right — the hex packing.
+ *
+ * The shift is measured **from the ceiling**, not from an absolute row number.
+ * That is the whole trick behind a ceiling drop: every row moves down by one,
+ * and if the stagger were absolute then every row would also flip parity and
+ * the entire cluster would jump sideways by half a bubble. Measuring from the
+ * ceiling means `(row - ceilingRow)` is unchanged by a drop and the cluster
+ * descends as one rigid body, which is what the original does.
+ */
+const isStaggered = (row: number, ceilingRow: number) =>
+  (((row - ceilingRow) % 2) + 2) % 2 === 1;
 
-/** The six hex neighbours of a cell, given the odd-row right shift. */
-function neighbours(row: number, col: number): [number, number][] {
-  const deltas: [number, number][] =
-    row % 2 === 0
-      ? [
-          [0, -1],
-          [0, 1],
-          [-1, -1],
-          [-1, 0],
-          [1, -1],
-          [1, 0],
-        ]
-      : [
-          [0, -1],
-          [0, 1],
-          [-1, 0],
-          [-1, 1],
-          [1, 0],
-          [1, 1],
-        ];
+const cellX = (row: number, col: number, ceilingRow: number) =>
+  RADIUS + col * DIAMETER + (isStaggered(row, ceilingRow) ? RADIUS : 0);
+const cellY = (row: number) =>
+  CEILING_THICKNESS + RADIUS + row * ROW_HEIGHT;
+
+/** The bottom of row 11 — the line the cluster must not reach. */
+const DANGER_LINE_Y = cellY(DANGER_ROW) + RADIUS;
+
+/**
+ * The underside of the ceiling slab.
+ *
+ * The ceiling is a solid the shot bounces off, not just the row the
+ * floating-bubbles check happens to anchor to. Without this the shot flew on up
+ * past the real ceiling into the space behind it and bounced around up there
+ * where nothing could ever reach it.
+ */
+const ceilingLimitY = (ceilingRow: number) => cellY(ceilingRow) - RADIUS;
+
+/** The six hex neighbours of a cell, given the stagger from the ceiling. */
+function neighbours(
+  row: number,
+  col: number,
+  ceilingRow: number,
+): [number, number][] {
+  const deltas: [number, number][] = isStaggered(row, ceilingRow)
+    ? [
+        [0, -1],
+        [0, 1],
+        [-1, 0],
+        [-1, 1],
+        [1, 0],
+        [1, 1],
+      ]
+    : [
+        [0, -1],
+        [0, 1],
+        [-1, -1],
+        [-1, 0],
+        [1, -1],
+        [1, 0],
+      ];
 
   return deltas
     .map(([dr, dc]) => [row + dr, col + dc] as [number, number])
@@ -135,6 +185,8 @@ function snapCandidates(grid: Grid, ceilingRow: number): [number, number][] {
 
   const push = (row: number, col: number) => {
     if (row < 0 || row >= MAX_ROWS || col < 0 || col >= COLS) return;
+    // Above the ceiling slab is solid: no bubble can come to rest up there.
+    if (row < ceilingRow) return;
     if (grid[row][col]) return;
     const key = `${row},${col}`;
     if (seen.has(key)) return;
@@ -147,7 +199,7 @@ function snapCandidates(grid: Grid, ceilingRow: number): [number, number][] {
   for (let row = 0; row < MAX_ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
       if (!grid[row][col]) continue;
-      for (const neighbour of neighbours(row, col)) push(...neighbour);
+      for (const neighbour of neighbours(row, col, ceilingRow)) push(...neighbour);
     }
   }
 
@@ -165,7 +217,7 @@ function nearestEmptyCell(
   let bestDistance = Infinity;
 
   for (const [row, col] of snapCandidates(grid, ceilingRow)) {
-    const dx = cellX(row, col) - x;
+    const dx = cellX(row, col, ceilingRow) - x;
     const dy = cellY(row) - y;
     const distance = dx * dx + dy * dy;
     if (distance < bestDistance) {
@@ -178,7 +230,12 @@ function nearestEmptyCell(
 }
 
 /** Flood fill of the same-colour cluster a cell belongs to. */
-function clusterOf(grid: Grid, row: number, col: number): [number, number][] {
+function clusterOf(
+  grid: Grid,
+  row: number,
+  col: number,
+  ceilingRow: number,
+): [number, number][] {
   const color = grid[row]?.[col];
   if (!color) return [];
 
@@ -190,7 +247,7 @@ function clusterOf(grid: Grid, row: number, col: number): [number, number][] {
     const [r, c] = stack.pop()!;
     cluster.push([r, c]);
 
-    for (const [nr, nc] of neighbours(r, c)) {
+    for (const [nr, nc] of neighbours(r, c, ceilingRow)) {
       const key = `${nr},${nc}`;
       if (seen.has(key) || grid[nr][nc] !== color) continue;
       seen.add(key);
@@ -221,7 +278,7 @@ function floatingCells(grid: Grid, ceilingRow: number): [number, number][] {
 
   while (stack.length) {
     const [row, col] = stack.pop()!;
-    for (const [nr, nc] of neighbours(row, col)) {
+    for (const [nr, nc] of neighbours(row, col, ceilingRow)) {
       const key = `${nr},${nc}`;
       if (anchored.has(key) || !grid[nr][nc]) continue;
       anchored.add(key);
@@ -250,6 +307,17 @@ const coloursOnBoard = (grid: Grid): BubbleColor[] => {
   }
   return BUBBLE_COLORS.filter((color) => present.has(color));
 };
+
+/** How many bubbles of one colour the board is holding. */
+function countOnBoard(grid: Grid, color: BubbleColor): number {
+  let total = 0;
+  for (const row of grid) {
+    for (const cell of row) {
+      if (cell === color) total++;
+    }
+  }
+  return total;
+}
 
 /**
  * The cells a shot can actually come to rest in.
@@ -283,14 +351,14 @@ function landingCells(grid: Grid, ceilingRow: number): Set<string> {
         dx = -dx;
       }
 
-      const hitCeiling = y <= RADIUS;
+      const hitCeiling = y - RADIUS <= ceilingLimitY(ceilingRow);
       let hitBubble = false;
 
       if (!hitCeiling) {
         for (let row = 0; row < MAX_ROWS && !hitBubble; row++) {
           for (let col = 0; col < COLS && !hitBubble; col++) {
             if (!grid[row][col]) continue;
-            const bx = cellX(row, col) - x;
+            const bx = cellX(row, col, ceilingRow) - x;
             const by = cellY(row) - y;
             if (bx * bx + by * by < (DIAMETER - 2) * (DIAMETER - 2)) {
               hitBubble = true;
@@ -328,7 +396,7 @@ function completableColours(grid: Grid, ceilingRow: number): BubbleColor[] {
 
       const scratch = grid.map((line) => [...line]);
       scratch[row][col] = color;
-      if (clusterOf(scratch, row, col).length >= MIN_CLUSTER) {
+      if (clusterOf(scratch, row, col, ceilingRow).length >= MIN_CLUSTER) {
         found.add(color);
       }
     }
@@ -341,32 +409,54 @@ function completableColours(grid: Grid, ceilingRow: number): BubbleColor[] {
  * The colour the shooter hands out next.
  *
  * Restricted to colours that are actually on the board (a colour nothing else
- * uses is a wasted shot) and then biased towards ones the player can act on
- * right now.
+ * uses is a wasted shot), and then weighted towards the ones the player can act
+ * on right now.
  *
- * Without that bias the cabinet is unwinnable rather than merely hard. A bubble
- * that completes nothing does not stay level: it snaps to the nearest empty cell
- * under the cluster and pushes its floor down a row, and the ceiling drops a row
- * every {@link SHOTS_PER_DROP} shots besides. Measured with a solver that picks
- * the best of every possible angle each shot, six colours left the player with
- * a real play on roughly a quarter of shots — the line was crossed around shot
- * 11 with 90 points of a 1500 target, on every difficulty. The bias is
- * invisible (the bubble still looks arbitrary) and is what turns the board into
- * something you can actually work through.
+ * The weighting is deliberately not exclusive. A colour with one or two bubbles
+ * left can never complete a triple by itself, so a pool of only playable colours
+ * strands it for good: it can never be matched, so it can never be cleared, and
+ * the ceiling eventually wins the run. Every colour still on the board stays in
+ * the pool at roughly a quarter of the weight, which keeps a lone bubble
+ * reachable without handing out dead shots most of the time.
+ *
+ * Without any bias at all the cabinet is unwinnable rather than merely hard, so
+ * this is the compromise: playable colours dominate the queue, and nothing on
+ * the board is ever stranded by it.
  */
-function pickNextColor(grid: Grid, ceilingRow: number): BubbleColor {
-  // `present` is the entire pool, and the playable-colour bias below only ever
-  // narrows it — so a bubble can never be a colour that is not on the board.
-  const present = coloursOnBoard(grid);
+function pickNextColor(
+  grid: Grid,
+  ceilingRow: number,
+  exclude?: BubbleColor,
+): BubbleColor {
+  const present = coloursOnBoard(grid).filter((color) => color !== exclude);
 
-  // Unreachable in practice: a cleared board is refilled before the shooter is
-  // re-dealt. The function still has to return something.
   if (present.length === 0) {
     return BUBBLE_COLORS[Math.floor(Math.random() * BUBBLE_COLORS.length)];
   }
 
-  const live = completableColours(grid, ceilingRow);
-  const pool = live.length > 0 ? live : present;
+  const live = completableColours(grid, ceilingRow).filter((color) =>
+    present.includes(color),
+  );
+
+  // Colours that cannot complete themselves carry the same weight as playable
+  // ones. Fewer than MIN_CLUSTER bubbles of a colour on the board means the
+  // queue can never complete it alone, so it is exactly the colour that would
+  // otherwise sit there forever while the ceiling closes in — the lone Corn of
+  // the original report. Dealing it on a par with a playable colour is what
+  // guarantees the loop closes: two of them make a pair, the third pops it.
+  const stranded = present.filter(
+    (color) => countOnBoard(grid, color) < MIN_CLUSTER && !live.includes(color),
+  );
+
+  const pool = [
+    ...live,
+    ...live,
+    ...live,
+    ...stranded,
+    ...stranded,
+    ...stranded,
+    ...present,
+  ];
 
   return pool[Math.floor(Math.random() * pool.length)];
 }
@@ -406,7 +496,7 @@ function createBoard(): Grid {
       const size = 1 + Math.floor(Math.random() * 2);
 
       grid[row][col] = color;
-      const candidates = neighbours(row, col).filter(
+      const candidates = neighbours(row, col, 0).filter(
         ([r, c]) => inDeal(r, c) && !grid[r][c],
       );
 
@@ -418,7 +508,7 @@ function createBoard(): Grid {
         if (grid[r][c]) continue;
 
         grid[r][c] = color;
-        for (const [nr, nc] of neighbours(r, c)) {
+        for (const [nr, nc] of neighbours(r, c, 0)) {
           if (inDeal(nr, nc) && !grid[nr][nc]) candidates.push([nr, nc]);
         }
       }
@@ -428,12 +518,17 @@ function createBoard(): Grid {
   return grid;
 }
 
-const touchesBubble = (grid: Grid, x: number, y: number): boolean => {
+const touchesBubble = (
+  grid: Grid,
+  x: number,
+  y: number,
+  ceilingRow: number,
+): boolean => {
   const reach = DIAMETER - 2;
   for (let row = 0; row < MAX_ROWS; row++) {
     for (let col = 0; col < COLS; col++) {
       if (!grid[row][col]) continue;
-      const dx = cellX(row, col) - x;
+      const dx = cellX(row, col, ceilingRow) - x;
       const dy = cellY(row) - y;
       if (dx * dx + dy * dy < reach * reach) return true;
     }
@@ -442,6 +537,32 @@ const touchesBubble = (grid: Grid, x: number, y: number): boolean => {
 };
 
 const clampAim = (angle: number) => Math.min(MAX_AIM, Math.max(MIN_AIM, angle));
+
+/**
+ * Shift the whole cluster down one row.
+ *
+ * The caller moves the ceiling with it. The hex stagger is measured from the
+ * ceiling ({@link isStaggered}), so descending does not also slide the cluster
+ * sideways — it moves as one piece, which is the whole reason the stagger is
+ * relative.
+ */
+const dropCeilingOnce = (grid: Grid): Grid => {
+  const shifted = emptyGrid();
+  for (let row = 0; row < MAX_ROWS - 1; row++) {
+    for (let col = 0; col < COLS; col++) {
+      shifted[row + 1][col] = grid[row][col];
+    }
+  }
+  return shifted;
+};
+
+/** Has anything come to rest on or below the line? */
+const hasCrossedTheLine = (grid: Grid): boolean =>
+  grid.some((row, rowIndex) => rowIndex >= DANGER_ROW && row.some(Boolean));
+
+/** Is the field completely empty? */
+const isBoardEmpty = (grid: Grid): boolean =>
+  grid.every((row) => row.every((cell) => cell === null));
 
 /** One bubble: a glossy shell with the crop art inside. */
 const Bubble: React.FC<{ color: BubbleColor; size?: number }> = ({
@@ -500,9 +621,6 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   const [current, setCurrent] = useState<BubbleColor>("Sunflower");
   const [next, setNext] = useState<BubbleColor>("Carrot");
   const [shotsLeft, setShotsLeft] = useState(SHOTS_PER_DROP);
-  const [boardNumber, setBoardNumber] = useState(1);
-  /** Screens fully cleared this run; the win condition is a count of these. */
-  const [screensCleared, setScreensCleared] = useState(0);
   /** Grid row the ceiling is currently resting on; it drops one row at a time. */
   const [ceilingRow, setCeilingRow] = useState(0);
   const [status, setStatus] = useState<ShotStatus>("aiming");
@@ -519,6 +637,15 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
     useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  const [scale, setScale] = useState(1);
+  /** Seconds left on the ceiling clock. */
+  const [ceilingSeconds, setCeilingSeconds] = useState(CEILING_SECONDS);
+  const ceilingSecondsRef = useRef(CEILING_SECONDS);
+
+  const scaleRef = useRef(1);
+  useEffect(() => {
+    scaleRef.current = scale;
+  }, [scale]);
 
   const rewardGrantedRef = useRef(false);
   const playfieldRef = useRef<HTMLDivElement | null>(null);
@@ -535,8 +662,6 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   const nextRef = useRef(next);
   const difficultyRef = useRef(activeDifficulty);
   const ceilingRowRef = useRef(ceilingRow);
-  /** Screens fully cleared this run. The win condition is a count of these. */
-  const screensClearedRef = useRef(0);
   const shotRef = useRef<Shot | null>(null);
 
   useEffect(() => {
@@ -597,12 +722,64 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     setStatus("shooting");
   }, []);
 
+  const resetCeilingClock = useCallback(() => {
+    ceilingSecondsRef.current = CEILING_SECONDS;
+    setCeilingSeconds(CEILING_SECONDS);
+  }, []);
+
+  /**
+   * Drop the ceiling on the clock, with no shot fired.
+   *
+   * Only ever applied while the player is aiming. Dropping mid-flight would
+   * slide the cluster out from under a bubble already in the air, and the shot
+   * is over in well under a second anyway, so a drop that lands on one is simply
+   * deferred by that.
+   */
+  const forceCeilingDrop = useCallback(() => {
+    if (statusRef.current !== "aiming") return;
+
+    const shifted = dropCeilingOnce(gridRef.current);
+    gridRef.current = shifted;
+
+    setGrid(shifted);
+    setCeilingRow((row) => row + 1);
+    setShotsLeft(SHOTS_PER_DROP);
+    resetCeilingClock();
+
+    if (hasCrossedTheLine(shifted)) {
+      setStatus("lost");
+    }
+  }, [resetCeilingClock]);
+
+  // The clock. Ticks only while the run is live; the drop it triggers resets
+  // both itself and the shot counter, so the two triggers stay independent.
+  useEffect(() => {
+    if (!mode) return;
+
+    const id = window.setInterval(() => {
+      if (statusRef.current === "won" || statusRef.current === "lost") return;
+
+      const remaining = ceilingSecondsRef.current - 1;
+      if (remaining > 0) {
+        ceilingSecondsRef.current = remaining;
+        setCeilingSeconds(remaining);
+        return;
+      }
+
+      resetCeilingClock();
+      forceCeilingDrop();
+    }, 1000);
+
+    return () => window.clearInterval(id);
+  }, [forceCeilingDrop, mode, resetCeilingClock]);
+
   /**
    * Settle a shot that has hit the ceiling or a bubble: snap it into the grid,
    * pop any cluster it completed, drop whatever that left floating, apply the
    * ceiling drop, then decide whether the run is still alive.
    */
-  const resolveShot = useCallback((x: number, y: number, color: BubbleColor) => {
+  const resolveShot = useCallback(
+    (x: number, y: number, color: BubbleColor) => {
     const ceiling = ceilingRowRef.current;
     const landed = nearestEmptyCell(gridRef.current, x, y, ceiling);
 
@@ -619,7 +796,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
 
     let gained = 0;
 
-    const cluster = clusterOf(working, landed[0], landed[1]);
+    const cluster = clusterOf(working, landed[0], landed[1], ceiling);
     if (cluster.length >= MIN_CLUSTER) {
       for (const [row, col] of cluster) working[row][col] = null;
       gained += cluster.length * POINTS_PER_POP;
@@ -636,56 +813,50 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     const dropCeiling = remainingShots <= 0;
 
     if (dropCeiling) {
-      // Shift everything down one row, and move the ceiling with it — the
-      // cluster is still hanging from it, one row lower than before.
-      const shifted = emptyGrid();
-      for (let row = 0; row < MAX_ROWS - 1; row++) {
-        for (let col = 0; col < COLS; col++) {
-          shifted[row + 1][col] = working[row][col];
-        }
-      }
-      working = shifted;
+      working = dropCeilingOnce(working);
       setCeilingRow((row) => row + 1);
+      resetCeilingClock();
     }
 
-    const crossedLine = working.some(
-      (row, rowIndex) => rowIndex >= DANGER_ROW && row.some(Boolean),
-    );
-    const cleared = working.every((row) => row.every((cell) => cell === null));
+    const crossedLine = hasCrossedTheLine(working);
+    const cleared = isBoardEmpty(working);
 
     // A cleared screen is a stage complete: the next is dealt with the ceiling
-    // back at the top, so a run is a chain of stages rather than one long slide
-    // toward the line. The run ends when the last screen of the difficulty
-    // falls, or when the cluster reaches the line first.
-    const screensDone = cleared
-      ? screensClearedRef.current + 1
-      : screensClearedRef.current;
-    const won = cleared && screensDone >= difficultyRef.current.boards;
+    // back at the top, so a run is a chain of screens rather than one long slide
+    // toward the line. The run is won on **points** — the target is set outright
+    // per difficulty in `session`, and because drops pay double a player can
+    // reach it well before the screens are used up.
+    const won = newScore >= difficultyRef.current.targetScore;
 
     const finalGrid = cleared ? createBoard() : working;
 
     setGrid(finalGrid);
     setScore(newScore);
-    setBoardNumber(screensDone + 1);
 
     if (cleared) {
       // The ceiling and its countdown restart with the new screen.
       setCeilingRow(0);
       setShotsLeft(SHOTS_PER_DROP);
-      screensClearedRef.current = screensDone;
-      setScreensCleared(screensDone);
+      resetCeilingClock();
     } else {
       setShotsLeft(dropCeiling ? SHOTS_PER_DROP : remainingShots);
     }
 
-    // The shooter moves on to the bubble that was queued up.
-    setCurrent(nextRef.current);
-    setNext(
-      pickNextColor(
-        finalGrid,
-        cleared ? 0 : dropCeiling ? ceiling + 1 : ceiling,
-      ),
-    );
+    // The shooter moves on to the bubble that was queued up, unless that shot
+    // just removed the last bubble of the queued colour.
+    //
+    // The queue is dealt a shot ahead, so it goes stale exactly when a pop takes
+    // the final bubbles of a colour: hold a Wheat, have Pumpkin queued behind it,
+    // clear the board's last Pumpkins, and the queued Pumpkin is now a colour
+    // with nothing on the board. It is re-dealt rather than handed over.
+    const nextCeiling = cleared ? 0 : dropCeiling ? ceiling + 1 : ceiling;
+    const queued = nextRef.current;
+    const incoming = coloursOnBoard(finalGrid).includes(queued)
+      ? queued
+      : pickNextColor(finalGrid, nextCeiling);
+
+    setCurrent(incoming);
+    setNext(pickNextColor(finalGrid, nextCeiling, incoming));
 
     setMovingBubble(null);
 
@@ -701,7 +872,9 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
 
     // The run carries on: hand control back to the player.
     setStatus("aiming");
-  }, []);
+    },
+    [resetCeilingClock],
+  );
 
   // The flight loop. Reads only refs so it never restarts mid-shot.
   useEffect(() => {
@@ -747,7 +920,12 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
           vx = -vx;
         }
 
-        if (y <= RADIUS || touchesBubble(gridRef.current, x, y)) hit = true;
+        if (
+          y - RADIUS <= ceilingLimitY(ceilingRow) ||
+          touchesBubble(gridRef.current, x, y, ceilingRowRef.current)
+        ) {
+          hit = true;
+        }
       }
 
       if (hit) {
@@ -794,9 +972,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
       setNext(pickNextColor(freshBoard, 0));
       setScore(0);
       setShotsLeft(SHOTS_PER_DROP);
-      setBoardNumber(1);
-      screensClearedRef.current = 0;
-      setScreensCleared(0);
+      resetCeilingClock();
       setCeilingRow(0);
       setStatus("aiming");
       setAim(0);
@@ -811,7 +987,13 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
         });
       }
     },
-    [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
+    [
+      hasRewardRun,
+      portalService,
+      practiceDifficultyName,
+      resetCeilingClock,
+      todaysDifficulty,
+    ],
   );
 
   const rewardRun = useRewardRun({
@@ -847,8 +1029,10 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     if (!playfield) return;
 
     const rect = playfield.getBoundingClientRect();
-    const dx = clientX - rect.left - SHOOTER_X;
-    const dy = SHOOTER_Y - (clientY - rect.top);
+    const s = scaleRef.current;
+    // The rendered box is scaled, so undo it to get logical board coordinates.
+    const dx = (clientX - rect.left) / s - SHOOTER_X;
+    const dy = SHOOTER_Y - (clientY - rect.top) / s;
 
     setAim(clampAim(Math.atan2(dx, dy)));
   }, []);
@@ -912,7 +1096,14 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [mode, shoot]);
 
-  /** Dotted aim guide, bounced off the walls and stopped by the first bubble. */
+  /**
+   * Dotted aim guide, bounced off the walls, stopped by the first bubble, the
+   * ceiling slab, or {@link MAX_GUIDE_PX}.
+   *
+   * The cap is what keeps it a guide. Traced to the ceiling it ran the full
+   * height of the board, which read as a laser sight rather than a hint at where
+   * the shot is pointed.
+   */
   const aimDots = useMemo(() => {
     if (status !== "aiming") return [];
 
@@ -922,7 +1113,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     let dx = Math.sin(aim);
     let dy = -Math.cos(aim);
 
-    for (let step = 0; step < 90; step++) {
+    for (let step = 0; step < 60; step++) {
       x += dx * 9;
       y += dy * 9;
 
@@ -934,24 +1125,29 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
         dx = -dx;
       }
 
-      if (y <= RADIUS || touchesBubble(grid, x, y)) break;
-      if (step % 2 === 0) dots.push({ x, y });
+      if (y - RADIUS <= ceilingLimitY(ceilingRow)) break;
+      if (touchesBubble(grid, x, y, ceilingRow)) break;
+
+      dots.push({ x, y });
+
+      const travelled = Math.hypot(x - SHOOTER_X, y - SHOOTER_Y);
+      if (travelled >= MAX_GUIDE_PX) break;
     }
 
     return dots;
-  }, [aim, grid, status]);
+  }, [aim, ceilingRow, grid, status]);
 
   // ── Lobby ──────────────────────────────────────────────────────────────────
 
   if (!mode) {
     return (
-      <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+      <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div className="text-center space-y-2">
             <h2 className="text-4xl font-bold">RAVEN BUBBLES</h2>
             <p className="text-sm text-gray-600">
-              Pop crop bubbles, outlast the ceiling, and clear today&apos;s
-              screens.
+              Pop crop bubbles, outlast the ceiling, and hit today&apos;s target
+              score.
             </p>
           </div>
 
@@ -976,10 +1172,10 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
               </div>
               <div>
                 <div className="text-sm text-gray-700 font-semibold">
-                  SCREENS
+                  TARGET
                 </div>
                 <div className="text-2xl font-bold text-amber-800">
-                  {todaysDifficulty.boards}
+                  {todaysDifficulty.targetScore}
                 </div>
               </div>
             </div>
@@ -997,8 +1193,9 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
             </div>
             <div className="mt-1">
               Match {MIN_CLUSTER} or more of a colour to pop them. The ceiling
-              drops a row every {SHOTS_PER_DROP} shots — if the cluster reaches
-              the line, the run is over.
+              drops a row every {SHOTS_PER_DROP} shots or every {CEILING_SECONDS}{" "}
+              seconds, whichever comes first — if the cluster reaches the line,
+              the run is over.
             </div>
           </InnerPanel>
 
@@ -1072,8 +1269,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                           : "bg-slate-700 text-slate-200 hover:bg-slate-600"
                       }`}
                     >
-                      {difficulty.label} — {difficulty.boards}{" "}
-                      {difficulty.boards === 1 ? "screen" : "screens"}
+                      {difficulty.label} — {difficulty.targetScore} points
                     </button>
                   ))}
                 </div>
@@ -1094,7 +1290,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   // ── Run ────────────────────────────────────────────────────────────────────
 
   return (
-    <OuterPanel className="mx-auto w-[min(98vw,1100px)] h-[min(95vh,900px)] overflow-hidden">
+    <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
       <div className="flex h-full flex-col gap-3 overflow-y-auto p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-4">
@@ -1103,15 +1299,9 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
               <div className="text-2xl font-bold text-amber-800">{score}</div>
             </div>
             <div>
-              <div className="text-xs font-semibold text-gray-600">SCREENS</div>
+              <div className="text-xs font-semibold text-gray-600">TARGET</div>
               <div className="text-2xl font-bold text-amber-800">
-                {screensCleared}/{activeDifficulty.boards}
-              </div>
-            </div>
-            <div>
-              <div className="text-xs font-semibold text-gray-600">SCREEN</div>
-              <div className="text-2xl font-bold text-amber-800">
-                {boardNumber}
+                {activeDifficulty.targetScore}
               </div>
             </div>
           </div>
@@ -1120,15 +1310,28 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
             <div className="text-xs font-semibold text-gray-600">
               CEILING DROPS IN
             </div>
-            <div className="flex gap-1">
-              {Array.from({ length: SHOTS_PER_DROP }, (_, index) => (
-                <div
-                  key={index}
-                  className={`h-3 w-3 rounded-full border border-black/30 ${
-                    index < shotsLeft ? "bg-red-500" : "bg-gray-300"
-                  }`}
-                />
-              ))}
+            <div className="flex items-center justify-center gap-3">
+              <div className="flex gap-1">
+                {Array.from({ length: SHOTS_PER_DROP }, (_, index) => (
+                  <div
+                    key={index}
+                    className={`h-3 w-3 rounded-full border border-black/30 ${
+                      index < shotsLeft ? "bg-red-500" : "bg-gray-300"
+                    }`}
+                  />
+                ))}
+              </div>
+              {/* The second trigger on the same drop: firing is not the only
+                  way the clock runs out, so dawdling is not a strategy. */}
+              <div
+                className={`text-sm font-bold tabular-nums ${
+                  ceilingSeconds <= 5
+                    ? "text-red-600"
+                    : "text-amber-800"
+                }`}
+              >
+                {ceilingSeconds}s
+              </div>
             </div>
           </div>
 
@@ -1146,18 +1349,31 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
           </div>
         </div>
 
-        <div
-          ref={playfieldRef}
-          onPointerMove={handlePointerMove}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          className="relative mx-auto overflow-hidden rounded border-2 border-amber-900/40 bg-slate-900/90"
-          style={{
-            width: PLAYFIELD_WIDTH,
-            height: PLAYFIELD_HEIGHT,
-            touchAction: "none",
-          }}
+        {/* `FitStage` scales the board to fit and measures the space it shares
+            the screen with, rather than guessing a reserve. */}
+        <FitStage
+          width={PLAYFIELD_WIDTH}
+          height={PLAYFIELD_HEIGHT}
+          minScale={0.5}
+          onScale={setScale}
         >
+          <div
+            ref={playfieldRef}
+            onPointerMove={handlePointerMove}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            className="relative h-full w-full overflow-hidden rounded border-2 border-amber-900/40 bg-slate-900/90"
+          >
+          {/* The ceiling: a solid slab the shot bounces off. It moves down with
+              the board, and nothing can come to rest behind it. */}
+          <div
+            className="absolute left-0 right-0 bg-slate-700 border-b-4 border-amber-400/80"
+            style={{
+              top: ceilingLimitY(ceilingRow) - CEILING_THICKNESS,
+              height: CEILING_THICKNESS,
+            }}
+          />
+
           {/* The line the cluster must not reach. */}
           <div
             className="absolute left-0 right-0 border-t-2 border-dashed border-red-500/80"
@@ -1171,7 +1387,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                   key={`${rowIndex}-${colIndex}`}
                   className="absolute"
                   style={{
-                    left: cellX(rowIndex, colIndex) - RADIUS,
+                    left: cellX(rowIndex, colIndex, ceilingRow) - RADIUS,
                     top: cellY(rowIndex) - RADIUS,
                   }}
                 >
@@ -1241,9 +1457,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                   {status === "won" ? "Screens Cleared!" : "Bubbles Crossed the Line"}
                 </div>
                 <div className="mt-1 text-sm text-slate-200">
-                  {screensCleared} of {activeDifficulty.boards}{" "}
-                  {activeDifficulty.boards === 1 ? "screen" : "screens"} cleared
-                  · {score} points.
+                  {score} of {activeDifficulty.targetScore} points.
                   {status === "won" && mode === "reward"
                     ? ` Reward granted: ${RAVEN_BUBBLES_RAVEN_COIN_REWARD} RavenCoin.`
                     : ""}
@@ -1261,7 +1475,8 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
               </div>
             </div>
           )}
-        </div>
+          </div>
+        </FitStage>
 
         <p className="text-center text-xs text-gray-600">
           {isTouchDevice
