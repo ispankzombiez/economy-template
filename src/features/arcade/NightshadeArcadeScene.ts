@@ -24,7 +24,11 @@ export class NightshadeArcadeScene extends ArcadeTiledScene {
         json: mapJson,
         imageKey: "nightshade-tileset",
       },
-      audio: { fx: { walk_key: "dirt_footstep" } },
+      // Fallback only. The step is chosen per-tile from the layer under the
+      // player's feet (`resolveWalkStep`), so carpet, the stone floor and the
+      // grass outside each get their own sound within this one scene. This
+      // answers for anywhere the painted floor does not reach.
+      audio: { fx: { walk_key: "wood_footstep" } },
       player: { spawn: getNightshadeArcadeSpawn() },
     });
   }
@@ -127,6 +131,12 @@ export class NightshadeArcadeScene extends ArcadeTiledScene {
     if (nightshadeArcadeEvents.isMinigameActive) {
       const body = this.currentPlayer?.body as Phaser.Physics.Arcade.Body | undefined;
       body?.setVelocity(0, 0);
+
+      // The early return skips `super.updatePlayer()`, which is the only thing
+      // that tells the walk loop the player has stopped — so the footsteps
+      // kept running under the machine's modal. Silence it here.
+      this.walkAudioController?.stop();
+
       return;
     }
 

@@ -29,6 +29,7 @@ import {
 import { NightshadeArcadeShop } from "./components/NightshadeArcadeShop";
 import { NightshadeKohiDialog } from "./components/NightshadeKohiDialog";
 import { npcModalManager, type SpokenNpc } from "./lib/npcModalManager";
+import { useArcadeMusic } from "./lib/useArcadeMusic";
 
 /**
  * The arcade's Colyseus `sceneId` — must match the key
@@ -294,14 +295,20 @@ export const NightshadeArcadeApp: React.FC = () => {
     };
   }, [actions, dispatchAction, economyMeta, playerEconomy]);
 
+  const isGameOpen = Boolean(activeEntry && ActiveGameComponent);
+
+  // Music: the open game's own track if it has one, otherwise the current
+  // floor's (resolved inside the hook). Opening a cabinet sets `activeEntry`,
+  // so this is the moment a game's soundtrack takes over.
+  useArcadeMusic(activeEntry?.music);
+
   useEffect(() => {
-    const isGameOpen = Boolean(activeEntry && ActiveGameComponent);
     nightshadeArcadeEvents.setMinigameActive(isGameOpen);
 
     return () => {
       nightshadeArcadeEvents.setMinigameActive(false);
     };
-  }, [activeEntry, ActiveGameComponent]);
+  }, [isGameOpen]);
 
   // Every registry entry is "local" or "scaffolded", so the game component owns
   // its own back navigation via `onBack` — no hub-injected overlay is needed.

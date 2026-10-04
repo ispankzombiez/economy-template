@@ -61,6 +61,18 @@ export interface ArcadeGameEntry {
    */
   component?: ComponentType<ArcadeGameProps>;
   /**
+   * Soundtrack that replaces the floor's music while this game is open.
+   *
+   * A Vite asset import (`import track from "../assets/foo.mp3"`), not a path
+   * string, so a moved or renamed file is a build error rather than a silent 404
+   * at runtime.
+   *
+   * Optional on purpose: these are being written one game at a time, and a game
+   * without a track keeps playing its floor's music rather than going silent.
+   * See `useArcadeMusic` for how the two are chosen between.
+   */
+  music?: string;
+  /**
    * For portal-backed games: the minigame id as registered in the
    * Sunflower-Land minigames registry (src/features/game/types/minigames.ts).
    * Source location was not verified during initial research handoff.

@@ -13,6 +13,19 @@ import { SunflowerBrawlerGame } from "./sunflowerbrawler/SunflowerBrawlerGame";
 import { withArcadeProps } from "./adapters/withArcadeProps";
 import type { ArcadeGameEntry } from "../types";
 
+import pokerMusic from "../assets/poker_music.mp3";
+import blackjackMusic from "../assets/black_jack_music.mp3";
+import goFishMusic from "../assets/go_fish_music.mp3";
+import unoMusic from "../assets/uno_music.mp3";
+import solitaireMusic from "../assets/solitare_music.mp3";
+import goblinInvadersMusic from "../assets/goblin_invaders_music.mp3";
+import tetrisMusic from "../assets/tetris_music.mp3";
+import pacManMusic from "../assets/bumpkin_man_music.mp3";
+import barleyBreakerMusic from "../assets/barley_breaker_music.mp3";
+import froggerMusic from "../assets/frogger_music.mp3";
+import ravenBubblesMusic from "../assets/raven_bubbles_music.mp3";
+import sunflowerBrawlerMusic from "../assets/sunflower_brawler_music.mp3";
+
 /**
  * Central arcade game registry — one entry per real Nightshade Arcade cabinet.
  *
@@ -42,6 +55,18 @@ import type { ArcadeGameEntry } from "../types";
  * wiring: it mounts `ArcadePortalProvider`, translates `onClose` → `onBack`,
  * and turns the game's own `arcadeMinigame.ravenCoinWon` event into `onWin`.
  *
+ * ── Adding a soundtrack ──────────────────────────────────────────────────────
+ * Per-game music is a `music` field on the entry, holding a Vite asset import.
+ * Drop the file in `../assets/` and add two lines beside the entry:
+ *
+ *     import myMusic from "../assets/my_game.mp3";
+ *     // ...
+ *     music: myMusic,
+ *
+ * It takes over from the floor's music the moment the cabinet is clicked and
+ * hands back on exit — see `useArcadeMusic`. Entries without one keep playing
+ * their floor's music, so tracks can be added one game at a time.
+ *
  * ── tokenReward ─────────────────────────────────────────────────────────────
  * Informational only — each game reports its prize itself via
  * `*_RAVEN_COIN_REWARD`, and every one of the originals is set to 1 RavenCoin.
@@ -57,6 +82,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(PokerGame, "poker"),
+    music: pokerMusic,
   },
   {
     id: "blackjack",
@@ -66,6 +92,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(BlackjackGame, "blackjack"),
+    music: blackjackMusic,
   },
   {
     id: "gofish",
@@ -75,6 +102,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(GoFishGame, "gofish"),
+    music: goFishMusic,
   },
   {
     id: "uno",
@@ -84,6 +112,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(UnoGame, "uno"),
+    music: unoMusic,
   },
   {
     id: "solitaire",
@@ -93,6 +122,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(SolitaireGame, "solitaire"),
+    music: solitaireMusic,
   },
   {
     id: "goblin-invaders",
@@ -102,6 +132,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(GoblinInvadersGame, "goblin-invaders"),
+    music: goblinInvadersMusic,
   },
   {
     id: "tetris",
@@ -111,6 +142,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(TetrisGame, "tetris"),
+    music: tetrisMusic,
   },
   {
     id: "barley-breaker",
@@ -120,6 +152,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(BarleyBreakerGame, "barley-breaker"),
+    music: barleyBreakerMusic,
   },
   {
     id: "pac-man",
@@ -129,6 +162,11 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(PacManGame, "pac-man"),
+    // The file is named for the source game's own title: `PacManGame` was
+    // ported from a game called Bumpkin-Man, and its exit dialog still says
+    // "Exit Bumpkin-Man?". Only the in-game copy carries that name — the
+    // registry id and the hub both call it `pac-man` / "Pac-Man".
+    music: pacManMusic,
   },
   {
     id: "frogger",
@@ -138,6 +176,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(FroggerGame, "frogger"),
+    music: froggerMusic,
   },
   {
     id: "raven-bubbles",
@@ -147,6 +186,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(RavenBubblesGame, "raven-bubbles"),
+    music: ravenBubblesMusic,
   },
   {
     id: "sunflower-brawler",
@@ -156,6 +196,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
     status: "available",
     backingType: "local",
     component: withArcadeProps(SunflowerBrawlerGame, "sunflower-brawler"),
+    music: sunflowerBrawlerMusic,
   },
 ];
 

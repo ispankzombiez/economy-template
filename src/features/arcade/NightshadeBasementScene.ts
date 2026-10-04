@@ -7,6 +7,7 @@ import kohiSheet from "./assets/kohi_idle.webp";
 import type { SceneId } from "features/world/sceneIds";
 import { translate } from "lib/i18n/translate";
 import { ArcadeTiledScene } from "./ArcadeTiledScene";
+import { createLantern, type Lantern } from "./lib/darkness";
 import { npcModalManager } from "./lib/npcModalManager";
 import { getNightshadeBasementSpawn } from "./lib/spawns";
 
@@ -37,6 +38,9 @@ const KOHI_SHEET = "kohi";
 export class NightshadeBasementScene extends ArcadeTiledScene {
   sceneId: SceneId = "nightshade-arcade-basement" as SceneId;
 
+  /** The light the player carries; see {@link createLantern}. */
+  private lantern?: Lantern;
+
   constructor() {
     super({
       name: "nightshade-arcade-basement" as any,
@@ -44,7 +48,9 @@ export class NightshadeBasementScene extends ArcadeTiledScene {
         json: mapJson,
         imageKey: "nightshade-tileset",
       },
-      // Wood rather than dirt — this floor is inside the building.
+      // Fallback only — the step follows the layer underfoot via
+      // `resolveWalkStep`, so the stone floor and the carpet runner down the
+      // middle of this room sound different.
       audio: { fx: { walk_key: "wood_footstep" } },
       player: { spawn: getNightshadeBasementSpawn() },
     });
@@ -119,6 +125,24 @@ export class NightshadeBasementScene extends ArcadeTiledScene {
     // he preaches to the cultists. He moves with the statue (same -8) so the
     // pair keeps the spacing it was approved with.
     this.createKohi(226, 52);
+
+    // Nothing down here is lit but the player: the dark goes over the whole
+    // floor once everything in it is built, with the light where the player
+    // arrived.
+    this.lantern = createLantern(this, this.currentPlayer);
+  }
+
+  /**
+   * The light lives in the world, so it is carried along with the bumpkin
+   * rather than pinned to the camera — which also means it stays still on
+   * screen, the camera following the player under it.
+   */
+  override update() {
+    super.update();
+
+    if (this.lantern && this.currentPlayer) {
+      this.lantern.follow(this.currentPlayer.x, this.currentPlayer.y);
+    }
   }
 
   /** The raven statue standing at the head of the carpet runner. */

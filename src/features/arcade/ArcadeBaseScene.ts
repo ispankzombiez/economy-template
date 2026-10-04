@@ -6,9 +6,17 @@ import { BumpkinContainer } from "features/world/containers/BumpkinContainer";
 import { NPCName, NPC_WEARABLES } from "lib/npcs";
 import { BumpkinParts } from "lib/utils/tokenUriBuilder";
 import { SPAWNS } from "features/world/lib/spawn";
-import { AudioController, WalkAudioController } from "features/world/lib/AudioController";
+import {
+  AudioController,
+  WalkAudioController,
+  type WalkSoundMap,
+} from "features/world/lib/AudioController";
 import { createErrorLogger } from "lib/errorLogger";
 import { Footsteps } from "example-assets/sound-effects/soundEffects";
+import {
+  FOOTSTEP_BY_SURFACE,
+  SURFACE_BY_LAYER,
+} from "./lib/walkSurfaces";
 import type { SceneId } from "features/world/sceneIds";
 import type { Player, PlazaRoomState } from "features/world/types/Room";
 import { translate } from "lib/i18n/translate";
@@ -28,6 +36,7 @@ import {
   AUDIO_MUTED_EVENT,
   getAudioMutedSetting,
 } from "lib/utils/hooks/useIsAudioMuted";
+import { patchGameState } from "lib/gameStore";
 
 const SQUARE_WIDTH = 16;
 
@@ -76,6 +85,14 @@ type BaseSceneOptions = {
   };
   audio?: {
     fx: {
+      /**
+       * Fallback step, used when the player is standing somewhere no ground
+       * layer covers (off the edge of the painted floor, or on a ground layer
+       * that has no row in `SURFACE_BY_LAYER`).
+       *
+       * Which sound actually plays is decided per-tile by
+       * `resolveWalkStep`; this is only the "don't know" answer.
+       */
       walk_key: Footsteps;
     };
   };
@@ -218,6 +235,11 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
     try {
       this.initialiseMap();
       this.initialiseSounds();
+
+      // Tell React which floor this is. It cannot find out otherwise — the
+      // floors are swapped by Phaser via `scene.start`, so nothing outside the
+      // game knows. The music reads this to pick a floor's track.
+      patchGameState({ activeSceneId: this.options.name });
 
       // set audio mute state and listen for changes
       this.sound.mute = getAudioMutedSetting();
@@ -511,9 +533,102 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
   }
 
   public initialiseSounds() {
-    this.walkAudioController = new WalkAudioController(
-      this.sound.add(this.options.audio.fx.walk_key),
-    );
+    // `create()` runs again on every visit to a floor, and the sound manager is
+    // the global one, so the previous visit's loop is still playing and the next
+    // `add` would stack a second copy on top of it. Release it first.
+    this.walkAudioController?.destroy();
+    this.walkAudioController = undefined;
+
+    // One loop per footstep file up front, so stepping onto a new surface is
+    // just a change of key rather than a load. Keyed by file, not by surface,
+    // because several surfaces share a loop — `grass` and `carpet` are both
+    // `dirt_footstep`, `stone` and `wood` are both `wood_footstep`.
+    //
+    // The scene's `walk_key` is included too, so the fallback in
+    // `resolveWalkStep` always has a sound to resolve to.
+    const keys = new Set<Footsteps>([
+      ...Object.values(FOOTSTEP_BY_SURFACE),
+      this.options.audio.fx.walk_key,
+    ]);
+
+    const sounds: WalkSoundMap = {};
+    keys.forEach((key) => {
+      sounds[key] = this.sound.add(key);
+    });
+
+    this.walkAudioController = new WalkAudioController(sounds);
+
+    // Taking the stairs calls `scene.start`, which stops this scene — but that
+    // does not touch the global sound manager, so the loop would follow the
+    // player down and play under the next floor's own footsteps.
+    //
+    // This is the only shutdown hook that is always registered: the one in
+    // `initialiseMMO` is MMO-only, and the arcade runs with MMO disabled.
+    // `once`, matching `initialiseMMO`, so a re-entered floor attaches one
+    // listener per run instead of stacking them.
+    this.events.once("shutdown", () => {
+      this.walkAudioController?.destroy();
+      this.walkAudioController = undefined;
+    });
+  }
+
+  /**
+   * The footstep for whatever the player is currently standing on.
+   *
+   * The answer is the topmost ground layer covering the player's feet. Both
+   * floors stack their floor art — a `floors` base with the `carpet*` runners
+   * over it, plus `Grass`/`dirt` outside — so the draw order decides what is on
+   * top, and the first layer with a tile there is the one being walked on.
+   *
+   * Layers absent from `SURFACE_BY_LAYER` (`walls`, `machines`, `tables`,
+   * `fence`, `goldcoins`, `water`) are deliberately looked *through* rather
+   * than treated as the answer: they are drawn above the floor, so returning
+   * them would mean a player standing beside a cabinet footstepped on the
+   * cabinet.
+   *
+   * Runs every frame. It is a handful of array lookups per layer, and the
+   * controller ignores a repeat of the key it is already playing, so caching
+   * the tile would only add state to invalidate.
+   */
+  protected resolveWalkStep(): Footsteps {
+    const fallback = this.options.audio.fx.walk_key;
+
+    const player = this.currentPlayer;
+    const layers = this.map?.layers;
+
+    if (!player || !layers?.length) {
+      return fallback;
+    }
+
+    // `map.layers` is in Tiled's draw order, first = furthest back, so walk it
+    // backwards to hit the topmost tile first.
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i];
+
+      const surface = SURFACE_BY_LAYER[layer.name];
+      if (!surface) continue;
+
+      // `getTileAtWorldXY` reads `layer.tilemapLayer`, which is only set once
+      // `createLayer` has run. `initialiseMap` skips that for some entries
+      // (it returns early for "Crows") and `createLayer` itself bails on a
+      // tileset it cannot match, so this can legitimately be unset. Neither
+      // arcade floor has such a layer today; treat it as "no tile" rather than
+      // dereferencing null in a path that runs every frame.
+      if (!layer.tilemapLayer) continue;
+
+      // `map.layers` holds `LayerData`, not the rendered `TilemapLayer`, so the
+      // lookup goes through the Tilemap's own method — passing `i` rather than
+      // `layer.name` so it indexes straight into `map.layers` instead of
+      // re-scanning it for a name match on every call.
+      //
+      // Null for an empty cell as well as one outside the layer, so a hole in
+      // the carpet falls through to the floor beneath it.
+      if (this.map.getTileAtWorldXY(player.x, player.y, false, undefined, i)) {
+        return FOOTSTEP_BY_SURFACE[surface];
+      }
+    }
+
+    return fallback;
   }
 
   public initialiseControls() {
@@ -875,7 +990,10 @@ export abstract class ArcadeBaseScene extends Phaser.Scene {
     }
 
     if (this.walkAudioController) {
-      this.walkAudioController.handleWalkSound(isMoving);
+      this.walkAudioController.handleWalkSound(
+        isMoving,
+        this.resolveWalkStep(),
+      );
     } else {
       // eslint-disable-next-line no-console
       console.error("walkAudioController is undefined");

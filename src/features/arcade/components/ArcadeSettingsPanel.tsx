@@ -4,7 +4,6 @@ import { Modal } from "components/ui/Modal";
 import { Panel } from "components/ui/Panel";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { useMinigameSession } from "lib/portal";
-import { requestClosePortal } from "lib/portal/closePortal";
 import { resolveDevAccess } from "../lib/devAccess";
 import {
   fetchMyRewards,
@@ -15,12 +14,27 @@ import {
 } from "../lib/rewardsApi";
 import { NightshadeArcadeDevMint } from "./NightshadeArcadeDevMint";
 import { NightshadeArcadeDevRewards } from "./NightshadeArcadeDevRewards";
+import { ArcadeAudioSettings } from "./ArcadeAudioSettings";
 
 /** Which settings page is open. */
-export type ArcadeSettingsPage = "main" | "developer" | "rewards";
+export type ArcadeSettingsPage =
+  | "main"
+  | "developer"
+  | "rewards"
+  | "preferences";
 
 /**
- * The arcade's settings panel: one entry point in the HUD column, three pages.
+ * The row style shared by every main-page option and the Back control, so Back
+ * reads as one of the options rather than as a bare underlined link.
+ */
+const ROW_CLASS =
+  "cursor-pointer rounded border border-[#7a4b52]/30 bg-white/40 px-2 py-2 text-xs text-[#3e2731] hover:bg-white/70";
+
+/**
+ * The arcade's settings panel: one entry point in the HUD column, three sub-pages.
+ *
+ * Audio is always present — both of its toggles are purely local settings and
+ * need no server. Rewards only appears when a worker is configured (below).
  *
  * ## The developer page is unreached, not merely hidden
  *
@@ -147,17 +161,57 @@ export const ArcadeSettingsPanel: React.FC<{
   };
 
   // --- render -------------------------------------------------------------
-  const pageHeader = (title: string) => (
+  /**
+   * Header for the audio page: title centred, X top-right.
+   *
+   * Deliberately not the `pageHeader` used by the other sub-pages. This one
+   * matches the main game's audio panel, which is a leaf panel you dismiss
+   * rather than a step you go back up from — so the X closes the whole settings
+   * panel (`onClose`) instead of navigating back to `"main"`.
+   *
+   * `close.png` is on the CDN and resolves, unlike the audio glyphs.
+   */
+  const audioHeader = () => (
     <div className="mb-2 flex items-center justify-between gap-2">
-      <span className="w-10" />
-      <span className="text-sm font-bold text-[#3e2731]">{title}</span>
+      <span className="w-6" />
+      <span className="text-sm font-bold text-[#3e2731]">Audio</span>
       <button
         type="button"
-        className="w-10 cursor-pointer text-right text-xs text-[#7a4b52] underline"
+        aria-label="Close settings"
+        title="Close settings"
+        onClick={onClose}
+        className="w-6 shrink-0 cursor-pointer hover:brightness-90"
+      >
+        <img
+          alt=""
+          src={SUNNYSIDE.icons.close}
+          className="w-full"
+          style={{ imageRendering: "pixelated" }}
+        />
+      </button>
+    </div>
+  );
+
+  /**
+   * Header for a sub-page.
+   *
+   * `title` is optional: the rewards page is opened to do one thing and says
+   * what it is by its content, so it passes nothing and the row is just Back.
+   * The title stays centred in the leftover space either way, so Back does not
+   * shift between pages.
+   */
+  const pageHeader = (title?: string) => (
+    <div className="mb-2 flex items-center gap-2">
+      <button
+        type="button"
+        className={ROW_CLASS}
         onClick={() => onNavigate("main")}
       >
         Back
       </button>
+      <span className="flex-1 text-center text-sm font-bold text-[#3e2731]">
+        {title}
+      </span>
     </div>
   );
 
@@ -171,19 +225,19 @@ export const ArcadeSettingsPanel: React.FC<{
               <div className="space-y-2">
                 <button
                   type="button"
-                  className="w-full cursor-pointer rounded border border-[#7a4b52]/30 bg-white/40 px-2 py-2 text-left text-xs hover:bg-white/70"
-                  onClick={requestClosePortal}
+                  className={`w-full text-left ${ROW_CLASS}`}
+                  onClick={() => onNavigate("preferences")}
                 >
-                  Leave the arcade
+                  Audio
                 </button>
 
                 {rewardsEnabled ? (
                   <button
                     type="button"
-                    className="w-full cursor-pointer rounded border border-[#7a4b52]/30 bg-white/40 px-2 py-2 text-left text-xs hover:bg-white/70"
+                    className={`w-full text-left ${ROW_CLASS}`}
                     onClick={() => onNavigate("rewards")}
                   >
-                    My rewards
+                    Refresh from Chain
                   </button>
                 ) : null}
 
@@ -201,10 +255,6 @@ export const ArcadeSettingsPanel: React.FC<{
                     Developer
                   </button>
                 ) : null}
-              </div>
-
-              <div className="mt-3 text-[10px] text-[#7a4b52]/70">
-                Nightshade Arcade
               </div>
             </>
           ) : null}
@@ -224,7 +274,9 @@ export const ArcadeSettingsPanel: React.FC<{
 
           {page === "rewards" ? (
             <>
-              {pageHeader("My rewards")}
+              {/* No title by design: the row is opened to pull a fresh
+                  balance from the chain, and says that in its content. */}
+              {pageHeader()}
               {loadState === "loading" ? (
                 <p className="text-xs">Checking…</p>
               ) : loadState === "failed" ? (
@@ -270,6 +322,13 @@ export const ArcadeSettingsPanel: React.FC<{
               {rewardsError && loadState === "ready" ? (
                 <p className="mt-2 text-[11px] text-red-700">{rewardsError}</p>
               ) : null}
+            </>
+          ) : null}
+
+          {page === "preferences" ? (
+            <>
+              {audioHeader()}
+              <ArcadeAudioSettings />
             </>
           ) : null}
         </div>
