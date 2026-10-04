@@ -17,6 +17,7 @@ import {
   useHeldKeys,
   useIsTouchDevice,
 } from "components/ui/TouchControls";
+import { useIsNarrowLayout } from "components/ui/useMediaQuery";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
@@ -352,8 +353,50 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
     useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  /**
+   * The champion the run will actually use — the **committed** choice.
+   *
+   * Kept separate from {@link draftPlayerId} because the narrow layout picks a
+   * champion in a sheet with Confirm and Cancel. Tapping a card there is not a
+   * choice, it is a *proposal*: Cancel has to leave the lobby exactly as it was,
+   * which is only possible if the taps so far went somewhere other than here.
+   */
   const [playerId, setPlayerId] = useState<FighterId>("barlow");
+  /** The proposed champion, live only while the sheet is open. */
+  const [draftPlayerId, setDraftPlayerId] = useState<FighterId>("barlow");
+  const [championSheetOpen, setChampionSheetOpen] = useState(false);
   const [hud, setHud] = useState<HudSnapshot | null>(null);
+
+  /**
+   * Narrow layout: the champion cards collapse to a name and a button.
+   *
+   * On a phone the four cards were the whole budget. Two rows of cards plus their
+   * portrait, name, faction and four stat lines is ~270px of a ~640px lobby, and
+   * it is the section that gets squeezed — the cards ended up with a portrait at
+   * its 40px floor and stats pushed out of the card entirely. So on narrow screens
+   * the cards move into a sheet and the menu keeps only the champion's **name**,
+   * which is all the menu ever needed to say. It is the difference between a
+   * character select you can read and one you cannot.
+   *
+   * Desktop keeps the cards inline: there is room, and the sheet would be a worse
+   * experience than simply picking a card.
+   */
+  const isNarrowLayout = useIsNarrowLayout();
+
+  /** Open the sheet, seeded with the committed choice so Cancel is a true no-op. */
+  const openChampionSheet = useCallback(() => {
+    setDraftPlayerId(playerId);
+    setChampionSheetOpen(true);
+  }, [playerId]);
+
+  /** Confirm: the proposal becomes the choice. */
+  const confirmChampion = useCallback(() => {
+    setPlayerId(draftPlayerId);
+    setChampionSheetOpen(false);
+  }, [draftPlayerId]);
+
+  /** Cancel: discard the proposal. `playerId` is never touched. */
+  const cancelChampion = useCallback(() => setChampionSheetOpen(false), []);
 
   const inputRef = useRef<PlayerInput>(emptyInput());
   const matchRef = useRef<MatchState | null>(null);
@@ -753,38 +796,59 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </InnerPanel>
 
-          {/* The one elastic section: it grows into spare room on a tall window
-              and gives it back on a short one, so the panels below it — controls
-              and the buttons that start a run — never leave the screen.
+          {/* ── Champion ──────────────────────────────────────────────────────
+              Narrow: one line — the chosen champion's name and a button. Wide:
+              the cards, inline. The cards themselves are rendered once, by
+              whichever branch is live, because the narrow branch needs them in a
+              sheet with its own Confirm/Cancel and CSS cannot move a subtree. */}
+          {isNarrowLayout ? (
+            <InnerPanel className="flex shrink-0 items-center justify-between gap-3 bg-slate-50 p-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-slate-500">
+                  CHAMPION
+                </div>
+                <div
+                  className="truncate text-base font-bold"
+                  style={{ color: playerSpec.color }}
+                >
+                  {playerSpec.name}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={openChampionSheet}
+                className="shrink-0 rounded-lg border-2 border-amber-400 bg-amber-100 px-4 py-2 text-sm font-bold text-slate-900 active:scale-95"
+              >
+                CHANGE
+              </button>
+            </InnerPanel>
+          ) : (
+            <>
+              {/* The one elastic section: it grows into spare room on a tall
+                  window and gives it back on a short one, so the panels below it —
+                  controls and the buttons that start a run — never leave the
+                  screen. Capped, because past the cap the column centres itself
+                  rather than stretching four cards around a small character.
 
-              The height cap is `sm`-and-up only, because it assumes a **single**
-              row of cards. Below `sm` the champions are two rows, and capping
-              their panel there left each card shorter than its own text — the
-              portrait took what was left and pushed HP/SPEED/COMBO/SPELL out of
-              the card entirely. `overflow-hidden` is the backstop for a window
-              too short to hold even that: it clips rather than letting a card
-              overlap the controls beneath it. */}
-          <InnerPanel className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 p-3 sm:max-h-[280px]">
-            <div className="mb-2 shrink-0 text-sm font-semibold">
-              CHOOSE YOUR CHAMPION
-            </div>
-            {/* `minmax(min-content, 1fr)`, not `minmax(0, 1fr)`: a card must never
-                be shorter than the stats inside it, so the row's *floor* is its
-                content. Both row counts are declared because four champions across
-                two columns make two rows, and an implicit row is sized `auto` —
-                which would have reintroduced the overflow on the narrowest
-                screens while looking correct everywhere else. */}
-            <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-[minmax(min-content,1fr)_minmax(min-content,1fr)] gap-2 sm:grid-cols-4 sm:grid-rows-[minmax(min-content,1fr)]">
-              {FIGHTERS.map((fighter) => (
-                <FighterCard
-                  key={fighter.id}
-                  fighter={fighter}
-                  selected={fighter.id === playerId}
-                  onSelect={() => setPlayerId(fighter.id)}
-                />
-              ))}
-            </div>
-          </InnerPanel>
+                  The rows are `minmax(min-content, 1fr)`, not `minmax(0, 1fr)`:
+                  a card must never be shorter than the stats inside it. */}
+              <InnerPanel className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 p-3 max-h-[280px]">
+                <div className="mb-2 shrink-0 text-sm font-semibold">
+                  CHOOSE YOUR CHAMPION
+                </div>
+                <div className="grid min-h-0 flex-1 grid-cols-4 grid-rows-[minmax(min-content,1fr)] gap-2">
+                  {FIGHTERS.map((fighter) => (
+                    <FighterCard
+                      key={fighter.id}
+                      fighter={fighter}
+                      selected={fighter.id === playerId}
+                      onSelect={() => setPlayerId(fighter.id)}
+                    />
+                  ))}
+                </div>
+              </InnerPanel>
+            </>
+          )}
 
           <InnerPanel className="shrink-0 bg-slate-50 p-3 text-sm text-slate-700">
             <div className="font-semibold">Controls</div>
@@ -888,6 +952,72 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             >
               EXIT
             </button>
+          )}
+
+          {/* ── Champion sheet (narrow layout only) ─────────────────────────
+              A modal *does* scroll, unlike the menu behind it — that rule exists
+              so the menu is always whole, and a sheet the player opened on purpose
+              is a different thing entirely. `max-h` plus `overflow-y-auto` means a
+              short phone gets a scrollable sheet instead of a clipped one.
+
+              Tapping a card only moves `draftPlayerId`. CONFIRM copies it into
+              `playerId`; CANCEL closes and leaves the committed choice alone, which
+              is why they are two pieces of state rather than one. */}
+          {isNarrowLayout && championSheetOpen && (
+            <div
+              className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-3"
+              onKeyDown={(event) => {
+                if (event.key === "Escape") cancelChampion();
+              }}
+            >
+              {/* `text-white` is on the heading, not the panel. `FighterCard` is a
+                  light card that inherits its text colour, so a `text-white`
+                  ancestor makes the champion's name white-on-white — invisible.
+                  The grid sets `text-slate-900` explicitly so the cards read
+                  correctly whatever an ancestor does. */}
+              <div className="flex max-h-[92vh] w-full max-w-md flex-col gap-3 overflow-y-auto rounded border border-white/30 bg-slate-900 p-4">
+                <h3 className="shrink-0 text-lg font-bold text-white">
+                  Choose Your Champion
+                </h3>
+                {/* `flex-1` plus declared rows, for the same reason the lobby's
+                    grid needs them: the portrait measures its own box with a
+                    ResizeObserver, so the box has to be given real height by the
+                    layout. In an auto-height grid `flex-1` collapses to zero and
+                    every portrait renders at its 40px floor — which would look
+                    worst in the one place the player opened specifically to look
+                    at the characters. Both rows are declared because four
+                    champions across two columns make two, and an implicit row is
+                    sized `auto`. */}
+                <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-[minmax(min-content,1fr)_minmax(min-content,1fr)] gap-2 text-slate-900">
+                  {FIGHTERS.map((fighter) => (
+                    <FighterCard
+                      key={fighter.id}
+                      fighter={fighter}
+                      selected={fighter.id === draftPlayerId}
+                      onSelect={() => setDraftPlayerId(fighter.id)}
+                    />
+                  ))}
+                </div>
+                {/* CANCEL left, CONFIRM right: the primary action sits under the
+                    thumb that reached for it. */}
+                <div className="grid shrink-0 grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={cancelChampion}
+                    className="rounded-lg bg-gray-500 px-4 py-3 text-sm font-bold text-white active:scale-95"
+                  >
+                    CANCEL
+                  </button>
+                  <button
+                    type="button"
+                    onClick={confirmChampion}
+                    className="rounded-lg bg-green-500 px-4 py-3 text-sm font-bold text-white active:scale-95"
+                  >
+                    CONFIRM
+                  </button>
+                </div>
+              </div>
+            </div>
           )}
 
           {showPracticeDifficultyPrompt && (

@@ -161,6 +161,39 @@ rather than overlapping the controls. The start buttons sit **side by side** abo
 `sm` — as two full-width blocks they were ~130px of a ~400px non-negotiable
 budget, and there is 1100px of width to spend on them.
 
+### The champion select is a sheet on narrow screens
+
+Below `sm` the lobby shows **only the chosen champion's name and a CHANGE
+button**. CHANGE opens a sheet with the four cards and a CONFIRM / CANCEL pair;
+CONFIRM commits, CANCEL discards, and the name on the menu updates only if the
+choice actually changed.
+
+The cards were the whole budget on a phone. Two rows of cards, each with a
+portrait, name, faction and four stat lines, is ~270px of a ~640px lobby — and it
+is the section that gets squeezed, because everything else is `shrink-0`. Below
+about a 620px panel the cards ended up with a portrait at its 40px floor and
+`HP`/`SPEED`/`COMBO`/`SPELL` pushed out of the card entirely. Collapsing to a
+name moves the fit floor from **620px to 500px** and removes the squeeze
+altogether; desktop is untouched, because there is room for the cards inline.
+
+**Two pieces of state, not one.** Tapping a card in the sheet is a *proposal*
+(`draftPlayerId`); `playerId` is the committed choice. CANCEL is only a true
+no-op because the taps went somewhere else — with one piece of state, "cancel
+without changing" would mean not letting the player tap anything at all.
+
+The cards are rendered **once**, by whichever branch is live, because the sheet
+needs them somewhere CSS cannot move them. `useIsNarrowLayout` reads the same
+`sm` breakpoint the Tailwind classes do. A sheet may scroll (`max-h` +
+`overflow-y-auto`), unlike the menu behind it — that rule exists so the *menu* is
+always whole, and a sheet the player opened on purpose is a different thing. Its
+grid declares both rows and floors them at `min-content`, or the portrait's
+`ResizeObserver` measures zero and every card renders at its 40px floor in the
+one place the player opened specifically to look at the characters.
+
+`FighterCard` inherits its text colour, so the sheet sets `text-slate-900` on the
+grid rather than inheriting the modal's `text-white` — which renders every
+champion's name white-on-white. Measured 16–18:1 contrast on all four.
+
 ### Why the genre changed
 
 The fighting game it replaced had no guard: a jump was the only block, the
