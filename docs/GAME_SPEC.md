@@ -194,6 +194,14 @@ one place the player opened specifically to look at the characters.
 grid rather than inheriting the modal's `text-white` — which renders every
 champion's name white-on-white. Measured 16–18:1 contrast on all four.
 
+The champion's **name** in the collapsed row is black, never `playerSpec.color`.
+The tint is right on a card — it sits on white beside that character's portrait,
+so it reads as identity — but as bare text on the lobby panel it is close to
+invisible. Measured against the painted background, the four roster tints score
+**1.25, 1.15, 1.27 and 1.01** to one; Reginald's `#ff9b54` is very nearly the
+panel's own colour. Black scores **10:1** on all four. The tint still carries
+identity on the card, the HP figure and the health bar.
+
 ### Why the genre changed
 
 The fighting game it replaced had no guard: a jump was the only block, the
