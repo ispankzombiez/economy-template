@@ -13,11 +13,21 @@
  * 2. The CDN behind `*.economies.sunflower-land.com` answers **403** for any
  *    object whose key contains a space (e.g. `world/Teeny Tiny Pixls5.png`),
  *    so those files silently go missing at runtime.
+ * 3. **A build made with the wrong mode produces a `dist/` that looks perfect
+ *    and does not work.** `vite build --mode pages` sets `base` to
+ *    `/economy-template/` for GitHub Pages; `npm run build` sets it to `/` for
+ *    the hosted uploader. Uploading the Pages build puts every asset request
+ *    under `/economy-template/assets/...`, which the hosted origin has never
+ *    heard of — so the page loads, the JS never arrives, and the player gets a
+ *    blank white screen with no error anywhere to look. This is silent: no
+ *    console message, no failed request in the network tab's summary, nothing.
+ *    So the base path is asserted here, and `vite build --mode pages` is run
+ *    with the uploader's own mode instead (see `base:` below).
  *
- * This script fails the build if `dist/` would be rejected or would ship a
- * file the CDN cannot serve.
+ * This script fails the build if `dist/` would be rejected, would ship a file
+ * the CDN cannot serve, or was built for the wrong target.
  */
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 /** Hard limit imposed by the upload dialog. */
@@ -76,6 +86,40 @@ for (const required of ["dist/index.html"]) {
   if (!existsSync(join(root, required))) problems.push(`missing ${required}`);
 }
 
+// 4. The base path must be the hosted one -----------------------------------
+//
+// This is the check that would have caught the white screen. Every `src`/`href`
+// in `index.html` is emitted relative to Vite's `base`, so a Pages build asks
+// for `/economy-template/assets/...` and the hosted origin 404s every one of
+// them. Read the HTML and read the paths, rather than checking a constant —
+// that way this keeps working if `base` is ever changed.
+if (existsSync(join(distDir, "index.html"))) {
+  const html = readFileSync(join(distDir, "index.html"), "utf8");
+  const refs = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map((m) => m[1])
+    .filter((href) => !href.startsWith("data:"));
+
+  const badBase = refs.filter((href) => href.startsWith("/economy-template/"));
+  if (badBase.length > 0) {
+    problems.push(
+      `index.html references /economy-template/ — this is a GitHub Pages build. ` +
+        `Run "npm run build" (build:hosted), not "vite build --mode pages". ` +
+        `Offending refs: ${badBase.slice(0, 3).join(", ")}`,
+    );
+  } else if (refs.length === 0) {
+    problems.push("index.html references no scripts or stylesheets at all.");
+  } else {
+    const notRooted = refs.filter(
+      (href) => !href.startsWith("/") && !href.startsWith("./"),
+    );
+    if (notRooted.length > 0) {
+      problems.push(
+        `index.html has non-absolute asset refs: ${notRooted.slice(0, 3).join(", ")}`,
+      );
+    }
+  }
+}
+
 const assetDir = join(distDir, "assets");
 if (!existsSync(assetDir) || readdirSync(assetDir).length === 0) {
   problems.push("dist/assets/ is missing or empty.");
@@ -98,4 +142,5 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
-console.log(`\n[upload-check] OK — select the single folder "dist" in the upload dialog.\n`);
+console.log(`\n[upload-check] OK — select the single folder "dist" in the upload dialog.`);
+console.log(`[upload-check] base path verified as "/" (hosted), not GitHub Pages.\n`);

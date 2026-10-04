@@ -9,6 +9,8 @@
     "build:hosted": "tsc && vite build --mode hosted && node scripts/checkUpload.mjs",
     "build:pages": "tsc && vite build --mode pages",
     "upload:check": "node scripts/checkUpload.mjs",
+    "freerun:audit": "node scripts/auditFreeRuns.mjs",
+    "freerun:add": "node scripts/addCabinetEconomyIds.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -153,6 +153,161 @@ export const TouchButton: React.FC<TouchButtonProps> = ({
 
 export type TouchDirectionName = "up" | "down" | "left" | "right";
 
+export interface TouchAnalogStickProps {
+  /** Held through the stick's lifetime, so it shares one key set with the pad. */
+  held?: ReturnType<typeof useHeldKeys>;
+  /** Diameter of the base ring, in pixels. The thumb scales off this. */
+  size?: number;
+  className?: string;
+}
+
+/** Thumb diameter as a fraction of the base — the floor's 7-on-15. */
+const STICK_THUMB_RATIO = 7 / 15;
+
+/**
+ * Deadzone as a fraction of the base's radius — the floor's `forceMin: 2` on a
+ * radius-15 base, which is the same 13%.
+ *
+ * Without it a resting thumb reads as a direction, and the player walks off
+ * before they have decided to.
+ */
+const STICK_DEADZONE = 2 / 15;
+
+/**
+ * An analog thumbstick, matching the one the **arcade floor** uses.
+ *
+ * The floor's stick is a Phaser `VirtualJoystick` (`ArcadeTiledScene`), two
+ * circles and a `forceMin`. A cabinet is not a Phaser scene, so this reproduces
+ * it in the DOM rather than standing a scene up to host one joystick — the
+ * geometry, the deadzone and the feel are the floor's, and the output is the same
+ * four arrow keys every cabinet already listens for, per the file's whole
+ * premise. Nothing downstream can tell the difference.
+ *
+ * ## Why it beats four buttons here
+ *
+ * A d-pad is four separate DOM buttons, so a thumb can only reliably hold one:
+ * there is no way to walk *and* step into the plane at the same time, which is
+ * the single most important thing to do in a beat 'em up. A stick reads two axes
+ * at once and so produces diagonals for free — which this game's `x` and `z` are
+ * independent axes, so "right and into the plane" is a real move and not a
+ * diagonal nobody wants.
+ *
+ * The thumb is moved by writing `transform` straight to the node rather than
+ * through state: this fires on every `pointermove`, and a re-render per frame of
+ * the cabinet's control bar is a re-render of the whole screen for a thumb that
+ * has not finished being dragged yet.
+ */
+export const TouchAnalogStick: React.FC<TouchAnalogStickProps> = ({
+  held: providedHeld,
+  size = 132,
+  className,
+}) => {
+  const ownHeld = useHeldKeys();
+  const held = providedHeld ?? ownHeld;
+
+  const baseRef = useRef<HTMLDivElement>(null);
+  const thumbRef = useRef<HTMLDivElement>(null);
+
+  const radius = size / 2;
+  const thumbSize = Math.round(size * STICK_THUMB_RATIO);
+  // How far the thumb's centre may travel before it pins to the rim.
+  const travel = Math.max(0, radius - thumbSize / 2 - 2);
+
+  const apply = useCallback(
+    (clientX: number, clientY: number) => {
+      const rect = baseRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      const dx = clientX - (rect.left + rect.width / 2);
+      const dy = clientY - (rect.top + rect.height / 2);
+      const distance = Math.hypot(dx, dy);
+
+      // Pin to the rim, so the stick cannot be dragged outside its own ring.
+      const clamped =
+        distance > travel && distance > 0
+          ? { x: (dx / distance) * travel, y: (dy / distance) * travel }
+          : { x: dx, y: dy };
+
+      if (thumbRef.current) {
+        thumbRef.current.style.transform = `translate(${clamped.x}px, ${clamped.y}px)`;
+      }
+
+      // `release` before `press` so crossing the deadzone into a new direction
+      // does not leave the old one stuck down. Both are Set-guarded, so the
+      // redundant calls cost nothing.
+      held.release("ArrowLeft");
+      held.release("ArrowRight");
+      held.release("ArrowUp");
+      held.release("ArrowDown");
+
+      if (distance === 0) return;
+      const nx = dx / radius;
+      const ny = dy / radius;
+      if (nx <= -STICK_DEADZONE) held.press("ArrowLeft");
+      if (nx >= STICK_DEADZONE) held.press("ArrowRight");
+      if (ny <= -STICK_DEADZONE) held.press("ArrowUp");
+      if (ny >= STICK_DEADZONE) held.press("ArrowDown");
+    },
+    [held, radius, travel],
+  );
+
+  const reset = useCallback(() => {
+    if (thumbRef.current) thumbRef.current.style.transform = "";
+    held.release("ArrowLeft");
+    held.release("ArrowRight");
+    held.release("ArrowUp");
+    held.release("ArrowDown");
+  }, [held]);
+
+  return (
+    <div
+      ref={baseRef}
+      role="presentation"
+      onPointerDown={(event) => {
+        event.preventDefault();
+        // See `TouchButton`: capture must never be allowed to cost the input.
+        try {
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+        } catch {
+          // No live pointer to capture; pointerup still resets.
+        }
+        apply(event.clientX, event.clientY);
+      }}
+      onPointerMove={(event) => {
+        // Only while a finger is down — without this the cursor drags the stick
+        // on a desktop too, fighting the keyboard.
+        if (event.buttons === 0) return;
+        apply(event.clientX, event.clientY);
+      }}
+      onPointerUp={reset}
+      onPointerCancel={reset}
+      onLostPointerCapture={reset}
+      onContextMenu={(event) => event.preventDefault()}
+      className={`relative flex shrink-0 touch-none select-none items-center justify-center rounded-full border-2 border-amber-400/40 ${className ?? ""}`}
+      style={{
+        width: size,
+        height: size,
+        // The floor's own alphas, lifted: 0.2 reads over a Phaser scene and
+        // disappears over a photographically busy stage.
+        background: "rgba(15, 23, 42, 0.35)",
+      }}
+    >
+      <div
+        ref={thumbRef}
+        className="pointer-events-none rounded-full"
+        style={{
+          width: thumbSize,
+          height: thumbSize,
+          background: "rgba(255, 255, 255, 0.55)",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.4)",
+          // Centred by the parent's flexbox, then offset by `transform` — so the
+          // resting position needs no state and cannot drift from the drag.
+        }}
+      />
+    </div>
+  );
+};
+
 export interface TouchDPadProps {
   /** Held through the pad's lifetime, so every button shares one key set. */
   held?: ReturnType<typeof useHeldKeys>;

@@ -97,25 +97,69 @@ the first bubble it would hit.
 **Economy ids** (derived from the registry id `raven-bubbles`, so the economy
 editor must publish them): `Mint-Raven-Coin-RavenBubbles`,
 `Free Run Token - RavenBubbles`, `Grant-Free-Run-RavenBubbles`,
-`Start-Free-Run-RavenBubbles`.
+`Start-Free-Run-RavenBubbles`. See
+[Free runs](#free-runs-one-coherent-decision-not-three-lookups) for what happens
+before all four are published.
 
 ## Sunflower Brawler (`src/features/arcade/games/sunflowerbrawler/`)
 
 The twelfth cabinet, on `Machine 12` — the second cabinet the original arcade
 left empty. A **side-scrolling beat 'em up**: one champion walks a scrolling
-street, fights five scripted waves, and finishes on the Big Goblin. It was a
-one-on-one fighting game until that game turned out to be a button masher — see
+street, fights fifteen scripted waves in three blocks with a boss closing each,
+and then goes **endless**. It was a one-on-one fighting game until that game
+turned out to be a button masher — see
 [Why the genre changed](#why-the-genre-changed).
 
 | Rule | Value |
 |------|-------|
-| Format | **One run** — five waves, `MAX_LIVES` (3) lives for the whole thing |
+| Format | **One run** — 15 waves, `MAX_LIVES` (3) lives, then **endless** until lives run out |
+| Blocks | 1–5 **goblins** · 6–10 **undead** · 11–15 **elites**, a boss closing each |
+| Bosses | `GUNTER` (5) → `GILDA` (10) → `GORGA` (15) |
 | Clock | **None.** A run lasts as long as the player takes |
 | Clearing | Kill every enemy in a wave → `WAVE_CLEAR_MS` banner → walk to the next screen |
-| Defeat | Lives reaching 0 → `GAME OVER` on whatever wave you were on |
-| Reward win | Clear wave 5 → **1 Raven Coin** (`SUNFLOWER_BRAWLER_RAVEN_COIN_REWARD`) |
+| Health | **Carried over for the whole run** — only a life restores it |
+| Defeat | Lives reaching 0 → `GAME OVER`, with the wave reached |
+| Endless | Past wave 15, **all fifteen waves replay** — bosses included — at `endlessHpScale` per loop |
+| Reward win | Clear wave 15 → **1 Raven Coin**, paid on `reachedFinale` and kept even if the player then dies in endless |
 | Difficulty | 4 levels, UTC-day seeded for reward runs (weights **3 / 3 / 2 / 1**) |
 | Roster | Barlow (Bumpkin), Graxle (Goblin), Nyx (Nightshade), Reginald (Sunflorian) |
+
+### The lobby never scrolls
+
+The lobby is a **fixed-height flex column with `overflow-hidden`** — one page,
+always, at every window size. That is a layout constraint rather than a styling
+preference, so the three things it depends on are load-bearing:
+
+* **`min-h-0` on the one flexible child.** A flex item will not shrink below its
+  content without it, so the column would overflow and the page would scroll —
+  which is exactly what this replaced.
+* **The champion panel is the only elastic section.** Everything else is text of a
+  known size, so the panel absorbs the difference between a tall window and a
+  short one and the controls and buttons below it never leave the screen. It is
+  capped (`sm:max-h-[280px]`) so growth stays bounded, and the column centres
+  itself past that rather than stretching four cards around a small character.
+* **Grid rows are `minmax(min-content, 1fr)`, never `minmax(0, 1fr)`.** A card
+  must never be shorter than the stats inside it. With a `0` floor the portrait
+  took whatever was left and pushed `HP`/`SPEED`/`COMBO`/`SPELL` out of the card
+  entirely — on the two-column layout only, where four champions make two rows.
+
+`NPCIcon` sizes a canvas backing store, so it needs a **pixel** height rather than
+a CSS length. The portrait box is therefore measured with a `ResizeObserver` and
+the number handed down, clamped to 40–96px. Measuring the element rather than
+computing the number from the other panels' text means the portrait cannot drift
+out of sync with the layout.
+
+The "are you sure?" box is **absolutely positioned** inside a zero-height wrapper.
+In flow its ~180px pushed the buttons it was asking about off a short screen, and
+with no scrollbar there was nothing to rescue it; overlaid, the layout is
+identical whether or not it is showing.
+
+Verified with no overflow and every card's text visible: **900 → 440px** panel
+height on the four-across layout, **900 → 520px** on the two-column one (≈ 463px
+and ≈ 547px of browser viewport). Below those floors the champion panel clips
+rather than overlapping the controls. The start buttons sit **side by side** above
+`sm` — as two full-width blocks they were ~130px of a ~400px non-negotiable
+budget, and there is 1100px of width to spend on them.
 
 ### Why the genre changed
 
@@ -130,7 +174,7 @@ pressing faster solves a line you are not standing on. Two rules carry the
 whole change:
 
 1. **Everything stands on a depth plane.** Every actor has a `z` from 0 (far)
-   to `Z_MAX` (134, near); ←→ walk along the plane, ↑↓ step into and out of it.
+   to `Z_MAX` (210, near); ←→ walk along the plane, ↑↓ step into and out of it.
 2. **A swing is a horizontal band through that plane.** Hit resolution is
    `|a.z − b.z| ≤ moveZReach(move)` — there is no vertical test at all. So
    **stepping off the line is the dodge**, and the game needs no jump and no
@@ -152,15 +196,45 @@ changes with which you did.
 
 | Fighter | Faction | HP | Walk | **SPACE** combo 1 → 2 → 3 | **X** spell |
 |---------|---------|----|------|---------------------------|-------------|
-| **Barlow** | Bumpkin | 110 | 152 | `attack` **11** → `attack` **12** → `hammering` **23** dmg, 480 px/s finisher | **34 dmg** |
-| **Graxle** | Goblin | 120 | 170 | `axe` **10** → `axe` **11** → `mining` **19** dmg, **340 px/s lunge** | **30 dmg** |
-| **Nyx** | Nightshade | 90 | 164 | `attack` **10** → `attack` **11** → `mining` **18** dmg, 520 px/s `z` scatter | **36 dmg** |
-| **Reginald** | Sunflorian | 100 | 144 | `attack` **12** → `axe` **14** → `hammering` **26** dmg | **42 dmg** |
+| **Barlow** | Bumpkin | 110 | 232 | `attack` **11** → `attack` **12** → `hammering` **23** dmg, 480 px/s finisher | **34 dmg** |
+| **Graxle** | Goblin | 120 | 250 | `axe` **10** → `axe` **11** → `mining` **19** dmg, **340 px/s lunge** | **30 dmg** |
+| **Nyx** | Nightshade | 90 | 244 | `attack` **10** → `attack` **11** → `mining` **18** dmg, 520 px/s `z` scatter | **36 dmg** |
+| **Reginald** | Sunflorian | 100 | 228 | `attack` **12** → `axe` **14** → `hammering` **26** dmg | **42 dmg** |
 
 Graxle is the fastest to startup and the lightest hitter; Reginald is the
 slowest and the heaviest; Nyx has the least health and the quickest finisher.
-Health runs 90–120 and speed 144–170, so picking a champion is a real choice
+Health runs 90–120 and speed 228–250, so picking a champion is a real choice
 rather than a colour swap.
+
+**Every champion is the fastest thing on the street.** Walk speeds are 228–250
+against a grunt's 142–172 and a heavy's 76–108, and the enemies were *not*
+scaled up with them. This is the load-bearing number for the whole genre: it
+makes repositioning a free action, because escaping a crowd costs only time and
+time is something the player has. So the answer to being surrounded is to move,
+not to mash — and the depth plane is worth using on its own, not only as a way
+of dodging a swing.
+
+**Champions also out-range the common street.** A melee hitbox runs from 10 px
+*behind* the attacker to `reach` in front, and every one of the twelve combos was
+widened by **+12 px** — the opening hit lands 74–82 px out against a grunt's
+60–66 and a heavy's 68–84. A whiffed swing is the most frustrating thing in a
+brawler and it is disproportionately a *spacing* failure, not a timing one: the
+player is a few pixels short while reading a crowd, not a few frames early.
+
+The advantage is **not** total, and where it stops is the design:
+
+| | Jab / combo 1 | Heaviest |
+|---|---|---|
+| Champions | **74–82** | 86–94 |
+| Grunts & heavies | 60–92 | 68–112 |
+| Specialists (Wizard, Blacksmith) | **92**, **84** | **138**, 104 |
+| Bosses | **100–108** | **128–136** |
+
+So the answer to a wave-2 goblin is to walk in and hit it, and the answer to the
+Wizard or to Gunter is *not* — which is what makes a roster readable rather than
+a stat sheet. What the advantage does cost is that one common enemy can no
+longer catch a player who keeps their distance, so the pressure has to come from
+two sides at once: the depth plane and `maxAttackers`.
 
 ### The moves are frame data, not art
 
@@ -209,9 +283,10 @@ There is no jump and no guard. Melee hitboxes are a rectangle along `x` — from
 ten pixels *behind* the attacker to `move.reach` in front — crossed with a band
 along `z` of `moveZReach(move)` (22 px by default, `DEPTH_TOUCH`; finishers run
 to 40). Depth is therefore the only axis left to miss on, and the plane is sized
-for it: `Z_MAX = 134` against a 66 px body is about two body-heights, wide
-enough that two lines read as genuinely different places and shallow enough
-that the whole band stays on screen without the camera ever tilting.
+for it: `Z_MAX = 210` against a 99 px body is a bit over three body-heights, deep
+enough that a wave can spread out across the plane and a player has somewhere to
+reposition *to*, and shallow enough that the whole band stays on screen without
+the camera ever tilting.
 
 Because a swing is a band rather than a box, **separation is two-dimensional**.
 `separatePair` pushes along whichever axis is *least* embedded, and falls back
@@ -233,64 +308,209 @@ frames), deliberately shorter than the fighting game's 180 ms: with a single
 attack button, a long one turns the string into something that queues itself.
 `event.repeat` is ignored, so a held key cannot autofire.
 
-### The waves are two factions asking opposite questions
+### Three blocks, a boss closing each
 
-Five waves, one per screen of the level, laid out in `enemies.ts`. Waves 1–2 are
-a **goblin** block and waves 3–4 an **undead** block, and the two are built to
-ask for opposite answers:
+Fifteen waves, one per screen of the level, laid out in `enemies.ts`. The run is
+three blocks of five and the blocks are built to ask *different* questions, so
+that wave 11 does not feel like wave 6 with more bodies:
 
 | # | Name | Spawns |
 |---|------|--------|
 | 1 | `GOBLIN PATROL` | 2 Scout, 1 Brute |
 | 2 | `GOBLIN RAIDERS` | 2 Sneak, 1 Scout, 1 Brute |
-| 3 | `THE BONEYARD` | 3 Skeleton, 1 Zombie |
-| 4 | `GRAVE LEGION` | 2 Skeleton, 1 Banshee, 1 Dreadhorn |
-| 5 | `BIG GOBLIN` | 1 boss |
+| 3 | `PICKPOCKETS` | 2 Gold Tooth, 2 Sneak, 1 Brute |
+| 4 | `GOLD RUSH` | 3 Gold Tooth, 1 Grimtooth, 2 Scout |
+| 5 | **`GUNTER`** | boss |
+| 6 | `THE BONEYARD` | 3 Skeleton, 1 Zombie |
+| 7 | `GRAVE LEGION` | 2 Skeleton, 1 Banshee, 1 Dreadhorn |
+| 8 | `DEAD CREW` | 2 Phantom Face, 2 Skeleton, 1 Zombie |
+| 9 | `THE FOUNDRY` | 2 Skeleton, 1 Zombie, 1 Dreadhorn |
+| 10 | **`GILDA`** | boss |
+| 11 | `ELDRIC'S GUARD` | 2 Eldric, 2 Skeleton, 1 Dreadhorn |
+| 12 | `THE WIZARD` | 1 Wizard, 2 Banshee, 1 Zombie |
+| 13 | `THE CHAMPION` | 1 Chun Long, 2 Eldric, 1 Dreadhorn |
+| 14 | `THE FORGE` | 1 Blacksmith, 2 Chun Long, 1 Eldric, 1 Zombie |
+| 15 | **`GORGA`** | boss, 1 Grimtooth |
 
-* **Goblins** (22–48 HP, 108–172 px/s) are fast and frail. They close distance
+* **Goblins** (22–62 HP, 108–172 px/s) are fast and frail. They close distance
   and poke, so the answer is to hold a line and make them come to you.
-* **The undead** (34–80 HP, 76–126 px/s) are slow and tanky. They walk straight
+* **The undead** (32–80 HP, 76–134 px/s) are slow and tanky. They walk straight
   in and absorb the string, so the answer is the depth axis — step off their
   line, let them pass, hit them from the line they are not on.
+* **Elites** have no single answer, which is the point: by wave 11 the player
+  should be reading the *crowd* rather than the block.
 
-Every wave carries one **heavy**: 48–80 HP against a grunt's 22–38, a slower
-and much longer-reaching swing, and roughly double the knockback. The heavy is
-what stops a wave from being a circle-strafe — it holds the middle while the
-grunts work the edges.
+Seventeen distinct enemy NPCs across the three blocks, every one verified to
+serve the full animation vocabulary from the CDN.
 
 Spawn positions alternate between the left and right edge (`index % 3`) and are
 spread across the whole `z` range, so a wave never arrives as a single file
-column walking in from one side.
+column walking in from one side. The boss is the exception: it spawns **already
+on screen** at `camX + STAGE_W − 240`, mid-plane, facing the player, with no
+spawn fade — it is simply already there when the banner clears.
 
-### The boss is a sprite, not a sheet
+### Difficulty comes from the wave, not only from the setting
 
-`src/features/arcade/assets/big_goblin.png` comes from Sunflower Land's own
-`RetreatScene` — a 108×35 strip of four 27×35 frames played at 6 fps, copied
-into the repo following the existing committed-arcade-art precedent. It has an
-idle cycle and nothing else: no walk, no attack, no death.
+`hpMultiplier` and its siblings in `session.ts` set the *difficulty band*. What
+makes wave 14 harder than wave 4 is a separate per-wave multiplier applied on
+top, so the roster stays legible and the stat sheet grows:
 
-So the boss's states are driven **procedurally** in `engine.ts` from the same
-`action` field every other actor has:
+| Function | Per wave | Effect |
+|---|---|---|
+| `waveHpScale` | **+6 %** | wave 15 is 1.84× wave 1 |
+| `waveSpeedScale` | +1.2 %, capped | hardest grunts stay *readable* |
 
-* **Attack** — `bossFrameOf` picks one of the strip's four frames as a pose
-  (wound back / struck through / recovering) and `drawBoss` leans the whole
-  sprite through a continuous offset: back through the first 40 % of the move,
-  driven through the middle, settling over the recovery. Continuous on purpose —
-  a jump in the offset reads as a stutter at 60 fps.
-* **Hurt** — a white `hitFlash` overlay, the same path every other actor uses.
-* **Death** — rotate over `DEATH_MS` and fade out past 55 %.
-* **Spawn** — a scale pop from 0.55 with a fade.
+Linear rather than exponential on purpose. An exponential ramp turns wave 14
+into a wall of health that reads as a bug, while a linear one keeps every
+individual fight winnable and lets *more enemies plus worse specials* do the
+late work. The speed cap is the same argument from the other side: past about
+15 % above a grunt's base the AI stops being something you read and starts being
+something that happens to you.
 
-The boss has 300 HP, is drawn at `BOSS_SCALE = 4.4` (≈154 px tall against a
-66 px player), and gets two moves with **two different tells**:
+### Enemies are separated by behaviour, not by colour
 
-* **SWIPE** (`jab`) — 100 px reach, `zReach` 34. Wide in `x`, narrow enough in
-  `z` that stepping off the boss's line still works; the reward for reading it.
-* **SLAM** (`heavy`) — 130 px reach, `zReach` **70**. Against a 134-deep plane
-  the depth axis will *not* save you: the 400 ms windup is the tell and the
-  answer is purely to be somewhere else along `x`.
+Every entry in `ENEMY_SPECS` is a different **shape of threat**, carried by the
+move table rather than the sprite. Every enemy has a `jab` (cheap, safe) and a
+`heavy` (slow, long, high `zReach` — the one that punishes standing still). Some
+also have a **`special`**, which is the move that makes that enemy *that* enemy:
 
-Two attacks, two different dodges, one button.
+| Enemy | Special | The answer |
+|---|---|---|
+| Goblin Sneak | second dash | keep moving |
+| Gold Tooth | 96 px pickpocket swipe, narrow `z` | step off the line, do not back off |
+| Grimtooth | slow `z`-splitting overhead | be elsewhere along `x` |
+| Phantom Face | flat, very wide sweep, `z` 78 | depth, and it will not chase |
+| Zombie | grab, `z` throw 620 | it wins the positional argument outright |
+| Eldric | 300 px/s lunge-through | actually hold the line |
+| Blacksmith | one-shot, `hammering` at 40 fps | believe the one-second windup and leave |
+| Wizard | 138 px reach, zero advance | close the gap; he is worst up close |
+| Chun Long | fast, low-damage, high-volume | volume, not any one hit |
+| **Gunter** | CHARGE — 380 px/s, arrives swinging | commit to the trade |
+| **Gilda** | DISSOLVE — `z` 96 and a 520 `z` scatter | there is no clean answer; you lose ground |
+| **Gorga** | QUAKE — `z` 118, advances while winding up | a trade-off, not a correct response |
+
+`specialAt` (`far` / `close` / `inRange`) says when a special is worth spending,
+so a lunge is spent closing a gap rather than poking at your face, and
+`specialCooldownMs` stops any of them becoming a one-button monster — which at
+Expert, where the AI re-rolls every 150 ms, it otherwise would.
+
+### Health carries over; lives are the safety net
+
+`finishWave` used to set `player.hp = maxHp`. It no longer does — **health is
+carried across every wave boundary for the whole run**, and the only thing that
+restores it is `respawn`, which costs a life.
+
+The refill was the genre's standard pacing device (the wave banner as the run's
+only breathing room), and the argument for it was that fifteen waves would
+otherwise compound every mistake into an unwinnable run. The owner's call is the
+opposite, and it is the better one: with a refill the bar was **decorative**,
+because the only thing that ever moved it was the wave you had just finished.
+Carrying it is what makes the `+30 HP` food drops worth walking for, and it makes
+a long run a resource being managed rather than a sequence of resets — which is
+what fifteen waves and then endless actually asks for.
+
+Measured with the scripted bot, best wave reached per band, refill removed:
+
+| Band | With refill | Carried over |
+|------|-------------|--------------|
+| Easy | 11 | **11** |
+| Medium | 9 | **9** |
+| Hard | 6 | **6** |
+| Expert | 5 | **4** |
+
+Effectively unchanged, and slightly *easier* than the numbers suggest in real
+play: the bot does not walk onto pickups, so it gets none of the healing the
+carry-over makes worth having. **Lives remain the run's difficulty curve** —
+three of them across fifteen waves.
+
+### Endless
+
+Clearing wave 15 does **not** end the run. `finishWave` increments and the game
+continues into endless, which replays **all fifteen waves — all three bosses
+included** — with `endlessHpScale` compounding **1.35× per loop**. Lives run out
+eventually; that is the only ending there is.
+
+Replaying from wave 1 rather than skipping ahead is deliberate: replaying from
+wave 6 was tried and drops Gorga entirely, because Gorga *is* wave 15, so the
+run's final boss never appears again and the loop loses the punctuation that
+makes a boss wave feel different from an ordinary one.
+
+Two things make this possible on a finite canvas, and one of them was a bug:
+
+* **`zoneCamX` is unbounded** and `stageOffset` wraps *in the blit*. Wrapping
+  used to happen in `zoneCamX`, which inverted the camera's walk range for wave
+  15 (`[13440, 0]`) and pinned the camera at 13 440 forever — no wave could
+  ever open. Positions are now ordinary and continuous; the canvas recycles.
+  The street is periodic, so the wrap is invisible, and actors are drawn in world
+  space so nothing jumps.
+* **The reward pays on `reachedFinale`,** which latches the instant wave 15 is
+  cleared and *stays* true. Not on `result === "victory"`, which no longer
+  exists: a player who clears wave 15 and dies on wave 40 has still completed
+  the run, and keying the payout off a terminal state would take the coin away
+  for playing well.
+* **`FINALE_BONUS_SCORE`** (2 500) is paid once for beating the run rather than
+  surviving it — the only reward that specifically pays for clearing the finale,
+  which keeps it worth chasing after the coin is already banked.
+
+### The bosses are ordinary actors with ordinary sheets
+
+The boss was originally `src/features/arcade/assets/big_goblin.png`, copied from
+Sunflower Land's `RetreatScene`: a 108×35 strip of four 27×35 frames played at
+6 fps. It has an idle cycle and nothing else — no walk, no attack, no death —
+so every one of its states had to be **faked**. `drawBoss` leaned the sprite
+through each swing and swapped the strip's four frames in as poses, which read
+as a boss in a still screenshot and as a slideshow in motion.
+
+It is gone. All three bosses are `NPC_WEARABLES` entries like every other
+fighter, so the animation CDN serves them the same full cycle vocabulary
+(`idle`/`walking`/`hurt`/`death`/`attack`/`axe`) at the same 96×64 frame size.
+That collapses the entire special case: there is no boss-only draw path, no
+`isBoss` flag, no strip geometry, and no second art file. A boss is an
+`ActorRT` drawn by `drawSheetActor` exactly like a grunt; `tier: "boss"` alone
+makes it bigger and puts a bar on the HUD.
+
+**A caveat worth stating plainly, because it is visible.** In the main game's
+data `gunter`, `gilda` and `gorga` share a body, shirt and tool — Infernal
+Goblin, Fossil Armor, Infernal Pitchfork — and differ in hair, with Gunter
+having no horns. They are three closely-related infernal figures rather than
+three unrelated ones, which is a defensible reading for a faction's three
+wardens and is what the main game ships. In play they are separated by scale,
+colour and move set rather than silhouette. If they ever want to be visually
+distinct, that is an edit to `NPC_WEARABLES` in the main game — not something
+this cabinet should paper over.
+
+Being a boss is now **three numbers and nothing else**: `scale`, `rx`, `rz`.
+Each enters already on screen, mid-plane, facing the player, with no spawn fade.
+
+Boss health is the easiest number in the game to get wrong by a factor of two,
+so it is worth recording how these were set. A full string does ~40 damage, and
+each was measured against a bot that keeps its distance and dodges depth:
+
+| Boss | Wave | Base HP | At wave | Measured |
+|---|---|---|---|---|
+| `GUNTER` | 5 | 200 | ~250 | ~31 s |
+| `GILDA` | 10 | 260 | ~400 | ~64 s |
+| `GORGA` | 15 | 340 | ~625 | ~77 s |
+
+A first draft ran 300 / 400 / 520 and measured at **58 / 125 / 100 seconds** —
+a wall rather than a fight, and with 15 waves to play there is no room for a
+boss that eats two minutes. The step between Gunter and Gilda is only a third
+because the *move set* is what escalates, not the health: more health on top of
+a harder fight just makes the same fight longer.
+
+Each boss's three moves have **three different tells**:
+
+* **Gunter** — SWIPE (line, step off it) · SLAM (`zReach` 70, a third of the
+  plane, go elsewhere in `x`) · **CHARGE**, 380 px/s closing that arrives already
+  swinging, so holding a line has to be a real commitment.
+* **Gilda** — SWIPE · SLAM · **DISSOLVE**, `zReach` 96 covering nearly half the
+  plane with a 520 `z` scatter. The first move in the game that loses you the
+  positional argument outright rather than testing it.
+* **Gorga** — SWIPE · SLAM · **QUAKE**, `zReach` 118 (over half the plane) that
+  also advances 200 px/s while winding up over a 600 ms telegraph. There is no
+  single correct answer: step off the line and you are behind it, stay and you
+  take 30. Every other move has a response; this one has a trade-off, which is
+  what makes it a finale rather than a bigger wave 10.
 
 ### AI re-rolls on a tick, it does not cheat
 
@@ -299,12 +519,27 @@ parameter today's difficulty sets, so "hard" never means the AI cheats at the
 physics — it re-rolls more often, commits more often, and commits to the heavy
 instead of the jab more often.
 
-The branch order matters. Committing is tested **first**, so an enemy already in
-range never walks *past* you to reposition. Repositioning (`spacingChance`) is
-tested before approaching, so a wave that has just been hit gets a beat to
-breathe. And the approach stops at `jab.reach` rather than walking into the
-separation radius, so an enemy waiting for an opening holds its ground instead
-of grinding against you frame after frame.
+The branch order matters, and it is in four numbered steps now that a `special`
+exists:
+
+1. **The special**, if this enemy has one and it is worth spending — gated on
+   `specialAt`, so a lunge is spent closing a gap rather than poking at your
+   face, and on `specialCooldown`, which is *not* the same timer as the decision
+   tick. Those answer different questions: `timer` is "when may I decide
+   something", the cooldown is "when may I use *that*". Rolling them together is
+   what would turn a strong special into a one-button monster at Expert.
+2. **Committing**, so an enemy already in range never walks *past* you to
+   reposition. Still subject to `maxAttackers`, and so is the special — that
+   budget is the single most effective difficulty control the genre has.
+3. **Repositioning** (`spacingChance`), so a wave that has just been hit gets a
+   beat to breathe.
+4. **Approach**, which stops at `jab.reach` rather than walking into the
+   separation radius, so an enemy waiting for an opening holds its ground
+   instead of grinding against you frame after frame.
+
+Special cooldowns are **staggered on spawn** (400–1300 ms) so a wave's specials
+do not all come off cooldown on the same tick, which would read as a
+synchronised attack rather than a crowd.
 
 | Difficulty | `reactionMs` | `aggression` | `heavyChance` | `spacingChance` | `speed` | `hpMultiplier` | `maxAttackers` |
 |---|---|---|---|---|---|---|---|
@@ -320,29 +555,258 @@ the work. But it is the number that decides whether a mistake costs one hit or
 three.
 
 **Controls.** ← → walk along the street, ↑ ↓ step in and out of the plane,
-**Space** attack (three-hit string), **X** magic (50 meter). Touch gets a full
-four-way `TouchDPad` — losing `down` would take away the one input the whole
-game is built around — plus two `TouchButton`s, ATTACK and MAGIC, which
-dispatch the same `Space` / `KeyX` codes so there is exactly one input path.
+**Space** attack (three-hit combo), **X** magic (50 meter). Touch gets a
+`TouchAnalogStick` plus two `TouchButton`s, ATTACK and MAGIC, which dispatch the
+same `Space` / `KeyX` codes so there is exactly one input path.
+
+The stick replaces a `TouchDPad` here specifically. A d-pad is four separate DOM
+buttons and a thumb can only reliably hold one, so there was **no way to walk and
+step into the plane at the same time** — the most important move in a beat 'em
+up, and the one the whole depth plane exists for. The stick reads two axes at
+once and gets diagonals for free, and `x` and `z` are independent axes, so
+"right *and* into the plane" is a real move. It mirrors the arcade floor's
+`VirtualJoystick`: same 7-on-15 thumb-to-base ratio, same 13% deadzone (the
+floor's `forceMin: 2` on a radius-15 base), same pin-to-rim travel. See
+`TouchControls.tsx` for why it is a DOM component rather than the Phaser plugin.
+
+The whole play screen is `select-none`: a long press on a phone otherwise
+started selecting the HUD — champion name, wave counter, score — with a copy
+callout over the stage.
 
 **Level.** Composed once from `nightshade-arcade-tilesheet.png` rather than
 rendered from a map — the `.tsx` tileset the Tiled maps reference does not exist
-in the repo. `LEVEL_W = 3200` is five `STAGE_W`-wide screens, one per wave, and
-`zoneCamX(i) = i * 640`.
+in the repo. `LEVEL_W = 14400` is fifteen `STAGE_W`-wide screens (960×540), one
+per wave, and `zoneCamX(i) = i * 960`.
+
+**The canvas is finite and the world is not.** `zoneCamX` returns an ordinary
+unbounded position, so an endless run's wave 40 has its camera at 38 400 px.
+`stageOffset(camX)` does the wrap, and it is applied **in the blit** and nowhere
+else. That location matters: wrapping used to happen inside `zoneCamX`, which
+inverted the camera's walk range at wave 15 (`[13440, 0]`) and pinned the camera
+at 13 440 forever, so no wave could ever open. Unbounded positions keep that
+clamp well-ordered for every index; the backdrop recycles underneath a stationary
+camera. The street is periodic — the stall row cycles four colours, the treeline
+repeats on its own pitch — so the seam is invisible, and actors are drawn in
+world space so nothing jumps at the wrap.
 
 **The camera is the wall.** During a walk the camera lerps toward
 `player.x − STAGE_W/2` clamped between the previous and the next zone, and the
 player is clamped to `camX + WALL_X .. camX + STAGE_W − WALL_X`. That makes the
-screen edges the player's bounds with no separate arena logic. At
-`zoneCamX(waveIndex) + STAGE_W − WALL_X − 24` the camera has already stopped
-advancing, so **walking into the stopped camera is what starts the wave** — and
-once it starts, the camera locks to `zoneCamX(waveIndex)` and does not move
-until the wave is cleared. The gate and the arena are the same number.
+screen edges the player's bounds with no separate arena logic.
+
+**The camera gates the wave, not the player's position.** A wave opens when
+`|camX − zoneCamX(waveIndex)| ≤ CAMERA_SETTLED_EPSILON` — that is, the moment
+the sideways scroll stops — and the player must additionally be at least
+`WAVE_ENTRY_X` (half a screen) into the zone. Once it starts, the camera locks to
+`zoneCamX(waveIndex)` and does not move until the wave is cleared.
+
+This used to be a gate on the player's `x` at
+`zoneCamX(waveIndex) + STAGE_W − WALL_X − 24`, a third of a screen *past* where
+the camera stops advancing — so every wave opened with a forced walk across dead
+screen, holding right with nothing on it. Two things follow from the new rule.
+The wave opens the instant the scroll halts, and the player therefore chooses
+**where** the fight starts by choosing when to stop. The `WAVE_ENTRY_X` half of
+the test exists only for zone 0, whose camera range is `[0, 0]` and is therefore
+"settled" from the first frame; for every later zone, reaching a camera position
+already means standing past it.
+
+### Ambushes on the walk
+
+The walk between waves is the one stretch of a run with nothing to do — a held
+direction across empty street. The genre's own answer is a couple of enemies
+stepping out of a doorway, and that is what `startRoam` does.
+
+* **One or two, never a heavy.** A pair is enough that the depth plane matters
+  (one on your line, one on another is a real decision) and few enough that an
+  ambush stays an interruption rather than a second wave. Only
+  `tier === "grunt"` ids are eligible, so an ambush can never open with a
+  Dreadhorn — a heavy mid-walk, while the player is mid-stride, is the fastest
+  way to make the walk feel unfair rather than eventful.
+* **The pool is derived from the wave it walks into** (`roamPool(waveIndex)`),
+  not hand-written. This fixed a shipped bug: the old `ROAM_POOL` was free to
+  name an NPC that appeared in no wave's roster — its wave-3 entry offered
+  `banshee`, whose sheet (`boneyard betty`) belongs to wave 4. Nothing preloaded
+  it during the walk to wave 3, so an ambush could open on an actor whose sheets
+  were still in flight, and an actor with no sheet draws as `drawSheetActor`'s
+  coloured-box fallback: **a purple square standing in the street.** Deriving the
+  pool removes the class of bug — an ambush can now only be made of enemies the
+  wave itself is made of, so its art is by construction already requested by the
+  wave preload. The three boss waves (5, 10, 15) spawn a boss alone, so their
+  pools are empty and those walks have no ambush, which is also the right pacing:
+  the boss should be the thing that ends the run.
+* **The preload is derived per NPC too** — `enemyAnimsFor(npc)`, not one shared
+  list. This fixed the same bug wearing a different hat: **seven NPCs flashed a
+  coloured square through every attack.** `ENEMY_ANIMS` was a flat
+  `[idle, walking, hurt, death, attack, axe]`, written when enemies had two moves
+  each and none of them cast, with a comment saying so. Then the specials landed
+  and moves began naming `hammering`, `casting` and `mining` — and nothing
+  noticed, because a *missing cycle* does not throw. `renderMatch` found no image
+  and drew the placeholder body instead, so the character kept its art, size,
+  facing and position and only its body turned into a flat rectangle, which reads
+  as a baffling intermittent visual glitch rather than a preload bug:
+
+  | NPC | cycle never loaded | when |
+  | --- | --- | --- |
+  | Grimtooth, Dreadhorn, Blacksmith, **Gorga** | `hammering` | special |
+  | **Wizard**, Gilda | `casting` | Wizard: *every jab*; Gilda: special |
+  | Eldric | `mining` | special |
+
+  The Wizard was the worst of it, since its basic attack is a cast. Deriving each
+  character's set from **its own moves** makes the bug unwritable — a move cannot
+  name a cycle its own NPC will not be asked to load — and it is cheaper than the
+  blunt fix: **106 sheets** against the 153 a full union would fetch, and only 4
+  more than the broken 102. The Wizard now needs five sheets, not six; it never
+  plays `attack` or `axe`.
+* **Endless reuses the same machinery.** `roamPool` resolves through
+  `getWaveSpec`, so an endless wave's ambush is drawn from *that* wave's roster
+  — which is one of the fifteen, already cached, so a mid-walk encounter in loop
+  3 opens on real sprites exactly as it does in the finite run.
+* **HP at 0.72×.** An ambush should cost a little health at worst, not a life.
+* **Placement.** The first steps out *ahead* on an offset line, so it is
+  something to walk into; a second comes from *behind*, so the player is then
+  walking away from something and the screen edges stop being safe. Both are
+  placed relative to the player, not the camera, so they stay meaningful as the
+  view scrolls under them. Alternating `z` keeps the two off one line.
+* **An ambush delays the wave, never replaces it.** The wave gate is tested
+  *after* the ambush trigger, so a player who reaches both in one frame gets the
+  ambush and must clear it; `roaming > 0` holds the wave shut until the street
+  is empty.
+* **Where.** Progress along the walk, as a fraction of it (`roamPoints`), because
+  a walk's length varies with where the last fight ended. One point at 0.55 when
+  the walk is under a screen and a fifth, two points (0.3, 0.72) when it is
+  longer. Measured on a full run: the first lands at 0.56 of a 326 px walk, the
+  rest at 0.55 of an 850–1100 px walk.
+* **No leash, deliberately.** A champion outwalks a scout, so a leash would let
+  "hold right forever" trivialise an ambush *and* stall the wave behind it. An
+  outrun roamer is instead solved by turning round — which is the interaction
+  the street is meant to provoke. A player who never attacks at all dies on wave
+  1 for all four champions, so the run cannot be stalled.
+* **The ambush is a real fight.** `stepMatch`'s hostility test is
+  `phase === "fighting" || roaming > 0`, not the phase alone — otherwise an
+  ambush would be two statues the player walks past. For the same reason
+  `respawn` returns to `walking` when `roaming > 0`, so dying to an ambush does
+  not announce a wave that does not exist.
+* **The HUD counts them separately.** `AMBUSH — 2 LEFT` rather than folding them
+  into the wave counter, which would claim a wave still had three enemies when it
+  had none and the street had two.
+
+### Pickups
+
+A beat 'em up is a resource game wearing a costume: the health bar is the real
+difficulty curve, so without anything to recover a run is decided by the first
+mistake. Drops make a bad wave survivable rather than rewarding a good one.
+
+Two kinds, and the choice between them is the point. **Health** (30 HP, drawn as
+a **plate of food** from the main game) is the panic button and is only worth
+anything when low. **Magic** (34 meter, drawn as a **Raven Coin**) compounds —
+the meter is built from damage and kills, so a cast is funded by playing well,
+and banking a coin lets you enter a wave with the spell already charged.
+
+Both are drawn as the things they are rather than as abstract resources. Food and
+a coin are the genre's shorthand and read instantly at 38 px — a plate of
+vegetables says "eat this to get better" where a heart or a flower says
+"resource" — and both are already things a Sunflower Land player recognises from
+the main game, so a pickup needs no explanation.
+
+* **Chance on death**, weighted by tier via `dropChance`: 0.28–0.34 for grunts,
+  0.6–0.72 for heavies, and a guaranteed 1 for the boss. So the *choice* is
+  interesting — a grunt is a coin-flip worth little, a heavy is close to certain
+  and worth a bar.
+* **Which** kind is decided by need at the moment of the drop (`rollPickup`):
+  below 40 % health is always health; below 34 % meter is magic; full on both is
+  a coin flip, so a well-fought wave still pays out.
+* **On the plane.** A drop sits in `(x, z)`, bobs on its own phase, and is
+  collected inside `PICKUP_REACH_X` (52) × `PICKUP_REACH_Z` (30) — a
+  *rectangle*, matching the shape of an attack's hitbox. Stepping onto a drop's
+  line is how you take it, which keeps the depth axis paying off outside combat
+  and stops a health drop under your feet being a freebie while retreating. The
+  `z` arm is slightly wider than an attack's 26, deliberately: a swing is a
+  commitment you have to aim, a pickup is a thing you walk over.
+* **Drops do not expire.** No lifetime, no timer, no blink, no fade. There were
+  two — 14 s, then 32 s with a 4 s blink — and both were wrong for the same
+  reason: **a clock cannot see what the player is doing.** A wave's interesting
+  moment is not the first kill, it is the moment you have spent the meter, taken a
+  hit and backed off to let a crowd thin out. That is exactly when a countdown
+  kills the drop you were going back for, and it kills it *quietly enough* that
+  the player reads it as the game forgetting to spawn it. Worse, it punishes the
+  correct read of a crowd, which is the opposite of what a pickup is for.
+
+  Two things now remove a drop, and both are the player's own doing: **collecting
+  it**, or **walking far enough past it that the camera leaves it behind**
+  (`PICKUP_DESPAWN_PAD`, 170 px). The street scrolls one way and the player always
+  walks forward, so "out of frame" is overwhelmingly *behind* them.
+
+  The pad is deliberately wider than `ARENA_PAD` (150), the margin an enemy may
+  stand in before entering. An enemy can die while still off-screen, and a drop
+  that vanished the instant it was born would be a kill that paid nothing for
+  reasons the player never sees. This replaces the old `finishWave` sweep, which
+  deleted every drop the moment a wave cleared — including ones the player was
+  still close enough to walk back for.
+
+  Measured: a drop survives three minutes of simulated standing still, and a
+  15-wave run never has more than **one** drop on the street at a time.
+* **Art is copied in, not fetched.** The main game's `food/` folder is not
+  published on the arcade's asset CDN — `food/roast_veggies.png` and its
+  siblings all 404 there, while `icons/`, `decorations/` and `npcs/` resolve —
+  so `src/features/arcade/assets/food_roast_veggies.png` is committed (448
+  bytes, following the `RavenCoin.webp` precedent). Note the source is 12×11, so
+  `PICKUP_SIZE` is a ~3.5× upscale; it stays crisp only because `renderMatch`
+  disables image smoothing for the frame.
+* Collection pushes a floating label (`+18 HP` / `+34 MAGIC`) — the one event in
+  the game the player cannot infer from the HUD, since the bar jumps but *why*,
+  and what was just spent, is not visible.
 
 **Economy ids** (derived from the registry id `sunflower-brawler`, so the
 economy editor must publish them): `Mint-Raven-Coin-SunflowerBrawler`,
 `Free Run Token - SunflowerBrawler`, `Grant-Free-Run-SunflowerBrawler`,
-`Start-Free-Run-SunflowerBrawler`.
+`Start-Free-Run-SunflowerBrawler`. All four are now in
+`nightshade-arcade-editor-sample.json`; `npm run freerun:audit` reports what a
+real economy is still missing and prints the JSON to paste.
+
+### Free runs: one coherent decision, not three lookups
+
+The rule is **one free reward run per cabinet for VIP, one for the whole arcade
+for everyone else**. It is enforced entirely by published economy data: a cabinet's
+`Free Run Token` is minted once a day, burned when a free run *starts*, and its
+absence is the signal that the allowance is spent. Burning on the open rather than
+on the payout is what makes it unrefundable — losing, quitting or refreshing all
+leave the token destroyed.
+
+The bug this cabinet surfaced was that the **gate, the grant and the burn each
+resolved their token independently**: the gate by item *name*, the other two by
+action *id*. Nothing checked they matched, and a cabinet is four ids, so every
+half-published state was wrong in a different direction:
+
+| published        | gate watched | open burned | result                                     |
+| ---------------- | ------------ | ----------- | ------------------------------------------ |
+| nothing          | —            | 565         | gate closed, demands a ticket              |
+| item only        | **567**      | **565**     | **gate never closes — unlimited free runs** |
+| item + open      | 567          | 567         | correct                                    |
+| item + grant     | **567**      | **565**     | **gate never closes — unlimited free runs** |
+| all four         | 567          | 567         | correct                                    |
+
+The dangerous rows are the ones where the item is published but the actions are
+not, because `Start-Free-Run-*` falls back to the arcade-wide action: the gate
+watches a per-cabinet token nothing ever burns, so it reads "still holding a
+token" forever and **every run is free** — one Raven Coin per attempt, silently.
+
+`resolveFreeRunEntitlement` in `lib/ravenCoin.ts` now answers all three at once,
+and reads the token out of the open action's `burn` map rather than guessing the
+name, because that map *is* the answer. The grant is cross-checked against it, and
+anything incoherent fails closed to "charges a Play Ticket" with the reason named
+in the dev console. A coherent entitlement cannot grant one token and burn
+another, so the leak is unreachable by construction.
+
+Two consequences worth stating plainly:
+
+- **A VIP no longer falls back to the arcade-wide allowance** on an unpublished
+  cabinet. It did not used to either (the name lookup found no token), and
+  allowing it would have granted an extra free run per unpublished machine. An
+  unpublished cabinet now simply has no VIP free run.
+- **`onStartFreeRun` no longer has an "ok, free" branch.** It used to return
+  `{ ok: true, funding: "free" }` when no run-open was published — an
+  unconditional *run for free*. That branch was unreachable from the UI (the gate
+  was already closed), and it is gone.
 
 ## Mobile support (every cabinet)
 
@@ -352,7 +816,7 @@ not each grow their own copy:
 | Primitive | File | Job |
 |-----------|------|-----|
 | `<FitStage>` | `FitStage.tsx` | Scales a fixed-size playfield down to fit, and reserves the scaled footprint so it leaves no dead space |
-| `<TouchDPad>` / `<TouchMoveBar>` / `<TouchButton>` | `TouchControls.tsx` | On-screen controls, shown only on `(pointer: coarse)` |
+| `<TouchAnalogStick>` / `<TouchDPad>` / `<TouchMoveBar>` / `<TouchButton>` | `TouchControls.tsx` | On-screen controls, shown only on `(pointer: coarse)` |
 
 ### Why scale rather than reflow
 
@@ -419,7 +883,7 @@ so the launch is not a second code path.
 | Cabinet | Approach | Touch |
 |----------|----------|-------|
 | Raven Bubbles | `FitStage`, `minScale` 0.5 | drag to aim, lift to fire (already had it) |
-| Sunflower Brawler | **no `FitStage`** — the slot fills the panel, the canvas letterboxes itself (see below) | `TouchDPad` with **all four directions** (there is no jump) + two `TouchButton`s, ATTACK and MAGIC |
+| Sunflower Brawler | **no `FitStage`** — the slot fills the panel, the canvas letterboxes itself (see below) | `TouchAnalogStick` (analog, so walk and plane-step can happen together) + two `TouchButton`s, ATTACK and MAGIC |
 | Frogger | `FitStage`, `minScale` 0.38 | `TouchDPad`, **no down arrow** |
 | Pac-Man | `FitStage`, `minScale` 0.51 | `TouchDPad` |
 | Barley Breaker | `FitStage`, `minScale` 0.38 | `TouchMoveBar` + `Space` to launch |
@@ -428,14 +892,14 @@ so the launch is not a second code path.
 | Go Fish, UNO, Solitaire, Poker, Blackjack | **no stage** — measured and patched | n/a (tap-driven) |
 
 **Sunflower Brawler drops `FitStage`.** `FitStage` caps its scale at
-`Math.min(1, …)`, so a 640×360 stage could never render larger than 640×360 CSS
-pixels — on a 1100px-wide cabinet that left a stamp floating in the middle of a
-mostly empty panel. The canvas also has no pointer handlers, so the footprint
-`FitStage` reserves buys nothing here. Instead the slot is a
+`Math.min(1, …)`, so the stage could never render larger than its own backing
+resolution in CSS pixels — on a 1100px-wide cabinet that left a stamp floating in
+the middle of a mostly empty panel. The canvas also has no pointer handlers, so
+the footprint `FitStage` reserves buys nothing here. Instead the slot is a
 `flex-1 min-h-[180px]` div that takes whatever height is left under the HUD, and
 the canvas fills it with `h-full w-full object-contain` plus
 `image-rendering: pixelated`; the browser does the aspect-correct letterbox. On
-desktop the stage now renders ~1050 px wide instead of 640, on a phone the slot
+desktop the stage fills the panel width, on a phone the slot
 is the same leftover-height budget it always was, and `min-h-[180px]` stops a
 short window (touch pad included) from squeezing the stage out of existence —
 past that the column scrolls rather than the fight shrinking to a smear.

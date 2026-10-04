@@ -44,29 +44,58 @@ import arcadeTilesheet from "../../assets/nightshade-arcade-tilesheet.png";
  * camera offset, and the module-level cache means a rematch costs nothing.
  */
 
-/** Viewport size. The canvas and the camera window are both this. */
-export const STAGE_W = 640;
-export const STAGE_H = 360;
+/**
+ * Viewport size. The canvas and the camera window are both this.
+ *
+ * 960×540 rather than a 640×360 retro screen: the depth plane needed room to
+ * grow (see `Z_MAX`) and the honest way to buy it is pixels, not cropping. The
+ * canvas is stretched by the cabinet's letterboxed slot rather than scaled 1:1
+ * — see the note in `SunflowerBrawlerGame.tsx` — so a wider stage costs
+ * nothing on a phone and fills the panel on a desktop.
+ */
+export const STAGE_W = 960;
+export const STAGE_H = 540;
 
-/** World width. One screen per wave — see `WAVES` in `enemies.ts`. */
-export const LEVEL_W = 3200;
+/**
+ * Screens of backdrop composed ahead of time.
+ *
+ * The finite run is fifteen waves, one screen each, so fifteen screens is what
+ * wave 15 needs. The composition is a fixed cost paid once at load, so this is
+ * not sized to the *level* but to the camera's **right-hand edge**: beyond
+ * screen 15 there is nothing to compose because endless waves 16+ resolve their
+ * camera onto the same zone positions (see `zoneCamX`), which is what makes an
+ * infinite run possible on a finite canvas.
+ */
+export const LEVEL_W = STAGE_W * 15;
+
+/**
+ * How many screens may exist before the composed street runs out.
+ *
+ * `LEVEL_W / STAGE_W`, derived rather than re-typed, and asserted against
+ * `WAVES.length` by `stageZoneCountOk` below so the two can never drift.
+ */
+export const ZONE_COUNT = LEVEL_W / STAGE_W;
 
 /** Bottom of the backdrop. Above it is sky; below it is walkable ground. */
-export const GROUND_TOP = 204;
+export const GROUND_TOP = 306;
 
 /**
  * How far the depth plane runs, in stage pixels — and therefore in `z` units,
  * because `zToY` is 1:1.
  *
- * 134 px against a 360 px stage is a little over two body-heights (a fighter's
- * collision box is 66 tall), which is the right order: deep enough that two
- * actors on different lines read as genuinely separated, shallow enough that
- * the whole band stays on screen without the camera ever needing to tilt.
+ * 210 px against a 540 px stage is a little over three body-heights (a fighter's
+ * collision box is 99 tall). This was 134 px against 360 — about two — and it
+ * was too shallow: with only two clean lines available on a screen this size,
+ * "step off the attacker's line" was often the *only* correct answer and there
+ * was nowhere left to reposition *to*. Three-plus body-heights means a wave
+ * can spread out, a player can be surrounded across depth rather than just
+ * along `x`, and the boss's area slam (`zReach` 74) covers a bit over a third
+ * of the plane instead of half of it.
  */
-export const Z_MAX = 134;
+export const Z_MAX = 210;
 
 /** Screen Y of an actor's feet when `z = 0` — the far edge of the plane. */
-export const Z_TOP_Y = 210;
+export const Z_TOP_Y = 315;
 
 /** Feet Y for a `z`. The one projection this game makes. */
 export const zToY = (z: number): number => Z_TOP_Y + z;
@@ -84,10 +113,53 @@ export const yToZ = (y: number): number =>
 export const DEPTH_TOUCH = 22;
 
 /** How far an actor may be pushed into either screen edge of the camera. */
-export const WALL_X = 44;
+export const WALL_X = 60;
 
-/** Camera X for a wave. Wave `n` owns screen `n`. */
+/**
+ * Camera X for a wave.
+ *
+ * Wave `n` owns screen `n`, and this is **not** wrapped — it is an ordinary
+ * unbounded position, so wave 40's camera is at 38 400 px and everything
+ * downstream (player bounds, enemy clamps, the walk between waves) works in one
+ * continuous coordinate space.
+ *
+ * Wrapping used to happen here and it broke endless mode. `stepCamera` computes
+ * its walk range as `clamp(player.x − STAGE_W/2, zoneCamX(i − 1), zoneCamX(i))`,
+ * and with a wrapped `zoneCamX` the range for wave 15 was `[13440, 0]` — an
+ * inverted clamp, which pinned the camera at 13 440 forever and no wave could
+ * ever open. Unbounded positions make that range well-ordered for every index.
+ *
+ * The canvas is still finite, and the wrap moved to where it belongs — in the
+ * blit. See `stageOffset`.
+ */
 export const zoneCamX = (zone: number): number => zone * STAGE_W;
+
+/**
+ * Where in the composed street a world X is drawn from.
+ *
+ * The composition is `LEVEL_W` wide and the world is not, so the blit wraps
+ * here and nowhere else. This is what lets an endless run exist on a fixed
+ * canvas, and it is invisible because the street is periodic: the stall row
+ * cycles through four colours and the treeline repeats on its own pitch, so a
+ * recycled screen reads as more of the same street rather than as a seam.
+ *
+ * The one thing that *does* betray the wrap is the player's own `x`, which keeps
+ * increasing — so the HUD wave counter, not the scenery, is how a player knows
+ * how deep they are.
+ */
+export const stageOffset = (camX: number): number =>
+  (((camX % LEVEL_W) + LEVEL_W) % LEVEL_W);
+
+/**
+ * How close the camera has to be to its zone position before a wave opens.
+ *
+ * The camera is what gates a wave now, not the player's `x` — see the `walking`
+ * branch in `engine.ts`. `stepCamera` lerps towards the target rather than
+ * snapping to it, so "the camera has arrived" has to be a tolerance rather than
+ * an equality test: without this the wave would wait out the last fraction of a
+ * pixel of easing and feel like it stuttered.
+ */
+export const CAMERA_SETTLED_EPSILON = 2;
 
 /** [x, y, width, height] in tilesheet pixels. */
 type Rect = readonly [number, number, number, number];
@@ -133,10 +205,10 @@ const STALL_X0 = -32;
 const TREE: Rect = [851, 16, 122, 130];
 
 /** Top of the treeline. Its trunks sit behind the stall row and never show. */
-const TREE_Y = 44;
+const TREE_Y = 66;
 
 /** Pitch of the grove clumps along the street. */
-const TREE_PITCH = 440;
+const TREE_PITCH = 660;
 
 const GRASS_PLAIN: Rect = [16, 48, 16, 16];
 const GRASS_DETAIL: Rect = [16, 32, 16, 16];
@@ -145,14 +217,25 @@ const DIRT: Rect = [320, 128, 16, 16];
 /**
  * Grid rows of the floor drawn as dirt rather than grass.
  *
- * The floor is tiled from `GROUND_TOP` in 16 px rows, so these are literally
- * rows of that loop: `252..300` cuts a road across the **middle** of the walk
- * band (z 42..90) and `348` is the apron along the very bottom. The road is
- * the depth cue the plane otherwise lacks — moving up or down crosses a visible
- * edge, so a player can tell which line they are on without reading the gap
- * between two sprites.
+ * Expressed as **offsets from `GROUND_TOP` in 16 px tiles**, not absolute Y.
+ * The floor loop steps `gy` by 16 from `GROUND_TOP`, so an absolute row list
+ * only lines up by coincidence — and a coincidence that silently stops
+ * happening the moment `GROUND_TOP` changes, which is exactly what a larger
+ * stage does. `GROUND_TOP = 306` is not a multiple of 16, so the absolute rows
+ * this used to list were never visited at all and the entire road vanished,
+ * leaving the plane with no depth cue and no way to tell the floor apart.
+ *
+ * Two bands rather than one, because the plane is deeper now. A single road
+ * made the whole depth axis read as "grass, road, grass" — three states, not
+ * the five or six a 210 px plane wants. The far strip and the near apron give
+ * the outer thirds their own landmark, so a player can judge *which* line they
+ * are on and not merely roughly how deep they are.
  */
-const DIRT_ROWS: ReadonlySet<number> = new Set([252, 268, 284, 348]);
+const DIRT_ROW_OFFSETS: readonly number[] = [2, 5, 6, 7, 8, 9, 10, 13];
+
+const DIRT_ROWS: ReadonlySet<number> = new Set(
+  DIRT_ROW_OFFSETS.map((offset) => GROUND_TOP + offset * 16),
+);
 
 /** The shadow the stalls, trees and actors all sit against. */
 const GROUND_SHADOW = "rgb(30, 70, 36)";

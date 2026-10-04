@@ -151,7 +151,7 @@ export const GAME_REGISTRY: ArcadeGameEntry[] = [
   {
     id: "sunflower-brawler",
     name: "Sunflower Brawler",
-    description: "Five waves down a scrolling street, ending in the Big Goblin.",
+    description: "Fifteen waves down a scrolling street, then endless.",
     tokenReward: 1,
     status: "available",
     backingType: "local",

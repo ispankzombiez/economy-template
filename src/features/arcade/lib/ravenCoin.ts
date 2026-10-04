@@ -173,11 +173,26 @@ export const RAVEN_COIN_MACHINE_MINT_PREFIX = "Mint-Raven-Coin-";
  * | `barley-breaker`  | `Mint-Raven-Coin-BarleyBreaker`   |
  * | `pac-man`         | `Mint-Raven-Coin-PacMan`          |
  * | `frogger`         | `Mint-Raven-Coin-Frogger`         |
+ * | `raven-bubbles`   | `Mint-Raven-Coin-RavenBubbles`    |
+ * | `sunflower-brawler` | `Mint-Raven-Coin-SunflowerBrawler` |
  *
  * **Adding a cabinet:** register it in `GAME_REGISTRY` and publish the matching
  * action in the economy editor. The id is derived from the registry id, so there
- * is no second list to keep in sync in code — and a missing action degrades to
- * the arcade-wide free action instead of blocking the payout.
+ * is no second list to keep in sync in code.
+ *
+ * ## This action is now vestigial, and that is worth knowing
+ *
+ * Every run — free or ticket-funded — is opened against a **Reward Attempt**
+ * voucher, and `Claim-Raven-Coin` pays any voucher for a coin. So once a cabinet
+ * is opened as a voucher, the payout resolves to `Claim-Raven-Coin` and never
+ * reaches the per-cabinet mint, whose `dailyCap: 1` would otherwise reject a
+ * ticket-funded win.
+ *
+ * The daily cap therefore lives on the **free-run token**, not here, which is the
+ * correct place for it: the token is burned when the run *starts*, so the cap
+ * cannot be dodged by losing, quitting or refreshing. These mints are kept
+ * published for the pre-voucher path and for a fork that pays out directly; a
+ * missing one falls back to the arcade-wide mint rather than blocking the payout.
  */
 export function machineMintActionId(machine: string): string {
   const suffix = String(machine)
@@ -258,10 +273,22 @@ export const FREE_RUN_GRANT_ACTION_PREFIX = "Grant-Free-Run-";
  * | `barley-breaker`  | `Free Run Token - BarleyBreaker` | … `BarleyBreaker`              |
  * | `pac-man`         | `Free Run Token - PacMan`       | … `PacMan`                      |
  * | `frogger`         | `Free Run Token - Frogger`      | … `Frogger`                     |
+ * | `raven-bubbles`   | `Free Run Token - RavenBubbles` | … `RavenBubbles`                |
+ * | `sunflower-brawler` | `Free Run Token - SunflowerBrawler` | … `SunflowerBrawler`        |
  * | *(non-VIP)*       | `Free Run Token - Arcade`       | … `Arcade`                      |
  *
- * **Adding a cabinet:** register it in `GAME_REGISTRY`, then publish the token
- * item plus its grant and open actions.
+ * **Adding a cabinet:** register it in `GAME_REGISTRY`, then publish **four**
+ * ids — the token item, its grant, its open, and its per-machine coin mint. The
+ * ids are all derived from the registry id, so there is no second list to keep in
+ * sync. Two scripts make that mechanical rather than remembered:
+ *
+ * ```sh
+ * npm run freerun:audit -- economy.json     # what is missing, per cabinet
+ * npm run freerun:add   -- economy.json     # emit the ids to paste
+ * ```
+ *
+ * Until all four are published a VIP gets no free run on that cabinet (see
+ * {@link resolveFreeRunEntitlement}); a non-VIP needs none of them.
  */
 export function freeRunStartActionId(machine: string): string {
   const suffix = String(machine)
@@ -313,85 +340,192 @@ export function freeRunTokenItemName(machine?: string): string {
 const FREE_RUN_TOKEN_NAME = /^free\s*run\s*tokens?\s*-\s*(.+)$/i;
 
 /**
- * The arcade-wide free run a **non-VIP** player gets: one per day, any machine.
+ * A cabinet's whole free-run allowance, resolved as **one** decision.
  *
- * Published as
- * `{ type: "custom", showInShop: false, burn: { <arcadeToken>: { amount: 1 } }, mint: { <voucher>: { amount: 1 } } }`.
+ * ## Why this exists instead of three separate lookups
+ *
+ * The gate, the grant and the burn used to be resolved independently:
+ *
+ *  - the **gate** found its token by matching an *item name* —
+ *    `Free Run Token - SunflowerBrawler`;
+ *  - the **grant** was found by *action id* — `Grant-Free-Run-SunflowerBrawler`;
+ *  - the **burn** was found by *action id* — `Start-Free-Run-SunflowerBrawler`.
+ *
+ * Three lookups, three independent failure modes, and nothing checked that they
+ * pointed at the same thing. A cabinet is published as **four** ids (token item,
+ * grant, open, per-machine mint), so a half-finished publish is the normal state
+ * while a new machine is being wired — and every half-finished combination was
+ * wrong in a different way. Measured against the live economy with only the
+ * `Free Run Token - SunflowerBrawler` item published:
+ *
+ * | published        | gate watches | open burns | result                                        |
+ * | ---------------- | ------------ | ---------- | --------------------------------------------- |
+ * | nothing          | —            | 565        | gate closed, demands a ticket                 |
+ * | item             | **900**      | **565**    | **gate never closes — unlimited free runs**    |
+ * | item + open      | 900          | 900        | correct                                       |
+ * | item + grant     | **900**      | **565**    | **gate never closes — unlimited free runs**    |
+ * | all four         | 900          | 900        | correct                                       |
+ *
+ * The dangerous rows are the ones where the item is published but the actions
+ * are not, because `Start-Free-Run-*` **falls back to the arcade-wide action**.
+ * The gate is watching a per-cabinet token that nothing ever burns, so it reads
+ * "still holding a token" forever and every run is free — which is exactly the
+ * rule this economy exists to enforce.
+ *
+ * ## The fix: ask the action, don't guess the name
+ *
+ * A published `Start-Free-Run-<Cabinet>` burns exactly one token, and that `burn`
+ * map **is** the answer. So the token is now read out of the open action and the
+ * item name is only a fallback for reporting. The grant is then cross-checked
+ * against it: if the grant does not mint the very token the open burns, the
+ * entitlement is reported **incoherent** and the caller fails closed.
+ *
+ * A coherent entitlement therefore cannot grant one token and burn another, and
+ * the unlimited-free-run states above are unreachable by construction.
  */
-export const FREE_RUN_START_ARCADE_ACTION = "Start-Free-Run-Arcade";
-
-/** The arcade-wide grant, for a non-VIP's single daily token. */
-export const FREE_RUN_GRANT_ARCADE_ACTION = "Grant-Free-Run-Arcade";
+export type FreeRunEntitlement = {
+  /**
+   * Which allowance this is rationed against: one per cabinet for VIP, one for
+   * the whole arcade otherwise. Note this is the *rule's* intent, not a claim
+   * that the cabinet is published — see `scopeHonoured`.
+   */
+  scope: "machine" | "arcade";
+  /** Balance key the gate watches. `undefined` when it could not be resolved. */
+  tokenKey: string | undefined;
+  /** Mints the token, at most once a day. */
+  grantAction: string | undefined;
+  /** Burns the token and mints the run's voucher. */
+  openAction: string | undefined;
+  /**
+   * True only when the grant mints the token the open burns, the item exists,
+   * and both actions are published — i.e. the cabinet can actually deliver the
+   * allowance `scope` promises. Only then may a free run be handed out.
+   */
+  coherent: boolean;
+  /** Why it is not coherent, for the dev warning and the publish audit. */
+  problem: string | null;
+};
 
 /**
- * The action that **spends** a free reward run, or `null` if none is published.
+ * Resolve a cabinet's free-run allowance as a single coherent decision.
  *
- * VIP are rationed per cabinet, so they get the per-cabinet action; a non-VIP is
- * rationed arcade-wide, so they get the shared one. `null` means this economy has
- * not adopted the tokens, and the caller falls back to the older "the payout
- * carries the cap" behaviour rather than blocking the player.
+ * Callers must gate on `coherent`, never on the presence of `openAction` alone —
+ * see the table above for what a half-published cabinet does otherwise.
  */
-export function resolveFreeRunStartAction({
+export function resolveFreeRunEntitlement({
   actions,
+  items,
+  balances,
+  economyMeta,
   isVip,
   machine,
 }: {
   actions?: Record<string, unknown>;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
   isVip: boolean;
   machine?: string;
-}): string | null {
+}): FreeRunEntitlement {
+  const scope: FreeRunEntitlement["scope"] =
+    isVip && machine ? "machine" : "arcade";
+
+  // A VIP gets **only** its own cabinet's pair. There is deliberately no fallback
+  // to the arcade-wide actions here: `Start-Free-Run-Arcade` burns the shared
+  // `Free Run Token - Arcade`, and letting a VIP reach it would hand them a free
+  // run on every cabinet that has not published its own — one extra Raven Coin a
+  // day for each unpublished machine, which is the opposite of what "one per
+  // machine" is meant to cost. An unpublished cabinet therefore has no free run
+  // for a VIP, and says so.
+  const openIds =
+    scope === "machine" && machine
+      ? [freeRunStartActionId(machine)]
+      : [FREE_RUN_START_ARCADE_ACTION];
+  const grantIds =
+    scope === "machine" && machine
+      ? [freeRunGrantActionId(machine)]
+      : [FREE_RUN_GRANT_ARCADE_ACTION];
+
   const list = actions ?? {};
-  if (isVip && machine) {
-    const perMachine = freeRunStartActionId(machine);
-    if (perMachine in list) return perMachine;
+  const openAction = openIds.find((id) => id in list);
+  const grantAction = grantIds.find((id) => id in list);
+
+  // Authoritative: the token the open action burns. Falls back to the item name
+  // purely so a diagnostic can still name the token it expected.
+  const openBurns = singleRuleKey((list[openAction ?? ""] as AnyAction)?.burn);
+  const grantMints = singleRuleKey((list[grantAction ?? ""] as AnyAction)?.mint);
+  const namedTokenKey = freeRunTokenKeyByName({
+    economyMeta,
+    items,
+    balances,
+    scope,
+    machine,
+  });
+
+  const tokenKey = openBurns ?? namedTokenKey;
+  const itemExists = tokenKey
+    ? itemIsPublished(tokenKey, economyMeta, items)
+    : false;
+
+  let problem: string | null = null;
+  if (!openAction) {
+    problem = `${openAction ?? openIds[0]} is not published`;
+  } else if (!grantAction) {
+    problem = `${grantAction ?? grantIds[0]} is not published`;
+  } else if (!openBurns) {
+    problem = `${openAction} does not burn exactly one token`;
+  } else if (grantMints !== openBurns) {
+    problem = `${grantAction} mints ${grantMints ?? "nothing"} but ${openAction} burns ${openBurns}`;
+  } else if (!itemExists) {
+    problem = `Free Run Token item ${tokenKey} is not published`;
   }
-  if (FREE_RUN_START_ARCADE_ACTION in list) return FREE_RUN_START_ARCADE_ACTION;
-  return null;
+
+  return {
+    scope,
+    tokenKey,
+    grantAction,
+    openAction,
+    coherent: problem === null,
+    problem,
+  };
 }
 
-/** The action that grants a free-run token, or `null` if none is published. */
-export function resolveFreeRunGrantAction({
-  actions,
-  isVip,
-  machine,
-}: {
-  actions?: Record<string, unknown>;
-  isVip: boolean;
-  machine?: string;
-}): string | null {
-  const list = actions ?? {};
-  if (isVip && machine) {
-    const perMachine = freeRunGrantActionId(machine);
-    if (perMachine in list) return perMachine;
-  }
-  if (FREE_RUN_GRANT_ARCADE_ACTION in list) return FREE_RUN_GRANT_ARCADE_ACTION;
-  return null;
+/** The one key a `mint` / `burn` rule map declares, or `undefined`. */
+function singleRuleKey(rules: unknown): string | undefined {
+  if (!isRecord(rules)) return undefined;
+  const keys = Object.keys(rules);
+  return keys.length === 1 ? keys[0] : undefined;
 }
 
-/** True once this economy spends free attempts by burning a token. */
-export function supportsFreeRunOpens(
-  actions?: Record<string, unknown>,
+/** Is a balance key backed by a published item? */
+function itemIsPublished(
+  key: string,
+  economyMeta: Pick<MinigameSessionEconomyMeta, "items"> | undefined,
+  items: EconomyItems | undefined,
 ): boolean {
-  return resolveFreeRunStartAction({ actions, isVip: false }) !== null;
+  const merged: EconomyItems = { ...items, ...economyMeta?.items };
+  if (merged[key]) return true;
+  // A hosted economy publishes the item under its id; an offline sample keys it
+  // by name. Either counts, as does a balance that exists without an item entry.
+  return Object.prototype.hasOwnProperty.call(merged, key);
 }
 
-/** The `playerEconomy.balances` key holding a cabinet's free-run token. */
-export function resolveFreeRunTokenKey({
+/** Locate a free-run token by the name it is published under. */
+function freeRunTokenKeyByName({
   economyMeta,
   items,
   balances,
-  isVip,
+  scope,
   machine,
 }: {
   economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
   items?: EconomyItems;
   balances?: Record<string, number>;
-  /** Required: a VIP's tokens are per cabinet, a non-VIP's is arcade-wide. */
-  isVip: boolean;
+  scope: FreeRunEntitlement["scope"];
   machine?: string;
 }): string | undefined {
   const merged: EconomyItems = { ...items, ...economyMeta?.items };
-  const wanted = isVip && machine ? machineSuffix(machine) : "arcade";
+  const wanted = scope === "machine" && machine ? machineSuffix(machine) : "arcade";
 
   for (const [key, item] of Object.entries(merged)) {
     const name = item?.name;
@@ -411,6 +545,98 @@ export function resolveFreeRunTokenKey({
   }
 
   return undefined;
+}
+
+/**
+ * The arcade-wide free run a **non-VIP** player gets: one per day, any machine.
+ *
+ * Published as
+ * `{ type: "custom", showInShop: false, burn: { <arcadeToken>: { amount: 1 } }, mint: { <voucher>: { amount: 1 } } }`.
+ */
+export const FREE_RUN_START_ARCADE_ACTION = "Start-Free-Run-Arcade";
+
+/** The arcade-wide grant, for a non-VIP's single daily token. */
+export const FREE_RUN_GRANT_ARCADE_ACTION = "Grant-Free-Run-Arcade";
+
+/**
+ * The action that **spends** a free reward run, or `null` if none is published.
+ *
+ * VIP are rationed per cabinet, so they get the per-cabinet action; a non-VIP is
+ * rationed arcade-wide, so they get the shared one. `null` means this economy has
+ * not adopted the tokens.
+ *
+ * Thin wrapper over {@link resolveFreeRunEntitlement} — prefer that, because it
+ * also reports whether the grant and the burn agree. Resolving this on its own is
+ * how a half-published cabinet ended up burning a *different* token than the gate
+ * watched; see the table on that function.
+ */
+export function resolveFreeRunStartAction({
+  actions,
+  isVip,
+  machine,
+}: {
+  actions?: Record<string, unknown>;
+  isVip: boolean;
+  machine?: string;
+}): string | null {
+  return (
+    resolveFreeRunEntitlement({ actions, isVip, machine }).openAction ?? null
+  );
+}
+
+/** The action that grants a free-run token, or `null` if none is published. */
+export function resolveFreeRunGrantAction({
+  actions,
+  isVip,
+  machine,
+}: {
+  actions?: Record<string, unknown>;
+  isVip: boolean;
+  machine?: string;
+}): string | null {
+  return (
+    resolveFreeRunEntitlement({ actions, isVip, machine }).grantAction ?? null
+  );
+}
+
+/** True once this economy spends free attempts by burning a token. */
+export function supportsFreeRunOpens(
+  actions?: Record<string, unknown>,
+): boolean {
+  return resolveFreeRunStartAction({ actions, isVip: false }) !== null;
+}
+
+/**
+ * The `playerEconomy.balances` key holding a cabinet's free-run token.
+ *
+ * Prefers the key the run-open action actually burns, falling back to the item
+ * name. Pass `actions` to get that; the name-only path is kept for callers that
+ * genuinely have no published economy to consult.
+ */
+export function resolveFreeRunTokenKey({
+  actions,
+  economyMeta,
+  items,
+  balances,
+  isVip,
+  machine,
+}: {
+  actions?: Record<string, unknown>;
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+  /** Required: a VIP's tokens are per cabinet, a non-VIP's is arcade-wide. */
+  isVip: boolean;
+  machine?: string;
+}): string | undefined {
+  return resolveFreeRunEntitlement({
+    actions,
+    economyMeta,
+    items,
+    balances,
+    isVip,
+    machine,
+  }).tokenKey;
 }
 
 /** Free-run tokens this player is currently holding for a cabinet. */

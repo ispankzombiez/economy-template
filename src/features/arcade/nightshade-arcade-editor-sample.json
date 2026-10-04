@@ -66,6 +66,18 @@
       "id": 564,
       "is_visible": false
     },
+    "566": {
+      "name": "Free Run Token - RavenBubbles",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 566,
+      "is_visible": false
+    },
+    "567": {
+      "name": "Free Run Token - SunflowerBrawler",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 567,
+      "is_visible": false
+    },
     "565": {
       "name": "Free Run Token - Arcade",
       "description": "Internal arcade bookkeeping. Not a collectable.",
@@ -324,6 +336,26 @@
       }
     },
     "Mint-Raven-Coin-Frogger": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Mint-Raven-Coin-RavenBubbles": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "RavenCoin": {
+          "amount": 1,
+          "dailyCap": 1
+        }
+      }
+    },
+    "Mint-Raven-Coin-SunflowerBrawler": {
       "type": "custom",
       "showInShop": false,
       "mint": {
@@ -818,6 +850,34 @@
         }
       }
     },
+    "Start-Free-Run-RavenBubbles": {
+      "type": "custom",
+      "showInShop": false,
+      "burn": {
+        "566": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1
+        }
+      }
+    },
+    "Start-Free-Run-SunflowerBrawler": {
+      "type": "custom",
+      "showInShop": false,
+      "burn": {
+        "567": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "Reward Attempt": {
+          "amount": 1
+        }
+      }
+    },
     "Start-Free-Run-Arcade": {
       "type": "custom",
       "showInShop": false,
@@ -945,6 +1005,30 @@
       "showInShop": false,
       "mint": {
         "564": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "cooldownSeconds": 86400
+    },
+    "Grant-Free-Run-RavenBubbles": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "566": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "cooldownSeconds": 86400
+    },
+    "Grant-Free-Run-SunflowerBrawler": {
+      "type": "custom",
+      "showInShop": false,
+      "mint": {
+        "567": {
           "min": 1,
           "max": 1,
           "dailyCap": 1

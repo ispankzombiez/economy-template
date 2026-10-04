@@ -12,7 +12,7 @@ import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
 import {
   TouchButton,
-  TouchDPad,
+  TouchAnalogStick,
   TouchOnly,
   useHeldKeys,
   useIsTouchDevice,
@@ -29,12 +29,19 @@ import {
   loadImage,
   loadSheets,
   FIGHTER_ANIMS,
-  ENEMY_ANIMS,
   type FighterId,
   type FighterSpec,
   type Sheets,
 } from "./fighters";
-import { WAVES, bigGoblinSrc, getEnemySpec } from "./enemies";
+import {
+  WAVES,
+  WAVE_COUNT,
+  ENEMY_SHEET_PLAN,
+  enemyAnimsFor,
+  getEnemySpec,
+  getWaveSpec,
+} from "./enemies";
+import { PICKUP_ART } from "./pickups";
 import { STAGE_H, STAGE_W, loadStage } from "./stage";
 import {
   INPUT_BUFFER_MS,
@@ -85,13 +92,31 @@ const INTERCEPTED_CODES = new Set([
 const PORTRAIT_H = 68;
 
 /**
- * How many screens the run has, shown on the wave counter.
+ * Portrait height bounds, in pixels.
  *
- * Derived rather than hard-coded: the level in `stage.ts` is sized from
- * `WAVES.length`, so if a wave is ever added the HUD follows without a second
- * edit.
+ * The portrait is the only genuinely elastic part of the lobby: the panels around
+ * it are text of a known size, so whatever height the flexbox leaves the portrait
+ * box is exactly what the character can be drawn at. {@link NPCIcon} takes a pixel
+ * height rather than a CSS length because it sizes a canvas backing store, so the
+ * number has to come from JS — hence the bounds.
+ *
+ * `MIN` is where a champion stops reading as a character and starts reading as a
+ * smudge; below it the card would rather clip than show nonsense. `MAX` is the
+ * size the lobby is designed around, so a tall window gets generous portraits
+ * rather than portraits marooned in whitespace.
  */
-const WAVE_TOTAL = WAVES.length;
+const PORTRAIT_MIN_H = 40;
+const PORTRAIT_MAX_H = 96;
+
+/**
+ * How many waves the finite run has, shown on the wave counter.
+ *
+ * Derived rather than hard-coded, and deliberately **not** the ceiling of the
+ * counter: past this the run is endless and the number keeps climbing. Reading
+ * it as `WAVES.length` would cap the HUD at 15 while the game let a player reach
+ * wave 40, which makes the deepest part of a run look like the shallowest.
+ */
+const WAVE_TOTAL = WAVE_COUNT;
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
 
@@ -212,28 +237,72 @@ const FighterCard: React.FC<{
 }> = ({ fighter, selected, onSelect }) => {
   const combo = fighter.moves;
 
+  /**
+   * Draw the portrait at whatever height the layout left over.
+   *
+   * The lobby is a fixed-height flex column with no scrolling, so the champion
+   * panel is the one section allowed to absorb the difference between a tall
+   * window and a short one. Flexbox decides how much room that is; this reads the
+   * resulting box back and hands the number to {@link NPCIcon}, which needs pixels
+   * for its canvas. Measuring the element rather than computing the number from
+   * the other panels' text means the portrait cannot drift out of sync with the
+   * layout — there is nothing to keep in step.
+   */
+  const portraitRef = useRef<HTMLDivElement>(null);
+  const [portraitH, setPortraitH] = useState(PORTRAIT_H);
+
+  useEffect(() => {
+    const el = portraitRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height;
+      if (!height) return;
+      setPortraitH(
+        Math.round(
+          Math.max(PORTRAIT_MIN_H, Math.min(PORTRAIT_MAX_H, height)),
+        ),
+      );
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   return (
     <button
       type="button"
       onClick={onSelect}
-      className={`rounded-lg border-2 p-2 text-left transition-all ${
+      className={`flex min-h-0 flex-col justify-center rounded-lg border-2 p-2 text-left transition-all ${
         selected
           ? "border-amber-400 bg-amber-100 shadow-lg"
           : "border-slate-300 bg-white hover:border-slate-400"
       }`}
     >
-      <div style={{ height: PORTRAIT_H }} className="flex items-end justify-center">
+      <div
+        ref={portraitRef}
+        className="flex min-h-0 flex-1 items-end justify-center"
+        // Capped at the same {@link PORTRAIT_MAX_H} the measurement clamps to, so
+        // the box and the character inside it cannot disagree. Without a cap the
+        // box grows to fill a tall window and the character sits marooned at the
+        // bottom of it; with one, a tall window centres a full-size portrait and a
+        // short one shrinks it.
+        style={{ maxHeight: PORTRAIT_MAX_H }}
+      >
         <NPCIcon
           parts={NPC_WEARABLES[fighter.npc as keyof typeof NPC_WEARABLES]}
-          height={PORTRAIT_H}
+          height={portraitH}
           animation="idle"
         />
       </div>
-      <div className="mt-1 text-center text-sm font-bold">{fighter.name}</div>
-      <div className="text-center text-[11px] text-slate-500">
+      {/* Text below the portrait is `shrink-0` so the elastic portrait gives up
+          space rather than the stats being squeezed out of legibility. */}
+      <div className="mt-1 shrink-0 text-center text-sm font-bold">
+        {fighter.name}
+      </div>
+      <div className="shrink-0 text-center text-[11px] text-slate-500">
         {fighter.faction}
       </div>
-      <div className="mt-1 grid gap-0.5 text-[11px]">
+      <div className="mt-1 grid shrink-0 gap-0.5 text-[11px]">
         <div className="flex justify-between">
           <span className="text-slate-500">HP</span>
           <span className="font-bold" style={{ color: fighter.color }}>
@@ -245,7 +314,7 @@ const FighterCard: React.FC<{
           <span className="font-bold">{fighter.walkSpeed}</span>
         </div>
         <div className="flex justify-between">
-          <span className="text-slate-500">STRING</span>
+          <span className="text-slate-500">COMBO</span>
           <span className="font-bold">
             {combo.combo1.damage}·{combo.combo2.damage}·{combo.combo3.damage}
           </span>
@@ -312,9 +381,8 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
   // The stage and the non-sheet sprites are needed by any run, so they are
   // fetched once on mount. The two that are *not* sheets — the impact spark
-  // and the boss strip — are loaded here because the boss can appear with no
-  // warning if a wave is ever reordered, and a 1.4 KB PNG is not worth a
-  // race.
+  // and the pickup art — are loaded here because a drop can appear the instant
+  // a first enemy dies, and a mis-sized icon is not worth a race.
   useEffect(() => {
     let cancelled = false;
 
@@ -322,7 +390,12 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       if (!cancelled) stageRef.current = stage;
     });
 
-    for (const src of [SUNNYSIDE.icons.expression_attack, bigGoblinSrc]) {
+    const sources = [
+      SUNNYSIDE.icons.expression_attack,
+      ...Object.values(PICKUP_ART),
+    ];
+
+    for (const src of sources) {
       loadImage(src).then((image) => {
         if (cancelled) return;
         imagesRef.current = { ...imagesRef.current, [src]: image };
@@ -337,20 +410,68 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     };
   }, []);
 
+  /**
+   * Fetch the sheets a set of NPCs needs, skipping any already held.
+   *
+   * `anims` is **per NPC**, not one list for the batch: an enemy character's
+   * cycles come from `enemyAnimsFor(npc)`, which reads that character's own
+   * moves. A shared list was the bug behind seven NPCs drawing a coloured box
+   * through every attack — a move named a cycle (`hammering`, `casting`,
+   * `mining`) that the shared list never asked for, the image was simply absent,
+   * and `renderMatch` fell back to its placeholder body. Deriving the set from
+   * the moves makes that unwritable, and it is cheaper besides: a goblin no
+   * longer fetches a spellcasting cycle it will never play.
+   */
   const ensureSheets = useCallback(
-    (npcs: readonly string[], anims: readonly string[]) => {
+    (npcs: readonly string[], animsFor: (npc: string) => readonly string[]) => {
       for (const npc of npcs) {
         if (sheetsRef.current[npc]) continue;
-        // Fire and forget: `renderMatch` draws a named coloured body for any
-        // actor whose sheet is still in flight, so a slow CDN degrades to a
-        // placeholder rather than to a hole.
-        void loadSheets(npc, anims).then((sheets) => {
+        // Fire and forget: `renderMatch` falls back to a real sheet rather than a
+        // placeholder while one is in flight, so a slow CDN degrades to a pose
+        // that is nearly right instead of a coloured rectangle.
+        void loadSheets(npc, animsFor(npc)).then((sheets) => {
           sheetsRef.current = { ...sheetsRef.current, [npc]: sheets };
         });
       }
     },
     [],
   );
+
+  /**
+   * Say so if a character can name a cycle that will never be loaded.
+   *
+   * `enemyAnimsFor` makes this impossible for enemies by construction, so this
+   * is the belt to that braces: it also covers the champion, whose moves are
+   * checked against `FIGHTER_ANIMS` rather than derived. Cheap, dev-only, and it
+   * names the exact NPC and cycle rather than leaving a coloured box to be
+   * diagnosed from a screenshot.
+   */
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    const console_ = globalThis.console as
+      | { warn?: (...args: unknown[]) => void }
+      | undefined;
+
+    for (const { npc, anims } of ENEMY_SHEET_PLAN) {
+      for (const anim of anims) {
+        if (!FIGHTER_ANIMS.includes(anim)) {
+          console_?.warn?.(
+            `[brawler] "${npc}" needs the "${anim}" cycle, which is not a known animation.`,
+          );
+        }
+      }
+    }
+    for (const fighter of FIGHTERS) {
+      for (const [name, mv] of Object.entries(fighter.moves)) {
+        if (!mv || typeof mv !== "object" || !("anim" in mv)) continue;
+        if (!FIGHTER_ANIMS.includes(mv.anim)) {
+          console_?.warn?.(
+            `[brawler] ${fighter.name}.${name} needs the "${mv.anim}" cycle, which will not be loaded.`,
+          );
+        }
+      }
+    }
+  }, []);
 
   // ── Session ────────────────────────────────────────────────────────────────
 
@@ -384,7 +505,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       setHud(readHud(matchRef.current));
       rewardGrantedRef.current = false;
 
-      ensureSheets([playerSpec.npc], FIGHTER_ANIMS);
+      ensureSheets([playerSpec.npc], () => FIGHTER_ANIMS);
       // Wave one's enemies are asked for immediately; the intro banner buys
       // their load time, and the walk between waves buys every later wave's.
       const opening = WAVES[0];
@@ -393,7 +514,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
           opening.spawns
             .map((spawn) => getEnemySpec(spawn.id).npc)
             .filter((npc): npc is string => npc !== null),
-          ENEMY_ANIMS,
+          enemyAnimsFor,
         );
       }
 
@@ -499,15 +620,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
       const ctx = canvasRef.current?.getContext("2d");
       if (ctx) {
-        const bossImage = imagesRef.current[bigGoblinSrc] ?? null;
-        renderMatch(
-          ctx,
-          match,
-          sheetsRef.current,
-          imagesRef.current,
-          stageRef.current,
-          bossImage,
-        );
+        renderMatch(ctx, match, sheetsRef.current, imagesRef.current, stageRef.current);
       }
 
       // The engine only bumps `hudVersion` when something the player can see
@@ -529,25 +642,43 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   // start of the walk that follows it — so the whole walk is the load window
   // for the wave at the end of it. The opening wave is asked for separately
   // in `startSession`, because `hud.wave` starts at 1 with nothing cached.
-  const wave = hud?.wave ?? 1;
+  // The wave being walked *towards*, which is one ahead of the wave just cleared
+  // — so this is the load window for the wave at the end of the current walk.
+  // `getWaveSpec` rather than an array index because past wave 15 the run is
+  // endless and indexes into `WAVES` would run off the end.
+  const upcoming = hud?.wave ?? 1;
   useEffect(() => {
     if (!mode) return;
-    const spec = WAVES[wave - 1];
+    const spec = getWaveSpec(upcoming - 1);
     if (!spec) return;
     ensureSheets(
-      spec.spawns
-        .map((spawn) => getEnemySpec(spawn.id).npc)
-        .filter((npc): npc is string => npc !== null),
-      ENEMY_ANIMS,
+      spec.spawns.map((spawn) => getEnemySpec(spawn.id).npc),
+      enemyAnimsFor,
     );
-  }, [ensureSheets, mode, wave]);
+
+    // An ambush is fought *during* the walk that leads into this wave, and the
+    // engine draws its pool from the same wave spec — so this one request
+    // covers both, and a mid-walk encounter never opens on a fallback pose.
+    //
+    // One wave ahead is all it takes. Endless replays every wave, so `upcoming` is
+    // always one of the fifteen and its NPCs are either already cached or
+    // requested here — there is no index past the end of `WAVES` to guard
+    // against, which is why `getWaveSpec` is safe to call directly.
+  }, [ensureSheets, mode, upcoming]);
 
   // ── Payout ─────────────────────────────────────────────────────────────────
 
+  // Keyed on `reachedFinale`, **not** on `result === "victory"`.
+  //
+  // The run no longer ends at wave 15 — it goes into endless — so there is no
+  // terminal victory state to pay on. `reachedFinale` latches the moment the
+  // finale is cleared and stays true, which is what makes this correct in both
+  // directions: a player who quits during endless has still earned the coin,
+  // and one who dies on wave 19 does not lose it for playing well. Lives are the
+  // game's difficulty curve; the ending is not.
   useEffect(() => {
     if (
-      !hud ||
-      hud.result !== "victory" ||
+      !hud?.reachedFinale ||
       mode !== "reward" ||
       rewardGrantedRef.current
     ) {
@@ -574,18 +705,21 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   if (!mode) {
     return (
       <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
-        <div className="flex h-full flex-col gap-4 overflow-y-auto p-6">
-          <div className="text-center space-y-1">
-            <h2 className="text-3xl sm:text-4xl font-bold">
+        {/* A fixed-height flex column that never scrolls.
+            `min-h-0` on the one flexible child is what makes that work: without it
+            a flex item refuses to shrink below its content, so the column would
+            overflow and the page would scroll — which is exactly what this
+            replaces. The champion panel absorbs the difference between a tall
+            window and a short one, up to a cap; past that the column centres
+            itself rather than stretching four cards around a small character. */}
+        <div className="flex h-full flex-col justify-center gap-2 overflow-hidden p-3">
+          <div className="shrink-0 text-center">
+            <h2 className="text-2xl sm:text-3xl font-bold">
               SUNFLOWER BRAWLER
             </h2>
-            <p className="text-sm text-gray-600">
-              A side-scrolling street fight: five waves, a scrolling level, and
-              the Big Goblin at the end of it.
-            </p>
           </div>
 
-          <InnerPanel className="bg-amber-50 p-4">
+          <InnerPanel className="shrink-0 bg-amber-50 p-3">
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
                 <div className="text-sm text-gray-700 font-semibold">REWARD</div>
@@ -596,6 +730,12 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
                     alt="RavenCoin"
                     className="h-6 w-6"
                   />
+                </div>
+                <div className="text-[10px] font-medium text-gray-500">
+                  {/* The panel says the *when*, because it is the part a player
+                      cannot work out: the run continues past wave 15, so
+                      "finish it" is not an instruction anyone can follow. */}
+                  for clearing wave 15
                 </div>
               </div>
               <div>
@@ -613,9 +753,28 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </InnerPanel>
 
-          <InnerPanel className="bg-slate-50 p-3">
-            <div className="mb-2 text-sm font-semibold">CHOOSE YOUR CHAMPION</div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          {/* The one elastic section: it grows into spare room on a tall window
+              and gives it back on a short one, so the panels below it — controls
+              and the buttons that start a run — never leave the screen.
+
+              The height cap is `sm`-and-up only, because it assumes a **single**
+              row of cards. Below `sm` the champions are two rows, and capping
+              their panel there left each card shorter than its own text — the
+              portrait took what was left and pushed HP/SPEED/COMBO/SPELL out of
+              the card entirely. `overflow-hidden` is the backstop for a window
+              too short to hold even that: it clips rather than letting a card
+              overlap the controls beneath it. */}
+          <InnerPanel className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50 p-3 sm:max-h-[280px]">
+            <div className="mb-2 shrink-0 text-sm font-semibold">
+              CHOOSE YOUR CHAMPION
+            </div>
+            {/* `minmax(min-content, 1fr)`, not `minmax(0, 1fr)`: a card must never
+                be shorter than the stats inside it, so the row's *floor* is its
+                content. Both row counts are declared because four champions across
+                two columns make two rows, and an implicit row is sized `auto` —
+                which would have reintroduced the overflow on the narrowest
+                screens while looking correct everywhere else. */}
+            <div className="grid min-h-0 flex-1 grid-cols-2 grid-rows-[minmax(min-content,1fr)_minmax(min-content,1fr)] gap-2 sm:grid-cols-4 sm:grid-rows-[minmax(min-content,1fr)]">
               {FIGHTERS.map((fighter) => (
                 <FighterCard
                   key={fighter.id}
@@ -627,89 +786,96 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             </div>
           </InnerPanel>
 
-          <InnerPanel className="bg-slate-50 p-3 text-sm text-slate-700">
+          <InnerPanel className="shrink-0 bg-slate-50 p-3 text-sm text-slate-700">
             <div className="font-semibold">Controls</div>
-            <div className="mt-1 grid gap-1 sm:grid-cols-2">
-              <div className="flex gap-2">
-                <span className="w-24 font-semibold">MOVE</span>
-                <span>
-                  Arrow keys, or the on-screen pad. ← → walk along the street,{" "}
-                  <b>↑ ↓ step into and out of the plane</b>.
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <span className="w-24 font-semibold">ATTACK</span>
-                <span>
-                  <b>Space</b> — a three-hit string. Press again within the
-                  window for the next swing; the finisher is slower, reaches
-                  further and throws much harder.
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <span className="w-24 font-semibold">MAGIC</span>
-                <span>
-                  <b>X</b> — spends 50 magic on a blast that hits{" "}
-                  <b>every</b> enemy on screen, whatever line they are on. The
-                  meter fills as you deal damage.
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <span className="w-24 font-semibold">DODGE</span>
-                <span>
-                  There is no jump and no block — <b>stepping off the line</b>{" "}
-                  is the dodge. A swing is a horizontal band across the plane.
-                </span>
-              </div>
-            </div>
-            <div className="mt-2 text-xs text-slate-500">
-              {MAX_LIVES} lives cover the whole run — five waves, and one Big
-              Goblin at the end of them.
-            </div>
+            {/* Titles read down the left, descriptions down the right — a
+                definition list, so the eye pairs each label with its own text
+                instead of hunting across two independent columns. */}
+            <dl className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+              <dt className="font-semibold">MOVE</dt>
+              <dd>
+                Arrow keys, or the on-screen pad. ← → walk along the street,{" "}
+                <b>↑ ↓ step into and out of the plane</b>.
+              </dd>
+              <dt className="font-semibold">ATTACK</dt>
+              <dd>
+                <b>Space</b> — a three-hit combo. Press again within the window
+                for the next swing; the finisher is slower, reaches further and
+                throws much harder.
+              </dd>
+              <dt className="font-semibold">MAGIC</dt>
+              <dd>
+                <b>X</b> — spends 50 magic on a blast that hits <b>every</b>{" "}
+                enemy on screen, whatever line they are on. The meter fills as you
+                deal damage.
+              </dd>
+            </dl>
             {isTouchDevice && (
-              <div className="mt-1 text-xs text-slate-500">
+              <div className="mt-2 text-xs text-slate-500">
                 Touch: the pad moves in all four directions, ATTACK and MAGIC
                 are on the right.
               </div>
             )}
           </InnerPanel>
 
-          <button
-            type="button"
-            onClick={rewardRun.start}
-            disabled={!hasRewardRun}
-            className={`w-full rounded-lg px-6 py-4 text-lg font-bold transition-all shadow-lg ${
-              hasRewardRun
-                ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
-                : "cursor-not-allowed bg-gray-300 text-gray-500"
-            }`}
-          >
-            <div>START REWARD RUN</div>
-            <div className="mt-2 text-xs opacity-90">
-              {!hasRewardRun
-                ? "No reward runs left today — buy Play Tickets in the shop."
-                : rewardRun.freeAvailable
-                  ? isVip
-                    ? "VIP: reward run available for Sunflower Brawler today."
-                    : "Reward run available for the arcade today."
-                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
-            </div>
-          </button>
+          {/* Side by side rather than stacked. Two full-width buttons were the
+              single largest block of fixed height in the lobby — about 130px of a
+              400px non-negotiable budget — and there is 1100px of width to spend on
+              them. Side by side the pair costs half, which is what buys the
+              champion portraits their height on a short window. They stack again
+              below `sm`, where the width is needed for the two-line subtitles. */}
+          <div className="grid shrink-0 grid-cols-1 gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={rewardRun.start}
+              disabled={!hasRewardRun}
+              className={`w-full rounded-lg px-4 py-3 text-base font-bold transition-all shadow-lg ${
+                hasRewardRun
+                  ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
+                  : "cursor-not-allowed bg-gray-300 text-gray-500"
+              }`}
+            >
+              <div>START REWARD RUN</div>
+              <div className="mt-1 text-xs opacity-90">
+                {!hasRewardRun
+                  ? "No reward runs left today — buy Play Tickets in the shop."
+                  : rewardRun.freeAvailable
+                    ? isVip
+                      ? "VIP: reward run available for Sunflower Brawler today."
+                      : "Reward run available for the arcade today."
+                    : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
+              </div>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setShowPracticeDifficultyPrompt(true)}
-            className="w-full rounded-lg bg-blue-500 px-6 py-4 text-lg font-bold text-white transition-all shadow-lg hover:bg-blue-600 active:scale-95"
-          >
-            <div>START PRACTICE MODE</div>
-            <div className="mt-2 text-xs font-semibold opacity-90">
-              Play without spending today&apos;s reward attempt.
-            </div>
-          </button>
+            <button
+              type="button"
+              onClick={() => setShowPracticeDifficultyPrompt(true)}
+              className="w-full rounded-lg bg-blue-500 px-4 py-3 text-base font-bold text-white transition-all shadow-lg hover:bg-blue-600 active:scale-95"
+            >
+              <div>START PRACTICE MODE</div>
+              <div className="mt-1 text-xs font-semibold opacity-90">
+                Play without spending today&apos;s reward attempt.
+              </div>
+            </button>
+          </div>
 
-          {rewardRun.dialog}
+          {/* Overlaid rather than stacked. The "are you sure?" box appears *after*
+              a click, and in flow its ~180px would push the buttons it is asking
+              about off a short screen — the lobby has no scrollbar to rescue it.
+              Absolutely positioning it inside a zero-height wrapper means the
+              layout is identical whether or not it is showing. It covers EXIT
+              while open, which is what a confirmation should do; its own CLOSE
+              brings the lobby back. */}
+          {rewardRun.dialog && (
+            <div className="relative shrink-0">
+              <div className="absolute inset-x-0 bottom-0 z-10">
+                {rewardRun.dialog}
+              </div>
+            </div>
+          )}
 
           {rewardRun.error && (
-            <p className="text-center text-xs font-semibold text-red-600">
+            <p className="shrink-0 text-center text-xs font-semibold text-red-600">
               {rewardRun.error}
             </p>
           )}
@@ -718,7 +884,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             <button
               type="button"
               onClick={() => onClose()}
-              className="w-full rounded-lg bg-gray-400 px-6 py-2 font-semibold text-white transition-all hover:bg-gray-500 active:scale-95"
+              className="w-full shrink-0 rounded-lg bg-gray-400 px-6 py-2 font-semibold text-white transition-all hover:bg-gray-500 active:scale-95"
             >
               EXIT
             </button>
@@ -774,7 +940,15 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
   return (
     <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
-      <div className="flex h-full flex-col gap-2 overflow-y-auto p-4">
+      {/*
+        `select-none` across the whole play screen, not just the control legend:
+        a long press on a phone starts selecting whatever text is under the
+        finger, and during a fight that is the HUD — champion name, wave counter,
+        score — with a copy/callout menu over the stage. The player needs nothing
+        on this screen to be selectable, and doing it at the root means a label
+        added later cannot reintroduce it.
+      */}
+      <div className="flex h-full select-none flex-col gap-2 overflow-y-auto p-4">
         {/* ── HUD ─────────────────────────────────────────────────────────── */}
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
@@ -808,14 +982,28 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
           <div className="shrink-0 text-center">
             <div className="text-[10px] font-semibold text-gray-500">
-              {activeDifficulty.label.toUpperCase()} · WAVE{" "}
-              {snapshot?.wave ?? 1}/{WAVE_TOTAL}
+              {activeDifficulty.label.toUpperCase()} ·{" "}
+              {/*
+                The counter stops meaning anything past the finite run, so it
+                changes shape rather than showing "WAVE 23/15". Showing the
+                loop number instead makes the position legible at a glance,
+                which is the whole job of this line.
+              */}
+              {snapshot?.endless
+                ? `ENDLESS ${Math.floor((snapshot.wave - 1) / WAVE_TOTAL)} · WAVE ${snapshot.wave}`
+                : `WAVE ${snapshot?.wave ?? 1}/${WAVE_TOTAL}`}
             </div>
             <div className="text-sm font-black text-amber-800">
               {snapshot?.waveName ?? WAVES[0]?.name ?? ""}
             </div>
             <div className="text-[10px] font-semibold text-gray-500">
-              {snapshot ? `${snapshot.enemiesLeft} LEFT` : ""}
+              {snapshot
+                ? snapshot.roamers > 0
+                  ? `AMBUSH — ${snapshot.roamers} LEFT`
+                  : snapshot.phase === "walking"
+                    ? "ON THE STREET"
+                    : `${snapshot.enemiesLeft} LEFT`
+                : ""}
             </div>
           </div>
 
@@ -880,23 +1068,37 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
           {result && snapshot && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/60 p-4">
               <div className="w-full max-w-sm space-y-3 rounded border-2 border-amber-400/60 bg-slate-900 p-4 text-center text-white">
-                <div className="text-3xl font-black">
-                  {result === "victory" ? "STREET CLEARED" : "GAME OVER"}
-                </div>
+                <div className="text-3xl font-black">GAME OVER</div>
+                {/*
+                  One sentence, and it has to carry three cases without being
+                  vague about any of them: cleared the finite run, died in
+                  endless, or never got there. `reachedFinale` distinguishes
+                  "finished the game" from "finished a run", which is not the
+                  same thing now that the run continues forever.
+                */}
                 <div className="text-sm text-slate-300">
-                  {result === "victory"
-                    ? "The Big Goblin is down."
-                    : `You fell on wave ${snapshot.wave} of ${WAVE_TOTAL}.`}
+                  {snapshot.reachedFinale
+                    ? `The street is cleared. You went on to wave ${snapshot.bestWave}.`
+                    : snapshot.endless
+                      ? `Endless ${snapshot.wave}. You never reached the end of the street.`
+                      : `You fell on wave ${snapshot.bestWave} of ${WAVE_TOTAL}.`}
                 </div>
-                <div className="text-lg font-bold tabular-nums text-amber-300">
-                  {snapshot.score} POINTS
-                </div>
-                {mode === "reward" && result === "victory" && (
+                {/*
+                  Shown whenever the finale was cleared, not only when the run
+                  ended in victory — which, now that endless exists, it never
+                  does. A reward run that reaches wave 15 has earned the coin
+                  whether the player stopped there or pushed on, and the panel
+                  has to say so or the payout looks like a mistake.
+                */}
+                {mode === "reward" && snapshot.reachedFinale && (
                   <div className="flex items-center justify-center gap-1 text-sm font-bold text-amber-300">
                     +{SUNFLOWER_BRAWLER_RAVEN_COIN_REWARD}
                     <img src={ravenCoinIcon} alt="" className="h-5 w-5" />
                   </div>
                 )}
+                <div className="text-lg font-bold tabular-nums text-amber-300">
+                  {snapshot.score} POINTS
+                </div>
                 <Button
                   onClick={() => {
                     // Restart is practice-only. A reward run is paid for once
@@ -950,18 +1152,15 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
         {/* ── Controls ────────────────────────────────────────────────────── */}
         {/*
-          Four directions and two buttons. The pad's `down` is what walks the
-          champion *out* of the plane, which is the move the whole game is
-          built around — leaving it off the pad would have left touch players
-          with no way to dodge.
+          An analog stick and two buttons, matching the arcade floor. The stick
+          replaces a d-pad here because a d-pad is four separate buttons and a
+          thumb can only hold one: there was no way to walk *and* step into the
+          plane together, which is the most important move in the game. The stick
+          reads two axes at once and gets diagonals for free.
         */}
         <TouchOnly>
           <div className="flex items-end justify-between gap-3">
-            <TouchDPad
-              held={held}
-              directions={["up", "down", "left", "right"]}
-              className="shrink-0"
-            />
+            <TouchAnalogStick held={held} />
             <div className="grid flex-1 grid-cols-2 gap-2 self-end">
               <TouchButton
                 held={held}
@@ -993,10 +1192,16 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
           </div>
         </TouchOnly>
 
-        <div className="flex items-center justify-between gap-3 text-[11px] text-gray-500">
+        {/*
+          `select-none` because a long press anywhere in here made a phone start
+          selecting the words — dragging out a blue highlight of the control
+          legend mid-fight, with a copy/callout menu over the stage. Nothing in a
+          play screen is text the player needs to select, and `touch-none` on the
+          line stops the gesture being read as a scroll.
+        */}
+        <div className="flex touch-none select-none items-center justify-between gap-3 text-[11px] text-gray-500">
           <span>
-            ← → walk · ↑ ↓ step the plane · Space attack (3-hit string) · X
-            magic
+            ← → walk · ↑ ↓ step the plane · Space attack (3-hit combo) · X magic
           </span>
           <div className="flex gap-2">
             <Button onClick={handleInGameExit}>Exit</Button>

@@ -98,7 +98,45 @@ export type MoveSpec = {
   damage: number;
   /** Milliseconds the victim spends unable to act. */
   hitstunMs: number;
-  /** Stage pixels from the fighter's centre to the far edge of the hitbox. */
+  /**
+   * Stage pixels from the fighter's centre to the far edge of the hitbox.
+   *
+   * The hitbox runs from **10 px behind** the attacker to `reach` in front
+   * (see `swingConnects`), so its total length is `reach + 10`.
+   *
+   * Champions are given a deliberate **reach advantage** over the common
+   * street: a champion's opening hit lands 74–82 px out against a grunt's
+   * 60–66 and a heavy's 68–84. Two reasons, and the second is the one that
+   * matters:
+   *
+   * * A whiffed swing in a brawler is the single most frustrating thing that can
+   *   happen, and it is disproportionately a *spacing* problem — the player is
+   *   usually a few pixels short while reading a crowd, not a few frames early.
+   *   Widening the front buys back the margin that reading costs. All twelve
+   *   combos were widened by the same **+12 px**, which keeps their relative
+   *   ordering (and therefore each champion's identity) intact.
+   * * It is what makes the answer to a crowd "get closer", not "get closer and
+   *   also hope". Without the advantage, the safe play against a heavy is to
+   *   stay outside its reach — which is also outside the player's, so the answer
+   *   becomes "do not engage", and a beat 'em up where the correct answer is
+   *   often not to fight is not a beat 'em up.
+   *
+   * The advantage is **not** total, and where it stops is the design. A
+   * champion outranges every goblin, skeleton and mid-tier heavy, but loses it
+   * to the three specialists whose whole identity is reach: the Wizard (jab 92,
+   * special 138), the Blacksmith (heavy 104) and all three bosses (jab
+   * 100–108, specials 110–132). So the answer to a wave-2 goblin is to walk in and
+   * hit it, and the answer to the Wizard is not — which is what makes an enemy
+   * roster readable rather than a stat sheet.
+   *
+   * The trade-off is still deliberate and worth stating: a player who holds
+   * their range wins most exchanges against the common street. That is the
+   * intended feel — champions are meant to feel like the strongest thing on it
+   * (they also walk 228–250 px/s against a grunt's 142). What it costs is that a
+   * single common enemy can no longer catch a player who keeps their distance,
+   * so the pressure has to come from being hit from *two* sides at once, which is
+   * exactly what the depth plane and `maxAttackers` are for.
+   */
   reach: number;
   /** Stage pixels/second the victim is shoved along `x`. */
   knockback: number;
@@ -205,11 +243,31 @@ const spell = (damage: number, knockback: number, knockZ: number): MoveSpec => (
 /**
  * The four faction champions, in roster order.
  *
- * Health is deliberately uneven (90–120) and speed runs 144–170, so picking a
+ * Health is deliberately uneven (90–120) and speed runs 228–250, so picking a
  * champion is a real choice rather than a colour swap. The string differs in
  * the way a beat 'em up roster usually differs: Graxle is the fastest to
  * startup and the lightest hitter, Reginald is the slowest and the heaviest,
  * and the finisher's knockback is where most of the gap lives.
+ */
+/**
+ * Champions move faster than everything else on the street.
+ *
+ * The roster's speeds (228–250) are up from 144–170 when the stage grew to
+ * 960×540, and deliberately so. Enemies were **not** scaled with them: a grunt
+ * still walks 142–172 px/s and a heavy 76–108, exactly as before. Every
+ * champion is now the fastest thing on the plane by a wide margin, which is the
+ * one thing that makes an outnumbered fight feel like a fight rather than a
+ * queue.
+ *
+ * It also makes the depth plane worth using on its own. Repositioning costs no
+ * health and no meter — only time — so a player who is losing can always buy
+ * space by walking it, and the answer to a crowd is movement rather than
+ * mashing. That is the whole design intent of the genre, and it only works if
+ * the player's feet are quicker than the enemy's.
+ *
+ * The spread is kept narrow (228–250, a 10 % band) so the roster still differs
+ * by feel: Graxle is the fastest thing in the game, Reginald the slowest of the
+ * champions and still faster than any grunt.
  */
 export const FIGHTERS: readonly FighterSpec[] = [
   {
@@ -219,16 +277,16 @@ export const FIGHTERS: readonly FighterSpec[] = [
     faction: "Bumpkin",
     color: "#f2c14e",
     maxHp: 110,
-    walkSpeed: 152,
+    walkSpeed: 232,
     magicPerDamage: 0.13,
     magicPerKill: 4,
     moves: {
       // Two quick sword taps and a hammer. The taps are deliberately
       // unremarkable — Barlow's identity is that his finisher is a hammer
       // blow, so the string reads as a wind-up into something.
-      combo1: string("attack", 9, 26, 5, 11, 66, 260, 150, 40, 40, 28),
-      combo2: string("attack", 9, 30, 5, 12, 70, 270, 190, 60, 60, 30),
-      combo3: string("hammering", 22, 54, 19, 23, 78, 500, 480, 340, 90, 40),
+      combo1: string("attack", 9, 26, 5, 11, 78, 260, 150, 40, 40, 28),
+      combo2: string("attack", 9, 30, 5, 12, 82, 270, 190, 60, 60, 30),
+      combo3: string("hammering", 22, 54, 19, 23, 90, 500, 480, 340, 90, 40),
       magic: spell(34, 520, 440),
     },
   },
@@ -239,16 +297,16 @@ export const FIGHTERS: readonly FighterSpec[] = [
     faction: "Goblin",
     color: "#7fd45a",
     maxHp: 120,
-    walkSpeed: 170,
+    walkSpeed: 250,
     magicPerDamage: 0.13,
     magicPerKill: 4,
     moves: {
       // Fastest string in the roster. The finisher is a mining lunge rather
       // than a heavy swing: it carries Graxle 340 px/s forward, so the third
       // hit is also how the goblin closes the distance it needs.
-      combo1: string("axe", 9, 32, 5, 10, 64, 250, 140, 40, 50, 28),
-      combo2: string("axe", 9, 34, 5, 11, 68, 260, 180, 60, 70, 30),
-      combo3: string("mining", 9, 33, 5, 19, 76, 460, 440, 300, 340, 38),
+      combo1: string("axe", 9, 32, 5, 10, 76, 250, 140, 40, 50, 28),
+      combo2: string("axe", 9, 34, 5, 11, 80, 260, 180, 60, 70, 30),
+      combo3: string("mining", 9, 33, 5, 19, 88, 460, 440, 300, 340, 38),
       magic: spell(30, 540, 460),
     },
   },
@@ -259,16 +317,16 @@ export const FIGHTERS: readonly FighterSpec[] = [
     faction: "Nightshade",
     color: "#b48bf0",
     maxHp: 90,
-    walkSpeed: 164,
+    walkSpeed: 244,
     magicPerDamage: 0.14,
     magicPerKill: 5,
     moves: {
       // Least health, fastest finisher. Nyx's third hit resolves in 250 ms —
       // quicker than Barlow's *first* — and throws the furthest in `z`, so the
       // play is to land three and let the scatter buy the next approach.
-      combo1: string("attack", 9, 31, 5, 10, 62, 240, 130, 50, 40, 27),
-      combo2: string("attack", 9, 33, 5, 11, 66, 250, 170, 70, 60, 29),
-      combo3: string("mining", 9, 40, 5, 18, 74, 440, 460, 520, 180, 38),
+      combo1: string("attack", 9, 31, 5, 10, 74, 240, 130, 50, 40, 27),
+      combo2: string("attack", 9, 33, 5, 11, 78, 250, 170, 70, 60, 29),
+      combo3: string("mining", 9, 40, 5, 18, 86, 440, 460, 520, 180, 38),
       magic: spell(36, 500, 480),
     },
   },
@@ -279,7 +337,7 @@ export const FIGHTERS: readonly FighterSpec[] = [
     faction: "Sunflorian",
     color: "#ff9b54",
     maxHp: 100,
-    walkSpeed: 144,
+    walkSpeed: 228,
     magicPerDamage: 0.13,
     magicPerKill: 4,
     moves: {
@@ -287,9 +345,9 @@ export const FIGHTERS: readonly FighterSpec[] = [
       // slower than anyone else's whole second hit, so Reginald has to commit
       // to the string to get value out of it — which is the trade for 26
       // damage and a knockback that puts a heavy clean off its line.
-      combo1: string("attack", 9, 24, 5, 12, 70, 280, 170, 40, 30, 29),
-      combo2: string("axe", 9, 26, 5, 14, 74, 300, 220, 70, 50, 32),
-      combo3: string("hammering", 22, 52, 19, 26, 82, 540, 560, 360, 70, 42),
+      combo1: string("attack", 9, 24, 5, 12, 82, 280, 170, 40, 30, 29),
+      combo2: string("axe", 9, 26, 5, 14, 86, 300, 220, 70, 50, 32),
+      combo3: string("hammering", 22, 52, 19, 26, 94, 540, 560, 360, 70, 42),
       magic: spell(42, 560, 420),
     },
   },
@@ -322,10 +380,15 @@ export const FIGHTER_ANIMS: readonly string[] = [
 ];
 
 /**
- * Cycles every sheet an *enemy* can ask for.
+ * Cycles every sheet an *enemy* can ask for, across the whole roster.
  *
- * Enemies never cast, so `casting` is dropped — seven enemy NPCs × nine sheets
- * would otherwise be 63 requests for a vocabulary they do not use.
+ * **Do not preload from this.** It is the union, so using it per NPC fetches
+ * `casting` and `hammering` for a goblin that will never cast, and — worse — it
+ * is a *second* list to keep in step with the moves, which is exactly how seven
+ * NPCs ended up drawing a coloured box through every attack. Use
+ * `enemyAnimsFor(npc)` in `enemies.ts`, which derives each character's set from
+ * its own moves. Kept for the docs and for asserting nothing asks for a cycle
+ * that does not exist.
  */
 export const ENEMY_ANIMS: readonly string[] = [
   "idle",
@@ -334,6 +397,9 @@ export const ENEMY_ANIMS: readonly string[] = [
   "death",
   "attack",
   "axe",
+  "mining",
+  "hammering",
+  "casting",
 ];
 
 export type Sheets = Readonly<Record<string, HTMLImageElement>>;

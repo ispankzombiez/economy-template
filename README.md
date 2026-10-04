@@ -37,8 +37,16 @@ For manual uploader testing at:
 Use this flow:
 
 1. Run `npm install`
-2. Run `npm run build:hosted`
+2. Run **`npm run build`** (which runs `build:hosted` and then the upload
+   preflight)
 3. Upload the contents of `dist/` (not the project root)
+
+**Do not upload a `vite build --mode pages` output.** That mode sets `base` to
+`/economy-template/` for GitHub Pages, so every asset in `index.html` points at
+a path the hosted origin does not serve. The result is a white screen with no
+error message anywhere — the HTML loads, the JavaScript never arrives. `npm run
+build`'s preflight fails the build if `dist/index.html` still references that
+path, so the wrong target cannot be uploaded by accident.
 
 ## Hosted upload files from GitHub Actions
 

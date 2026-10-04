@@ -10,16 +10,18 @@ import { RewardAttemptCleanup } from "./RewardAttemptCleanup";
 import { getTodayKey } from "../poker/session";
 import {
   buildAttemptHistory,
+  freeRunGrantActionId,
+  freeRunStartActionId,
+  freeRunTokenItemName,
   getFreeRunTokenBalance,
   getPlayTicketBalance,
   resolveActionAmounts,
-  resolveFreeRunGrantAction,
-  resolveFreeRunStartAction,
-  resolveFreeRunTokenKey,
+  resolveFreeRunEntitlement,
   resolvePlayTicketTokenKey,
   resolveRewardAttemptTokenKey,
   TICKET_RUN_START_ACTION,
 } from "../../lib/ravenCoin";
+import type { FreeRunEntitlement } from "../../lib/ravenCoin";
 
 /** Signature the original arcade games were written against. */
 type ArcadeOriginal = React.FC<{ onClose?: () => void }>;
@@ -75,14 +77,25 @@ export function withArcadeProps(
     const balance = playerData?.resolvedProfile?.balance ?? farm?.balance ?? 0;
     const equipped = playerData?.resolvedAvatar?.equipped;
 
+    /**
+     * The cabinet's free-run allowance, kept in a ref so the publish diagnostic
+     * can read it without the memo below having to re-run for it.
+     */
+    const entitlementRef = useRef<FreeRunEntitlement | null>(null);
+
     const baseState = useMemo<GameState>(() => {
-      const tokenKey = resolveFreeRunTokenKey({
+      // One decision for the whole allowance — gate, grant and burn resolved
+      // together. See `resolveFreeRunEntitlement` for why these three must never
+      // be looked up separately.
+      const entitlement = resolveFreeRunEntitlement({
+        actions,
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
         isVip,
         machine: minigame,
       });
+      entitlementRef.current = entitlement;
 
       // "Have I already used today's free run on this cabinet?" is answered by
       // whether the player is **still holding its token**. The token is minted on
@@ -92,25 +105,22 @@ export function withArcadeProps(
       //
       // `attemptsToday` is the shape the gate expects (used runs, not remaining
       // ones), so a held token means zero used.
-      const openAction = resolveFreeRunStartAction({
-        actions,
-        isVip,
-        machine: minigame,
-      });
       const tokenBalance = getFreeRunTokenBalance({
         playerEconomy,
-        tokenKey,
+        tokenKey: entitlement.tokenKey,
       });
 
-      // **Fails closed.** If the token economy is not fully published, or has not
-      // finished loading, this reports the allowance as spent rather than
-      // guessing. That used to fall back to counting minted coins, which is zero
-      // for any run that did not win — so a partial publish silently handed out
-      // free runs on every loss and every walk-out. A wrong "charges a ticket"
-      // costs the player one ticket; a wrong "free" costs the economy a coin per
-      // attempt, every time.
+      // **Fails closed.** If the token economy is not fully published, or the
+      // grant and the burn disagree about which token they are talking about, or
+      // the session has not finished loading, this reports the allowance as spent
+      // rather than guessing. A wrong "charges a ticket" costs the player one
+      // ticket; a wrong "free" costs the economy a coin per attempt, every time.
       const attemptsToday =
-        !openAction || !tokenKey ? 1 : tokenBalance > 0 ? 0 : 1;
+        !entitlement.coherent || !entitlement.tokenKey
+          ? 1
+          : tokenBalance > 0
+            ? 0
+            : 1;
 
       const playTicketKey = resolvePlayTicketTokenKey({
         economyMeta,
@@ -190,21 +200,18 @@ export function withArcadeProps(
       // the answer is still pending hands out the wrong allowance and, because the
       // grant carries a 24h cooldown, locks it in for the rest of the day.
       if (!vipResolved) return;
-      const grantAction = resolveFreeRunGrantAction({
+      const entitlement = resolveFreeRunEntitlement({
         actions,
-        isVip,
-        machine: minigame,
-      });
-      if (!grantAction) return;
-
-      const tokenKey = resolveFreeRunTokenKey({
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
         isVip,
         machine: minigame,
       });
-      if (!tokenKey) return;
+      const { grantAction, tokenKey } = entitlement;
+      // Refuse to grant into an incoherent economy: minting a token the burn
+      // never touches is what left a cabinet's gate permanently open.
+      if (!entitlement.coherent || !grantAction || !tokenKey) return;
 
       // Already holding one: nothing to grant, and do not spend the attempt.
       if (getFreeRunTokenBalance({ playerEconomy, tokenKey }) > 0) return;
@@ -240,6 +247,30 @@ export function withArcadeProps(
     ]);
 
     /**
+     * Say so when a cabinet is not fully published.
+     *
+     * A missing id is silent in the UI — the cabinet just says "no reward runs
+     * left today" and asks for a Play Ticket, which reads like the rule working
+     * rather than the rule missing. Logging the exact id that is missing turns a
+     * five-minute publish into a one-line fix, and names the case that actually
+     * loses money (an item published without the actions that burn it).
+     */
+    useEffect(() => {
+      if (!import.meta.env.DEV) return;
+      const entitlement = entitlementRef.current;
+      if (!entitlement || entitlement.coherent) return;
+      const console_ = globalThis.console as
+        | { warn?: (...args: unknown[]) => void }
+        | undefined;
+      console_?.warn?.(
+        `[arcade] "${minigame}" has no usable free-run allowance: ${entitlement.problem}. ` +
+          `Publish ${freeRunTokenItemName(minigame)}, ` +
+          `${freeRunGrantActionId(minigame)} and ${freeRunStartActionId(minigame)}. ` +
+          `Until then the cabinet charges a Play Ticket.`,
+      );
+    }, [actions, economyMeta, isVip, minigame, playerEconomy]);
+
+    /**
      * Spend a free reward run by burning its token.
      *
      * `Start-Free-Run-<Cabinet>` burns the token and mints the run's voucher in
@@ -251,33 +282,38 @@ export function withArcadeProps(
      * back as `{ ok: false }` without a round trip and the run never starts.
      */
     const onStartFreeRun = useCallback<() => PortalSendResult>(() => {
-      const openAction = resolveFreeRunStartAction({
+      const entitlement = resolveFreeRunEntitlement({
         actions,
-        isVip,
-        machine: minigame,
-      });
-
-      // No run-opens published: the payout carries the cap instead, so there is
-      // nothing to spend here.
-      if (!openAction) return { ok: true, funding: "free" };
-
-      const tokenKey = resolveFreeRunTokenKey({
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
         isVip,
         machine: minigame,
       });
+      const { openAction, tokenKey } = entitlement;
+
+      // No coherent run-open: refuse rather than run for free. Failing closed is
+      // the whole point — the alternative is a run that costs the economy a coin
+      // on every attempt, every time.
+      if (!entitlement.coherent || !openAction || !tokenKey) {
+        return {
+          ok: false,
+          error: entitlement.problem
+            ? `This cabinet's free reward run is not set up correctly (${entitlement.problem}), so it costs a Play Ticket instead.`
+            : "This cabinet has no Free Run Token, so a free reward run cannot be opened yet.",
+        };
+      }
+
       const attemptKey = resolveRewardAttemptTokenKey({
         economyMeta,
         items: playerEconomy?.items,
         balances: playerEconomy?.balances,
       });
-      if (!tokenKey || !attemptKey) {
+      if (!attemptKey) {
         return {
           ok: false,
           error:
-            "This economy has no Free Run Token item, so a free reward run cannot be opened yet.",
+            "This economy has no Reward Attempt item, so a free reward run cannot be opened yet.",
         };
       }
 
