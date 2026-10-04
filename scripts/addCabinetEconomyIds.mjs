@@ -98,13 +98,32 @@ function publishedTokenKey(id) {
   return byName ?? null;
 }
 
-/** The voucher a run-open mints, taken from whatever your economy already uses. */
+/**
+ * The voucher a run-open mints, taken from whatever your economy already uses.
+ *
+ * Matched on the **item name**, not just the key. A hosted economy keys items
+ * numerically — the voucher is `"3"`, and only `items["3"].name` says
+ * "Reward Attempt" — so a key-shaped match alone finds nothing and falls through
+ * to the offline sample's literal `"Reward Attempt"`. That is a rule that
+ * *looks* right and silently fails to mint, so the name is checked too, and the
+ * existing `Start-Free-Run-*` actions are preferred as the authority.
+ */
 function voucherKey() {
+  const REWARD_ATTEMPT = /reward[\s_-]*attempts?$/i;
+  const isVoucher = (key) =>
+    REWARD_ATTEMPT.test(key) ||
+    REWARD_ATTEMPT.test(String(items[key]?.name ?? ""));
+
+  // Prefer a key an existing run-open already mints — that is known-good.
   for (const id of Object.keys(actions)) {
     if (!id.startsWith("Start-")) continue;
     const minted = Object.keys(actions[id].mint ?? {});
-    const voucher = minted.find((k) => /reward[\s_-]*attempts?$/i.test(k));
+    const voucher = minted.find(isVoucher);
     if (voucher) return voucher;
+  }
+  // Otherwise resolve it through the published item names.
+  for (const [key, item] of Object.entries(items)) {
+    if (REWARD_ATTEMPT.test(String(item?.name ?? ""))) return key;
   }
   return "Reward Attempt";
 }
