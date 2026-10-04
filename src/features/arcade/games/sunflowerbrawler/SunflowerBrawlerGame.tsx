@@ -1084,9 +1084,24 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         on this screen to be selectable, and doing it at the root means a label
         added later cannot reintroduce it.
       */}
-      <div className="flex h-full select-none flex-col gap-2 overflow-y-auto p-4">
+      {/*
+        `select-none` across the whole play screen, not just the control legend:
+        a long press on a phone starts selecting whatever text is under the
+        finger, and during a fight that is the HUD — champion name, wave counter,
+        score — with a copy/callout menu over the stage. The player needs nothing
+        on this screen to be selectable, and doing it at the root means a label
+        added later cannot reintroduce it.
+
+        Narrow goes **edge to edge with no padding and no scrolling**: the stage is
+        the point of the screen and it should own all of it. The controls overlay
+        it rather than sitting below it, which is what buys the height back — see
+        the wrapper around the stage.
+      */}
+      <div className="flex h-full select-none flex-col gap-2 overflow-hidden p-0 sm:overflow-y-auto sm:p-4">
         {/* ── HUD ─────────────────────────────────────────────────────────── */}
-        <div className="flex items-start gap-3">
+        {/* Padding here rather than on the container, because the container is
+            edge to edge on narrow and the HUD still needs to breathe. */}
+        <div className="flex shrink-0 items-start gap-3 px-3 pt-3 sm:px-0 sm:pt-0">
           <div className="min-w-0 flex-1">
             <div className="flex items-baseline justify-between gap-2">
               <span
@@ -1171,15 +1186,44 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
         {/* ── Stage ───────────────────────────────────────────────────────── */}
         {/*
-          The slot owns the layout and the canvas just fills it. `FitStage` caps
-          its scale at 1×, so the stage could only ever be 640×360 CSS px and a
-          desktop cabinet ended up with a stamp in the middle of a 1100px panel.
-          Letting the canvas stretch the slot and `object-fit` the bitmap gets
-          the same aspect-correct, pixel-crisp letterbox on every screen — on a
-          phone the slot is whatever height is left under the HUD, on a desktop
-          it is whatever height is left under the HUD *and* is 1100px wide.
+          The wrapper exists so the controls can **overlay** the stage on narrow
+          screens while still sitting below it on wide ones. One set of markup,
+          positioned by `absolute` → `sm:static`.
+
+          That is what buys the height. The stage is 960×540 — 16:9 landscape —
+          and the play slot on a portrait phone is tall and narrow, so `contain`
+          letterboxed the stage down to a 343×191 band and left ~164px of black
+          above and below it, inside a black-bordered box. Overlaying the controls
+          means they no longer subtract from the slot, so the slot becomes the
+          whole area under the HUD; the 16:9 band then centres in *that*, and in
+          portrait the controls come to rest on the letterbox area rather than on
+          the street.
+
+          Nothing is cropped. `cover` would fill the box completely but scales to
+          923px wide to do it, showing only the middle third of the street — and
+          in a side-scroller, where enemies walk in from off-screen, that is
+          exactly the wrong thing to lose.
         */}
-        <div className="relative flex min-h-[180px] flex-1 items-stretch justify-center overflow-hidden rounded border-2 border-amber-900/50 bg-black">
+        <div className="relative flex min-h-0 flex-1 flex-col sm:gap-2">
+          <div
+            className="relative flex min-h-0 flex-1 items-stretch justify-center overflow-hidden sm:min-h-[180px] sm:rounded sm:border-2 sm:border-amber-900/50"
+            // Nothing is cropped, so a portrait phone still has vertical slack
+            // around a 16:9 stage. Left as `black` that slack reads as *broken* —
+            // two bars the player never asked for. So on narrow the slot is
+            // painted with the stage's own colours continuing past the canvas:
+            // night sky above, grass below, meeting the bitmap exactly at its
+            // top and bottom edges (the stage's horizon sits at 46% of its
+            // height, and the canvas centres at 36–64% of the slot). The slack
+            // then reads as a taller camera rather than as letterboxing.
+            style={
+              isNarrowLayout
+                ? {
+                    background:
+                      "linear-gradient(to bottom, #0d0b22 0%, #12102c 36%, #4a8a40 64%, #3d7534 100%)",
+                  }
+                : { backgroundColor: "#000000" }
+            }
+          >
           <canvas
             ref={canvasRef}
             width={STAGE_W}
@@ -1284,24 +1328,43 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
               </div>
             </div>
           )}
-        </div>
+          </div>
 
-        {/* ── Controls ────────────────────────────────────────────────────── */}
-        {/*
-          An analog stick and two buttons, matching the arcade floor. The stick
-          replaces a d-pad here because a d-pad is four separate buttons and a
-          thumb can only hold one: there was no way to walk *and* step into the
-          plane together, which is the most important move in the game. The stick
-          reads two axes at once and gets diagonals for free.
-        */}
-        <TouchOnly>
-          <div className="flex items-end justify-between gap-3">
-            <TouchAnalogStick held={held} />
+          {/* Narrow only: EXIT floats over the stage's top corner. In flow it
+              would take a full row of the screen the stage is now trying to own,
+              and it would sit underneath the overlaid controls. */}
+          {onClose && (
+            <button
+              type="button"
+              onClick={handleInGameExit}
+              className="absolute right-2 top-2 z-10 rounded bg-slate-800/80 px-3 py-1.5 text-xs font-bold text-amber-100 active:scale-95 sm:hidden"
+            >
+              EXIT
+            </button>
+          )}
+
+          {/* ── Controls ──────────────────────────────────────────────────
+              Overlaid on narrow, in flow from `sm` up. An analog stick and two
+              buttons, matching the arcade floor: the stick replaces a d-pad here
+              because a d-pad is four separate buttons and a thumb can only hold
+              one, so there was no way to walk *and* step into the plane together
+              — the most important move in the game. The stick reads two axes at
+              once and gets diagonals for free. */}
+          <TouchOnly>
+            <div className="absolute inset-x-0 bottom-0 z-10 flex items-end justify-between gap-3 p-2 sm:static sm:p-0">
+              <TouchAnalogStick held={held} />
+            {/* Both buttons render identically, so ATTACK's label is the same
+                amber as MAGIC's. `tone="accent"` was the outlier and it was also
+                broken: `CONTROL_CLASS` hard-codes `bg-slate-800/90`, and the
+                accent tone's background loses to it on Tailwind source order
+                while its `text-slate-900` wins — so ATTACK came out as dark text
+                on a dark background, and the ✦ was barely visible. Dropping the
+                tone fixes the contrast by making the two buttons match, which is
+                also what reads better side by side at thumb size. */}
             <div className="grid flex-1 grid-cols-2 gap-2 self-end">
               <TouchButton
                 held={held}
                 code="Space"
-                tone="accent"
                 label={
                   <span className="flex flex-col items-center leading-tight">
                     <span className="text-base">✦</span>
@@ -1326,21 +1389,22 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
               />
             </div>
           </div>
-        </TouchOnly>
+          </TouchOnly>
 
-        {/*
-          `select-none` because a long press anywhere in here made a phone start
-          selecting the words — dragging out a blue highlight of the control
-          legend mid-fight, with a copy/callout menu over the stage. Nothing in a
-          play screen is text the player needs to select, and `touch-none` on the
-          line stops the gesture being read as a scroll.
-        */}
-        <div className="flex touch-none select-none items-center justify-between gap-3 text-[11px] text-gray-500">
-          <span>
-            ← → walk · ↑ ↓ step the plane · Space attack (3-hit combo) · X magic
-          </span>
-          <div className="flex gap-2">
-            <Button onClick={handleInGameExit}>Exit</Button>
+          {/*
+            Desktop only. The legend is a keyboard reference, and on narrow the
+            controls are on screen and labelled — a row of text about keys the
+            player cannot press is not worth the height it takes from the stage,
+            nor the finger-drag text selection it invites mid-fight.
+          */}
+          <div className="hidden shrink-0 touch-none select-none items-center justify-between gap-3 px-2 text-[11px] text-gray-500 sm:flex">
+            <span>
+              ← → walk · ↑ ↓ step the plane · Space attack (3-hit combo) · X
+              magic
+            </span>
+            <div className="flex gap-2">
+              <Button onClick={handleInGameExit}>Exit</Button>
+            </div>
           </div>
         </div>
       </div>

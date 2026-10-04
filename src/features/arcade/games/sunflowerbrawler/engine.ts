@@ -759,7 +759,12 @@ export const createMatch = ({
   return {
     phase: "intro",
     phaseTimer: INTRO_MS,
-    banner: { title: "SUNFLOWER BRAWLER", subtitle: "FIVE WAVES · THREE LIVES" },
+    // `FIFTEEN WAVES · THREE LIVES` — the run is fifteen waves and then endless
+    // (this line still said FIVE, from when the game *was* five waves). "Then it
+    // keeps going" is deliberately absent: a player told up front that the run is
+    // unbounded stops expecting an ending, and the lobby already carries the wave
+    // count. This is the one line every run opens on, so it has to be true.
+    banner: { title: "SUNFLOWER BRAWLER", subtitle: "FIFTEEN WAVES · THREE LIVES" },
     bannerTimer: INTRO_MS,
     waveIndex: 0,
     player: makePlayer(playerId),

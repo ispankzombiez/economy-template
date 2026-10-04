@@ -614,6 +614,62 @@ The whole play screen is `select-none`: a long press on a phone otherwise
 started selecting the HUD — champion name, wave counter, score — with a copy
 callout over the stage.
 
+ATTACK and MAGIC render identically, so both labels are the same amber. They did
+not: ATTACK asked for `tone="accent"`, and that tone is broken —
+`CONTROL_CLASS` hard-codes `bg-slate-800/90`, so the accent tone's *background*
+loses to it on Tailwind source order while its `text-slate-900` wins. ATTACK came
+out as dark text on a dark background and its ✦ was nearly invisible.
+
+### The mobile stage fills the screen
+
+Below `sm` the play screen is **edge to edge, unpadded and non-scrolling**, and
+the controls **overlay** the stage instead of sitting below it.
+
+The stage is 960×540 — 16:9 landscape — and the play slot on a portrait phone is
+tall and narrow, so `contain` letterboxed the stage down to a 343×191 band inside
+a black-bordered box, leaving ~164px of black above and below it. Measured on a
+390×844 phone:
+
+| | Before | After |
+|---|---|---|
+| Stage slot | 343 × 523 | **375 × 741** (edge to edge, full height) |
+| Painted stage | 343 × 191 | **375 × 211** (+21% area) |
+| Stick overlaps the stage | yes | **no** |
+| Buttons overlap the stage | yes | **no** |
+
+Overlaying the controls is what buys the height: they no longer subtract from the
+slot, so the slot becomes the whole area under the HUD, and in portrait the
+controls come to rest **below** the painted stage — in the letterbox area, not on
+the street. Measured at 390×844 and 360×640, neither control touches the stage.
+
+**Nothing is cropped.** `cover` would fill the box completely but scales to 923px
+wide to do it, showing only the middle third of the street — and in a
+side-scroller, where enemies walk in from off-screen, that is exactly the wrong
+thing to lose.
+
+**The slack is painted as world, not as bars.** 16:9 content cannot fill a 19.5:9
+screen, so vertical slack remains — but the slot is filled with the stage's own
+colours continuing past the canvas: night sky above, grass below, meeting the
+bitmap at its top and bottom edges (the stage's horizon sits at 46% of its height
+and the canvas centres at 36–64% of the slot). Two colours sampled from the
+rendered stage: sky `#12102c`, grass `#4a8a40`. The slack then reads as a taller
+camera rather than as letterboxing.
+
+In **landscape** the stage is height-limited and the slack moves to the sides. The
+stick lands in the left bar and clears the stage entirely; the button row overlays
+a 56px band across the bottom — the dirt road, below the line fighters walk on.
+Portrait is the clean case.
+
+EXIT floats over the stage's top corner on narrow (in flow it would take a row the
+stage is trying to own, and sit underneath the overlaid controls), and the keyboard
+legend is hidden there — it describes keys a touch player cannot press.
+
+`useIsNarrowLayout` reads its initial value **synchronously** rather than
+defaulting and correcting in an effect. Defaulting to wide means a phone's first
+paint renders four champion cards and then swaps to the CHANGE button a frame
+later — a visible flash of a layout the player will never use, on the screen they
+open most often.
+
 **Level.** Composed once from `nightshade-arcade-tilesheet.png` rather than
 rendered from a map — the `.tsx` tileset the Tiled maps reference does not exist
 in the repo. `LEVEL_W = 14400` is fifteen `STAGE_W`-wide screens (960×540), one
