@@ -47,6 +47,17 @@ export type RewardRequest = {
   createdByUsername: string;
   /** Epoch seconds, or null while still outstanding. */
   claimedAt: number | null;
+  /**
+   * When the claim's mint actually settled, epoch seconds — `null` while
+   * outstanding, and still `null` on a claim that failed ambiguously (see
+   * `POST /requests/claim`). `claimedAt` alone cannot tell those apart, which is
+   * why the audit panel shows both.
+   */
+  settledAt?: number | null;
+  /** What the claim was refused with, when it failed. */
+  claimedDetail?: string | null;
+  /** Username of the farm that claimed this reward (populated by worker). */
+  claimedByUsername?: string;
 };
 
 /** The worker's answer to a write, including anything it wants to warn about. */
@@ -81,22 +92,44 @@ export const rewardsWorkerConfigured = (): boolean =>
  * The worker's own message is preferred when it sent one, because it is the only
  * party that knows why (expired session, not the owner, already claimed).
  */
-async function call<T>(
+/**
+ * One request to the worker.
+ *
+ * Exported so the chest tally (`lib/chestApi.ts`) can share it rather than open a
+ * second connection to the same host with a second copy of the failure handling.
+ * Every helper here and there resolves rather than throws — see the note at the
+ * top of this file.
+ */
+export async function call<T>(
   path: string,
   {
     token,
     method = "GET",
     body,
-  }: { token: string; method?: "GET" | "POST" | "DELETE"; body?: unknown },
+    query,
+  }: {
+    token: string;
+    method?: "GET" | "POST" | "DELETE";
+    body?: unknown;
+    /** Query string params, appended as `?k=v&…`. */
+    query?: Record<string, string>;
+  },
 ): Promise<ResultShape<T>> {
   const base = workerUrl();
   if (!base) {
     return { ok: false, error: "Rewards are not set up in this build." };
   }
 
+  let url = `${base}${path}`;
+  if (query) {
+    const params = new URLSearchParams(query);
+    const qs = params.toString();
+    if (qs) url += `?${qs}`;
+  }
+
   let response: Response;
   try {
-    response = await fetch(`${base}${path}`, {
+    response = await fetch(url, {
       method,
       headers: {
         accept: "application/json",
@@ -159,12 +192,36 @@ export function queueReward(
   return call("/requests", { token, method: "POST", body: input });
 }
 
-/** Tell the worker a reward has been pressed, so it stops offering it. */
-export function markRewardClaimed(
+/**
+ * Claim a reward, mint included.
+ *
+ * The worker does the whole thing: it looks the grant up, checks it is addressed
+ * to this farm and has not been taken, records the claim, and calls the published
+ * reward button with the economy's private key. The client sends only a `grantId`
+ * and is never told which action runs or how much it mints.
+ *
+ * This used to be two calls — press the button, then tell the worker it was done —
+ * which meant the *client* chose which action to press, with `requireAbsent` on a
+ * marker item as the only thing making it once-only. That primitive cannot express
+ * "the same reward several times to one player", so uniqueness moved into the
+ * worker's ledger where it can.
+ *
+ * The worker's own message comes back on refusal, so the panel can show the real
+ * reason ("You have already claimed that reward") rather than guessing.
+ */
+export function claimReward(
   token: string,
-  id: string,
-): Promise<ResultShape<{ request: RewardRequest }>> {
-  return call("/requests/claim", { token, method: "POST", body: { id } });
+  grantId: string,
+): Promise<
+  ResultShape<{
+    grantId: string;
+    actionId: string;
+    label: string;
+    claimedAt: number;
+    data?: unknown;
+  }>
+> {
+  return call("/requests/claim", { token, method: "POST", body: { grantId } });
 }
 
 /** Withdraw a queued reward before the player takes it. */
@@ -176,6 +233,54 @@ export function cancelReward(
     token,
     method: "DELETE",
   });
+}
+
+/**
+ * Delete a claimed reward from the owner's history. Dev Key only.
+ *
+ * A different verb from {@link cancelReward} on purpose. Cancelling withdraws a
+ * grant nobody has taken; this removes a row from the audit trail after the fact.
+ * Conflating them would mean a single `DELETE` could quietly rewrite history.
+ *
+ * The worker enforces the Dev Key again on this route — the button being visible
+ * only to a Dev Key holder is a UI convenience, not the protection.
+ *
+ * `force` overrides the worker's refusal to delete a claim that never settled. It
+ * is for the case where the owner has checked the player's balance, confirmed the
+ * payout did not land, and still wants the record gone. The worker logs a forced
+ * removal separately, so the audit trail records that the override happened even
+ * though the row itself is deleted.
+ */
+export function forgetReward(
+  token: string,
+  grantId: string,
+  force = false,
+): Promise<ResultShape<{ removed: string }>> {
+  return call(`/requests/${encodeURIComponent(grantId)}/history`, {
+    token,
+    method: "DELETE",
+    query: force ? { force: "true" } : undefined,
+  });
+}
+
+/**
+ * Restore this farm's Dev Key, once, after an economy reset.
+ *
+ * The worker gates it three ways and the answer comes back either way: the caller
+ * must be the arcade owner's farm (from the verified identity, not the request),
+ * must not already hold a key, and the economy must currently hold none at all.
+ * The last of those is why this can stay in the code permanently — once the owner
+ * has the key, the route refuses forever.
+ *
+ * The worker's own message is surfaced, because the two failure modes are very
+ * different for the person reading it: "publish a `Bootstrap-Dev-Key` action"
+ * means an editor change is the next step, while "a Dev Key already exists" means
+ * there is nothing to do.
+ */
+export function bootstrapDevKey(
+  token: string,
+): Promise<ResultShape<{ restored: boolean }>> {
+  return call("/dev-key/bootstrap", { token, method: "POST" });
 }
 
 // ---------------------------------------------------------------------------

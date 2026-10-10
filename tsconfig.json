@@ -27,7 +27,8 @@
       "examples/*": ["src/examples/*"],
       "features/world/*": ["src/examples/chickenRescue/world/*"],
       "example-assets/*": ["src/examples/chickenRescue/assets/*"],
-      "@sl-assets/*": ["../images/assets/*"]
+      "@sl-assets/*": ["../images/assets/*"],
+      "@nightshade/shared/*": ["shared/*"]
     }
   },
   "include": ["./src"]

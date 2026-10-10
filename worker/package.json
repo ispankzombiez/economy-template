@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Reward request list for the Nightshade Arcade. Holds a list and verifies who is asking; never touches token balances.",
+  "dependencies": {
+    "@nightshade/shared": "file:../shared"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",

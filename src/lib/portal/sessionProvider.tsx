@@ -17,6 +17,7 @@ import {
   postPlayerEconomyAction,
   postPlayerEconomyGeneratorCollect,
 } from "./api";
+import type { VerifiedRun } from "./api";
 import { PLAYER_ECONOMY_GENERATOR_COLLECTED_ACTION } from "./playerEconomyTypes";
 import {
   applyOptimisticPortalAction,
@@ -42,6 +43,19 @@ export type PortalEconomySyncInput =
        * entitlement that must not be self-issued has to come from the server.
        */
       optimistic?: boolean;
+      /**
+       * Anti-cheat proof for a win claim: the run's checkpoints, score and
+       * duration. Present only on `Claim-Raven-Coin`, where it routes the write
+       * to `claim-verified` so the worker certifies the run before minting.
+       * See `VerifiedRun` in `./api`.
+       */
+      verify?: VerifiedRun;
+      /**
+       * Registry id of the cabinet a **run-open** is for. The worker fixes this
+       * to the farm at open time and checks every later claim on the run against
+       * it, so it cannot be supplied by the claim instead. See `./api`.
+       */
+      cabinet?: string;
     }
   | { collectJobId: string };
 
@@ -153,6 +167,8 @@ export function MinigameSessionProvider({
               token: bootstrap.jwt as string,
               action: input.action,
               amounts: input.amounts,
+              verify: input.verify,
+              cabinet: input.cabinet,
             });
 
       void postPromise.then(
@@ -202,6 +218,13 @@ export function MinigameSessionProvider({
           token: bootstrap.jwt,
           action: input.action,
           amounts: input.amounts,
+          // The proof and the run's cabinet ride along here too: this path is
+          // server-authoritative, which is exactly what a verified claim wants.
+          // Dropping them would silently downgrade a verified win to the
+          // trusting route — or worse, send checkpoints with no cabinet and be
+          // refused for a mismatch the player never caused.
+          verify: input.verify,
+          cabinet: input.cabinet,
         }).then(
           (res) => {
             setPlayerEconomy((prev) =>
@@ -331,6 +354,11 @@ export function MinigameSessionProvider({
                     token: bootstrap.jwt as string,
                     action: input.action,
                     amounts: input.amounts,
+                    // Same as the single-dispatch path: proof and cabinet must
+                    // survive to the worker, or a verified claim would arrive
+                    // looking like an unverified one.
+                    verify: input.verify,
+                    cabinet: input.cabinet,
                   });
             state = mergeMinigameEconomyFromApi(
               state,

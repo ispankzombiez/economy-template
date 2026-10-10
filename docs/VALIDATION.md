@@ -47,6 +47,37 @@ been published is a cabinet that does not honour it.
       state while wiring a new machine; see `GAME_SPEC.md`,
       *Free runs: one coherent decision, not three lookups*.)
 
+### Entryway chests
+
+Fifty clicks in a row on either chest pays one Play Ticket, once a day, until the
+arcade's 10 000 are gone. See `GAME_SPEC.md`, *The entryway chests*. Two of the
+three limits are published economy data, so a chest that has not been published
+properly still pays — silently and without a cap.
+
+- [ ] The `chest_click_tracker` item exists with `is_visible: false` **and**
+      `supply: 10000`, and `Claim-Play-Ticket` mints one of them alongside the
+      ticket. (Without the item the chest pays forever and the cap never
+      engages.)
+- [ ] **49** clicks pay nothing and show nothing. The **50th** shows the reward
+      message and adds one Play Ticket.
+- [ ] **Clicking a machine, a prize desk or Raven mid-run** resets the streak; so
+      does a gap of 10 s or more. A reload resets it too.
+- [ ] Alternating between the **two** chests still pays — one streak, not two.
+- [ ] A **second** completed streak on the same day says the chest is already
+      emptied, and the balance is unchanged.
+- [ ] A refresh mid-streak starts from zero.
+- [ ] With the supply spent, the **first** chest click shows "Told you not to tell
+      your friends about it…" plus the leaderboard, highest first, with your own
+      row shown even when you are nowhere near the top.
+- [ ] `CHEST_TICKET_CAP` in `worker/wrangler.toml` matches the item's `supply`.
+- [ ] `POST /chest/reset` (dev only) clears the board and the count. It does
+      **not** refill the supply — that is the item's, and only Sunflower Land can.
+- [ ] The chest popup **cannot be dismissed by clicking the backdrop** or by
+      clicking the panel around the text. OK is the only exit, by the owner's
+      decision — the message is the payoff and a stray click loses it for good.
+- [ ] While that popup is open, clicking a chest **behind** it does not change
+      the message or fire a second claim.
+
 ### UI / mobile
 
 - [ ] **Primary action** reachable on a **narrow** viewport without horizontal scroll.

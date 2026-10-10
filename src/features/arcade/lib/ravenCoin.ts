@@ -40,25 +40,46 @@ import type {
  * ## The per-cabinet actions are not gated on VIP — a known, accepted trade-off
  *
  * A non-VIP player is meant to get one free run a day from *this* action, while a
- * VIP player gets one per cabinet from the ten `Mint-Raven-Coin-<Machine>`
+ * VIP player gets one per cabinet from the twelve `Mint-Raven-Coin-<Machine>`
  * actions. Each of those also carries `dailyCap: 1`, so the server's view is just
- * "eleven actions, one coin each per day" — **it has no notion of VIP at all.**
+ * "thirteen actions, one coin each per day" — **it has no notion of VIP at all.**
  *
  * Every one of those ids is a plain string in the public bundle, so anyone can
  * post `Mint-Raven-Coin-Poker` directly and be credited a coin without ever
- * holding a VIP flag. The realistic ceiling is therefore **ten free coins a day
- * instead of one**, for someone willing to call the endpoint with a public
+ * holding a VIP flag. The realistic ceiling is therefore **thirteen free coins a
+ * day instead of one**, for someone willing to call the endpoint with a public
  * string. This is a property of splitting the allowance across actions, not of
- * how VIP is detected: it is equally true whether VIP is read from the session,
- * from the Community API, or not at all.
+ * how VIP is detected: it is equally true whether VIP is read from the
+ * session, from somewhere else, or not at all.
+ *
+ * ## The one thing the API does enforce
+ *
+ * `dailyCap` *is* checked server-side, per action id, against the persisted
+ * ledger — verified live with `400 Daily cap exceeded for 0 on action
+ * Mint-Raven-Coin`. So the real bound on the economy is "one coin per published
+ * mint per day", thirteen of them. VIP never appears in that bound; it only
+ * changes how many of the thirteen the *client* offers a given player. That is
+ * the whole of the enforcement picture, and it is why faking `isVip` is not the
+ * interesting attack: calling a public action id directly is strictly easier and
+ * strictly more profitable.
  *
  * **Nothing client-side can close it.** The arcade is a static bundle, so the
  * player owns the runtime and any check they can read is a check they can skip —
- * including the farm-identity cross-check in `lib/portal/communityVip.ts`, which
- * only guarantees *our* read is of the right farm. Closing the gap needs a
- * server-side VIP requirement on the per-cabinet mints, the same way
- * `require` on a Dev Key item is enforced — see {@link DEV_PLAY_TICKET_MINT_ACTION}
- * for the other accepted exposure of the same kind.
+ * including the session's `farm.vip` block, which is a field in a payload the
+ * player could edit in devtools before the arcade reads it. What it does buy is
+ * that the answer now arrives from `economies-api` off the player's own portal
+ * JWT, so the *default* is the server's rather than something this repo
+ * publishes from a day-old dump.
+ *
+ * Closing the gap needs a server-side VIP requirement on the per-cabinet mints,
+ * the same way `require` on a Dev Key item is enforced — see
+ * {@link DEV_PLAY_TICKET_MINT_ACTION} for the other accepted exposure of the same
+ * kind. Note that this is **not only a matter of editor configuration**: the
+ * action schema the API publishes has no VIP primitive at all. Its rule
+ * vocabulary is token `require`, `cooldownSeconds`, `maxCalls`, `dailyCap`, and
+ * an item's `max` / `supply`. There is no `requireVip`, so the economy owner
+ * cannot express a VIP gate today, and the request belongs to whoever owns
+ * `economies-api`.
  *
  * The owner's decision is to keep the per-cabinet mints and harden what can be
  * hardened, accepting the rest.
@@ -672,10 +693,38 @@ export const PLAY_TICKET_SPEND_ACTION = "Mint-Play-Ticket";
  * Both entryway chests dispatch this same action, which is what makes the pair a
  * single daily allowance rather than two.
  *
+ * ## Fifty clicks, then this action
+ *
+ * The chests no longer pay on the first click. A streak of **50** chest clicks
+ * with nothing else clicked and no gap of 10 s (see `lib/chestStreak.ts`) is
+ * what reaches this handler at all — the client counts, and only a completed
+ * streak gets this far. That count is local and therefore advisory; what this
+ * action does not do is let the count itself be the limit.
+ *
+ * The publish carries two mints:
+ *
+ * ```json
+ * "Claim-Play-Ticket": {
+ *   "type": "custom", "showInShop": false,
+ *   "mint": {
+ *     "Play Ticket":         { "min": 1, "max": 1, "dailyCap": 1 },
+ *     "chest_click_tracker": { "amount": 1 }
+ *   },
+ *   "cooldownSeconds": 86400
+ * }
+ * ```
+ *
+ * The second mint is the secret global cap. It is what draws down the item's
+ * `supply: 10000` — see {@link CHEST_CLICK_TRACKER_ITEM_NAME} — and because it
+ * happens inside the same server-side action, it is atomic with the ticket: there
+ * is no window in which a player has a ticket that was never counted against the
+ * pot. Once the supply is spent the server refuses, the chest says the pot is
+ * empty, and the tally of who got there first is shown instead.
+ *
  * ## Why a cooldown and not `dailyCap`
  *
- * The mint carries `dailyCap: 1` as well, but that is not what stopped the
- * repeat: on the deployed build a claim went through on 2026-09-28 while
+ * The ticket mint carries `dailyCap: 1` as well, but that is not what stopped
+ * the repeat: on the deployed build a claim went through on 2026-09-28 while
  * `dailyMinted.minted` still held no `Claim-Play-Ticket` entry, so the cap had
  * nothing to count and stayed open. The ledger is evidently per-action rather
  * than universal — {@link RAVEN_COIN_MINT_ACTION} does refuse on its own cap
@@ -687,12 +736,105 @@ export const PLAY_TICKET_SPEND_ACTION = "Mint-Play-Ticket";
  * publishing: a second claim returns `400 This action is on cooldown` and the
  * ticket balance is unchanged. The player is told so instead of getting a silent
  * nothing — see `NightshadeArcadeApp`'s chest handler for how that verdict is
- * reported.
+ * reported, and {@link classifyChestClaimRefusal} for telling the three possible
+ * refusals apart.
  *
  * This is the free source of Play Tickets. FLOWER purchases remain published on
  * the host page purely as a top-up for a player who has already claimed today.
  */
 export const PLAY_TICKET_DAILY_CLAIM_ACTION = "Claim-Play-Ticket";
+
+/**
+ * The invisible item that meters the entryway chests' **global** reward supply.
+ *
+ * `Claim-Play-Ticket` mints one of these alongside the ticket, and the item
+ * carries `supply: 10000` in the Economy Editor — so the tenth-thousandth chest
+ * ticket in the arcade's whole lifetime is the last one that can be minted, and
+ * the server refuses the mint after that.
+ *
+ * ```json
+ * "chest_click_tracker": {
+ *   "name": "chest_click_tracker",
+ *   "is_visible": false,     // never appears in any inventory
+ *   "supply": 10000          // GLOBAL: across every player, forever
+ * }
+ * ```
+ *
+ * ## Why a hidden item rather than a counter in this file
+ *
+ * The cap is the feature, and a cap enforced by the client is not a cap — the
+ * player owns the runtime and can skip any check they can read. Minting against a
+ * published global `supply` puts the limit inside Sunflower Land's own server,
+ * where it is atomic with the mint and cannot be raced. See
+ * {@link PLAY_TICKET_DAILY_CLAIM_ACTION} for what the chest dispatches.
+ *
+ * ## What this item is *not*
+ *
+ * It is not a limit on clicks. Nothing reads the balance during play — the
+ * streak is counted locally and this only ever moves on a payout. Its only
+ * second job is as a receipt: a player's own balance is how many chest tickets
+ * they have ever won.
+ */
+export const CHEST_CLICK_TRACKER_ITEM_NAME = /^chest[\s_-]*click[\s_-]*tracker$/i;
+
+/**
+ * The `balances` key the chest tracker lives under, or `undefined` when the
+ * economy has not published it.
+ *
+ * `undefined` is not fatal — it only means the chest cannot tell whether the
+ * global supply is published, so it leans entirely on the server's verdict (see
+ * {@link classifyChestClaimRefusal}).
+ */
+export function resolveChestClickTrackerKey({
+  economyMeta,
+  items,
+  balances,
+}: {
+  economyMeta?: Pick<MinigameSessionEconomyMeta, "items">;
+  items?: EconomyItems;
+  balances?: Record<string, number>;
+} = {}): string | undefined {
+  const merged: EconomyItems = { ...items, ...economyMeta?.items };
+  for (const [key, item] of Object.entries(merged)) {
+    const name = item?.name;
+    if (typeof name !== "string") continue;
+    if (CHEST_CLICK_TRACKER_ITEM_NAME.test(name.trim())) return key;
+  }
+
+  // A balance under an unrecognised key still identifies itself by shape.
+  if (balances) {
+    for (const key of Object.keys(balances)) {
+      if (CHEST_CLICK_TRACKER_ITEM_NAME.test(key)) return key;
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Why a chest payout was refused.
+ *
+ * `supply` is the one that matters for behaviour: it means the global pot is
+ * empty, the player is past the end of the secret, and the chest should say so
+ * and show the tally rather than "nothing inside". The strings are matched
+ * loosely because the wording comes from Sunflower Land's own rule engine and
+ * has not been pinned down against the live host.
+ *
+ * Anything unrecognised stays `other`, which keeps the old "not available right
+ * now" copy — so an unexpected server message never claims the pot is empty.
+ */
+export function classifyChestClaimRefusal(
+  error: string,
+): "cooldown" | "supply" | "other" {
+  const text = String(error ?? "").toLowerCase();
+
+  if (/cooldown/.test(text)) return "cooldown";
+  if (/supply|exhaust|out of stock|global limit|global supply/.test(text)) {
+    return "supply";
+  }
+
+  return "other";
+}
 
 /**
  * Developer-only Play Ticket mint, driven by the modal in the shop.

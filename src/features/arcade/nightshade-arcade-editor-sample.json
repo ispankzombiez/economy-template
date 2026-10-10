@@ -113,6 +113,13 @@
       "tradeable": false,
       "is_visible": false
     },
+    "chest_click_tracker": {
+      "name": "chest_click_tracker",
+      "description": "Internal arcade bookkeeping. Draws down the entryway chests' global ticket supply.",
+      "tradeable": false,
+      "is_visible": false,
+      "supply": 10000
+    },
     "Apple Pie": {
       "name": "Apple Pie",
       "description": "A delicious homemade apple pie from the Nightshade Arcade.",
@@ -387,6 +394,9 @@
           "min": 1,
           "max": 1,
           "dailyCap": 1
+        },
+        "chest_click_tracker": {
+          "amount": 1
         }
       },
       "cooldownSeconds": 86400

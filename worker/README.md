@@ -11,7 +11,22 @@ allowed to press.
 
 ---
 
-## Setup (click-by-click)
+---
+
+## 🚨 If you have not set up the write worker yet, stop here
+
+This worker used to be a read-only queue. It is now the **only** process that can
+write to the economy, because **Require secret API key** is on and the browser is
+refused `401 MISSING_PRIVATE_KEY`.
+
+**Until you complete `worker/SETUP.md`, the arcade cannot mint anything at all.**
+
+Full step-by-step, including how to create the D1 ledger and add the private key:
+**[`worker/SETUP.md`](./SETUP.md)**.
+
+---
+
+## Setup (click-by-click, reward queue only)
 
 ### 1. Install the Cloudflare CLI
 
@@ -89,6 +104,25 @@ Authorization: Bearer <the ?jwt= value from the arcade URL>
 | `GET /requests/mine` | anyone | The caller's own rewards, newest first |
 | `POST /requests/claim` | anyone | Tick a request off, but only the caller's own |
 | `DELETE /requests/:id` | **dev only** | Cancel a queued request |
+| `GET /chest` | anyone | How much of the chest supply is left, and the leaderboard |
+| `POST /chest/tickets` | anyone | Record one chest payout (amount must be 1) |
+| `POST /chest/reset` | **dev only** | Clear the chest tally and the board |
+| `POST /dev-key/bootstrap` | **owner farm only** | Restore the Dev Key after an economy wipe |
+| `POST /economy/write` | **worker only** | The one write route; see the intent vocabulary below |
+
+### `POST /dev-key/bootstrap`
+
+The rescue hatch for a wiped economy. It calls the published `Bootstrap-Dev-Key`
+action, which mints one Dev Key, and it refuses unless all three hold:
+
+1. the caller is the owner farm, read from the **verified** identity;
+2. the caller holds no Dev Key already;
+3. no Dev Key is circulating, read from the session's `supplies` map.
+
+`supplies` is reported sparsely — a wiped economy sends `{}` — so an absent entry
+reads as zero. That is deliberate: refusing on it would 503 at exactly the moment
+the route is needed. The backstop is the item's own `supply: 1`, which the economy
+enforces regardless of this check. Keep that field on the Dev Key item.
 
 ### Two examples
 
@@ -115,6 +149,66 @@ curl https://nightshade-rewards.<you>.workers.dev/requests/mine \
 
 ---
 
+## The chest tally
+
+The entryway chests pay one Play Ticket for fifty clicks in a row, once a day,
+until the arcade has handed out its whole supply — 10 000 of them, across every
+player, ever.
+
+**This worker does not enforce that cap.** The cap is the `supply` on the
+`chest_click_tracker` item in the Economy Editor, which the Sunflower Land server
+decrements inside the same action that mints the ticket. That is the right place
+for it: atomic with the mint, and somewhere a player cannot edit it.
+
+What the worker keeps is the part the economy cannot express — **who got how
+many**. There is no published ranking and no way to ask the economy API for a top
+ten, so the game reports each payout to `POST /chest/tickets` *after* the mint
+succeeds, and reads the board back to show it once the pot is empty.
+
+So treat everything under `/chest` as **bookkeeping, not a ledger of record**:
+
+- A player who closes the tab between winning and reporting is under-counted.
+  The pot still moved, so the damage is a short row and a message that arrives
+  late.
+- A player who never reports — including a cheater — is under-counted the same
+  way, and gains nothing by it. The ticket was already minted; this worker cannot
+  mint anything.
+- `get` then `put` is not atomic in KV and KV is eventually consistent, so a
+  burst of simultaneous reports can lose a count or two.
+
+Losing a count is the only failure this design can produce. It cannot hand out a
+ticket the economy did not mint, which is the only direction that matters.
+
+### `CHEST_TICKET_CAP` is a mirror, not the cap
+
+It decides when the chests *switch to the end-of-the-line message*. The item's
+`supply` decides when the mint is actually refused. If they ever disagree the item
+wins — the game treats a server refusal as the real answer and only ever uses this
+number to speak first.
+
+**Change both together**, or they will disagree:
+
+- `CHEST_TICKET_CAP` in `wrangler.toml`
+- `supply` on `chest_click_tracker` in the Economy Editor
+
+### Seeing the finished state without 10 000 tickets
+
+`POST /chest/reset` (dev only) clears the board and zeroes the count, so you can
+see the "everybody who told their friends" message and the leaderboard without
+minting ten thousand tickets first.
+
+It does **not** refill the supply. That is the item's `supply`, and only Sunflower
+Land can restore it. To re-test from scratch you need an economy action that mints
+`chest_click_tracker` directly.
+
+```bash
+curl -X POST https://nightshade-rewards.<you>.workers.dev/chest/reset \
+  -H "origin: https://nightshade-arcade.economies.sunflower-land.com" \
+  -H "authorization: Bearer $JWT"
+```
+
+---
+
 ## Why there are no secrets
 
 The player sends their game login token. The worker then asks Sunflower Land two
@@ -126,8 +220,39 @@ questions with that token:
 Both answers come from Sunflower Land and are keyed on a token the player cannot
 forge. The browser is never asked who it is.
 
-So there is no API key to store, no password to rotate, and nothing worth
-stealing. That is also why this works without any repository or CI setup.
+So there is no Community API key to store, no password to rotate, and nothing
+worth stealing. That is also why this works without any repository or CI setup.
+
+### The one exception: `ECONOMY_PRIVATE_KEY`
+
+This worker used to hold no credential at all. It now holds exactly one, and it
+is the most valuable secret in the project:
+
+| | |
+| --- | --- |
+| **Name** | `ECONOMY_PRIVATE_KEY` (`sk_economy_…`) |
+| **Set with** | `npx wrangler secret put ECONOMY_PRIVATE_KEY` |
+| **Local dev** | `worker/.dev.vars` (gitignored) |
+| **Never** | `wrangler.toml`, a committed file, a `VITE_` var, chat |
+
+It is the Economy Editor's **Require secret API key** credential. Turn that
+toggle on and every write to the economy — actions, score submissions, generator
+collects — must carry it in an `x-economy-private-key` header, *in addition to*
+the player's token. Without it the API answers `401 MISSING_PRIVATE_KEY`; with the
+wrong one, `403 INVALID_PRIVATE_KEY`.
+
+Why it matters: a player can always edit their own browser. Before this existed,
+anyone could POST a published action id directly and be credited whatever that
+action mints, without the game ever being involved. With the toggle on, the
+browser cannot write to the economy at all — so the game server becomes the only
+writer, and *its* checks are the ones that decide.
+
+Reads are unaffected: `GET /data?type=session` never needs the key, so the arcade
+still boots normally.
+
+**If it leaks, rotate immediately** from the editor (Basics → Rotate key). The old
+key stops working at once, so update the worker secret straight after — there is a
+window where writes fail closed until you do.
 
 ### The one trap this closes
 

@@ -4,10 +4,11 @@ import { Modal } from "components/ui/Modal";
 import { Panel } from "components/ui/Panel";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { useMinigameSession } from "lib/portal";
-import { resolveDevAccess } from "../lib/devAccess";
+import { ARCADE_DEVELOPER, resolveDevAccess } from "../lib/devAccess";
 import {
+  bootstrapDevKey,
   fetchMyRewards,
-  markRewardClaimed,
+  claimReward,
   resolvePayoutButtons,
   rewardsWorkerConfigured,
   type RewardRequest,
@@ -20,6 +21,8 @@ import { ArcadeAudioSettings } from "./ArcadeAudioSettings";
 export type ArcadeSettingsPage =
   | "main"
   | "developer"
+  | "developer-self"
+  | "developer-send"
   | "rewards"
   | "preferences";
 
@@ -31,16 +34,73 @@ const ROW_CLASS =
   "cursor-pointer rounded border border-[#7a4b52]/30 bg-white/40 px-2 py-2 text-xs text-[#3e2731] hover:bg-white/70";
 
 /**
+ * Make the panel fill the viewport, on a phone and on a desktop equally.
+ *
+ * Two things are needed and both are fiddly:
+ *
+ *  - `100dvh` rather than `100vh`. On a phone the browser chrome takes part of
+ *  the viewport, and `vh` measures the *largest* possible viewport — so a `100vh`
+ *  panel is taller than what the player can see, and its footer is under the URL
+ *    bar. `dvh` is the viewport as it actually is right now. The `1rem` is the
+ *    `Modal`'s own `p-2`.
+ *  - `[&>div]`, because `Panel` puts `className` on the *outer* wrapper only and
+ *    renders its own inner div. Sizing the outer alone leaves the inner panel at
+ *    its natural height, so nothing actually fills. This forces the direct child to
+ *    `flex-1`, which is the element the content really sits in.
+ *
+ * The flex chain is what makes scrolling work rather than just look right: the
+ * inner panel and the scroll container both need `min-h-0`, or they refuse to
+ * shrink below their content and the overflow escapes the panel.
+ *
+ * `max-w-none` drops the `max-w-sm` the rest of the settings uses. On a desktop a
+ * phone-width column in the middle of the screen wastes the space the dev tools
+ * need — the audit trail in particular is a scrolling list of records.
+ */
+const FILL_VIEWPORT =
+  "flex h-[calc(100dvh-1rem)] w-full max-w-none flex-col [&>div]:flex [&>div]:min-h-0 [&>div]:flex-1";
+
+/** The panel as every non-dev page has always looked: narrow, content-height. */
+const COMPACT_PANEL = "w-full max-w-sm";
+
+/**
+ * One developer entry, with the hammer icon.
+ *
+ * Extracted so the two developer rows cannot drift apart in styling — they used to
+ * be a single `Developer` row whose class string was written out inline, and
+ * adding a second one is exactly when that duplication starts.
+ */
+const DevEntry: React.FC<{ label: string; onClick: () => void }> = ({
+  label,
+  onClick,
+}) => (
+  <button
+    type="button"
+    className="flex w-full cursor-pointer items-center gap-2 rounded border border-[#7a4b52]/40 bg-white/60 px-2 py-2 text-left text-xs text-black hover:bg-white/80"
+    onClick={onClick}
+  >
+    <img alt="" src={SUNNYSIDE.icons.hammer} style={{ width: 18, height: 18 }} />
+    {label}
+  </button>
+);
+
+/**
  * The arcade's settings panel: one entry point in the HUD column, three sub-pages.
  *
  * Audio is always present — both of its toggles are purely local settings and
  * need no server. Rewards only appears when a worker is configured (below).
  *
- * ## The developer page is unreached, not merely hidden
+ * ## The developer pages are unreached, not merely hidden
  *
- * A Dev Key holder gets a `developer` row. Nobody else does, so there is no row to
- * click and no state to forge — the page is not rendered, and the component that
- * renders it is never mounted.
+ * A Dev Key holder gets one `Dev` row, and behind it a menu of `Self` and `Send`.
+ * Nobody else gets the row, so there is no row to click and no state to forge —
+ * the pages are not rendered, and the components that render them are never
+ * mounted.
+ *
+ * `Self` holds the Play Ticket mint, which only ever affects the owner's own farm.
+ * `Send` holds the reward queue, which moves value out to a player. Separate pages
+ * because they are different audiences with different consequences, and because
+ * stacking both tools plus an outstanding list plus a claimed list on one screen
+ * crowded it badly enough that the audit trail was unreadable.
  *
  * That is a UI gate, and this file says so plainly. It is not the real one. The
  * real gate is two-sided and both halves are server-side:
@@ -66,7 +126,7 @@ export const ArcadeSettingsPanel: React.FC<{
   onNavigate: (page: ArcadeSettingsPage) => void;
   onClose: () => void;
 }> = ({ page, onNavigate, onClose }) => {
-  const { jwt, actions, playerEconomy, economyMeta, dispatchAction, apiError } =
+  const { jwt, farmId, actions, playerEconomy, economyMeta, dispatchAction, apiError } =
     useMinigameSession();
 
   const rewardsEnabled = rewardsWorkerConfigured();
@@ -101,6 +161,51 @@ export const ArcadeSettingsPanel: React.FC<{
   const [rewardsError, setRewardsError] = useState<string | null>(null);
   const [claimingId, setClaimingId] = useState<string | null>(null);
 
+  // --- Dev Key restore state ----------------------------------------------
+  const [restoringKey, setRestoringKey] = useState(false);
+  const [restoreMessage, setRestoreMessage] = useState<{
+    tone: "good" | "bad";
+    text: string;
+  } | null>(null);
+
+  /**
+   * Whether to offer the Dev Key restore.
+   *
+   * Shown only to the arcade owner's own farm, and only when they hold no key —
+   * which is the situation where every dev tool is otherwise unreachable. A player
+   * with a key has nothing to restore, and a player who is not the owner has
+   * nothing to restore it into.
+   *
+   * The farm number is compared as a string rather than a number. `farmId` is `0`
+   * until the session resolves it, and `String(0)` is `"0"`, which does not match —
+   * so an unresolved session simply shows nothing rather than offering the action.
+   *
+   * This is a convenience only. The worker re-checks the same farm, the same
+   * "no key held" and the same "no key exists anywhere" independently, and refuses
+   * anything this got wrong.
+   */
+  const canRestoreDevKey =
+    rewardsEnabled && !isDev && String(farmId ?? 0) === String(ARCADE_DEVELOPER.farmId);
+
+  const restoreDevKey = async () => {
+    if (!jwt || restoringKey) return;
+    setRestoringKey(true);
+    setRestoreMessage(null);
+
+    const result = await bootstrapDevKey(jwt);
+    if (!result.ok) {
+      setRestoreMessage({ tone: "bad", text: result.error });
+      setRestoringKey(false);
+      return;
+    }
+
+    setRestoreMessage({
+      tone: "good",
+      text: "Dev Key restored. The Dev tools are in Settings now.",
+    });
+    setRestoringKey(false);
+  };
+
   const loadRewards = useCallback(async () => {
     if (!jwt) return;
     setLoadState("loading");
@@ -123,40 +228,31 @@ export const ArcadeSettingsPanel: React.FC<{
   }, [page, loadRewards]);
 
   /**
-   * Claim a reward: press the button, then tell the worker it is spent.
+   * Claim a reward.
    *
-   * The order matters, and only this way round. The button is what changes the
-   * player's balance, so a failure there means the reward was **not** received —
-   * ticking the worker off first would lose it. Ticking afterwards is only
-   * bookkeeping, and a failure there is harmless: the row stays, and the next
-   * press is refused by the button's own `requireAbsent`, which is the
-   * authoritative "already claimed" answer rather than anything this file decides.
+   * One call, and it does everything: the worker checks the grant belongs to this
+   * farm, checks it has not been taken, records the claim, and runs the published
+   * reward button itself. The client names only the grant.
+   *
+   * This used to press the button here and then tell the worker afterwards, which
+   * meant this file chose which action to press — and the marker item's
+   * `requireAbsent` was the only thing making that once-only. The worker's ledger
+   * is that gate now, so "already claimed" is its answer and not one this file
+   * decides.
    */
   const claim = async (reward: RewardRequest) => {
     if (!jwt || claimingId) return;
     setClaimingId(reward.id);
+    setRewardsError(null);
 
-    const result = dispatchAction({
-      action: reward.actionId,
-      optimistic: false,
-    });
+    const result = await claimReward(jwt, reward.id);
     if (!result.ok) {
       setRewardsError(result.error);
       setClaimingId(null);
       return;
     }
 
-    const ticked = await markRewardClaimed(jwt, reward.id);
-    if (!ticked.ok) {
-      setRewardsError(
-        `${ticked.error} The reward was granted, so reload and it will be gone from your list.`,
-      );
-      setClaimingId(null);
-      return;
-    }
-
     setRewards((previous) => previous.filter((entry) => entry.id !== reward.id));
-    setRewardsError(null);
     setClaimingId(null);
   };
 
@@ -215,10 +311,39 @@ export const ArcadeSettingsPanel: React.FC<{
     </div>
   );
 
+  // Only the developer pages fill the screen.
+  //
+  // Everything else keeps the compact panel the player is used to: Audio, the
+  // rewards refresh, and the main menu are small, phone-shaped sheets, and a
+  // full-bleed desktop panel around three buttons looks broken. The dev tools are
+  // the ones that carry lists and form fields, so those are what needed the room.
+  const isDevPage =
+    page === "developer" ||
+    page === "developer-self" ||
+    page === "developer-send";
+
   return (
     <Modal show onHide={onClose}>
-      <Panel className="w-full max-w-sm">
-        <div className="p-2 text-[#3e2731]">
+      <Panel className={isDevPage ? FILL_VIEWPORT : COMPACT_PANEL}>
+        <div
+          className={
+            isDevPage
+              ? // One scroll container for the whole panel, rather than one per
+                // page, so the header stays put and the content scrolls under it.
+                // `min-h-0` is what lets it shrink instead of pushing the panel
+                // past the screen.
+                "flex min-h-0 flex-col p-2 text-[#3e2731]"
+              : "p-2 text-[#3e2731]"
+          }
+        >
+          {/* The scroll wrapper only applies on the dev pages; on the compact
+              ones it is an unstyled pass-through, which keeps the JSX balanced
+              without giving the small pages a scroller they cannot use. */}
+          <div
+            className={
+              isDevPage ? "min-h-0 flex-1 overflow-y-auto" : undefined
+            }
+          >
           {page === "main" ? (
             <>
               <div className="mb-2 text-sm font-bold">Settings</div>
@@ -242,28 +367,66 @@ export const ArcadeSettingsPanel: React.FC<{
                 ) : null}
 
                 {isDev ? (
-                  <button
-                    type="button"
-                    className="flex w-full cursor-pointer items-center gap-2 rounded border border-[#7a4b52]/40 bg-white/60 px-2 py-2 text-left text-xs text-black hover:bg-white/80"
-                    onClick={() => onNavigate("developer")}
-                  >
-                    <img
-                      alt=""
-                      src={SUNNYSIDE.icons.hammer}
-                      style={{ width: 18, height: 18 }}
-                    />
-                    Developer
-                  </button>
+                  <DevEntry label="Dev" onClick={() => onNavigate("developer")} />
                 ) : null}
               </div>
             </>
           ) : null}
 
+          {/*
+            The Dev menu: one door into the owner's tools, two behind it.
+
+            `Self` is what the owner does to their own farm (mint tickets). `Send`
+            is what they do to somebody else's (queue a reward, and read what is
+            outstanding and claimed). They are separate because they are different
+            audiences with different consequences — one only ever affects you, the
+            other moves value to a player — and because stacking both tools plus an
+            outstanding list plus a claimed list on one screen crowded it badly
+            enough that the audit trail was unreadable.
+          */}
           {page === "developer" && isDev ? (
             <>
-              {pageHeader("Developer")}
-              <div className="max-h-[26rem] space-y-3 overflow-y-auto">
+              {pageHeader("Dev")}
+              <div className="space-y-2">
+                <button
+                  type="button"
+                  className={`w-full text-left ${ROW_CLASS}`}
+                  onClick={() => onNavigate("developer-self")}
+                >
+                  Self
+                </button>
+                <button
+                  type="button"
+                  className={`w-full text-left ${ROW_CLASS}`}
+                  onClick={() => onNavigate("developer-send")}
+                >
+                  Send
+                </button>
+              </div>
+            </>
+          ) : null}
+
+          {page === "developer-self" && isDev ? (
+            <>
+              {pageHeader("Self")}
+              {/*
+                No `max-h` here: the panel itself now fills the viewport and the
+                wrapper above scrolls, so an inner cap would only shrink the tool
+                on a tall screen and leave a gap below it on a short one.
+              */}
+              <div className="space-y-3">
                 <NightshadeArcadeDevMint />
+                {apiError ? (
+                  <p className="text-xs text-red-800">{apiError}</p>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+
+          {page === "developer-send" && isDev ? (
+            <>
+              {pageHeader("Send")}
+              <div className="space-y-3">
                 <NightshadeArcadeDevRewards payoutButtons={payoutButtons} />
                 {apiError ? (
                   <p className="text-xs text-red-800">{apiError}</p>
@@ -287,7 +450,45 @@ export const ArcadeSettingsPanel: React.FC<{
                   </div>
                 </>
               ) : rewards.length === 0 ? (
-                <p className="text-xs">Nothing waiting for you right now.</p>
+                <p className="text-xs">
+                  Nothing waiting for you right now.
+                  {/*
+                    The restore lives here because this is the one page reachable
+                    without a Dev Key — every other dev tool is behind one. Putting it
+                    anywhere else would mean a farm with no key could not reach it.
+                  */}
+                  {canRestoreDevKey ? (
+                    <span className="mt-3 block rounded border border-[#7a4b52]/40 bg-white/50 p-2 text-left">
+                      <span className="block text-xs font-semibold text-black">
+                        Developer key missing?
+                      </span>
+                      <span className="mt-1 block text-[11px] leading-relaxed text-black">
+                        After an economy reset this farm holds no Dev Key, which puts
+                        the Dev tools out of reach. This restores it — once, and only
+                        while no Dev Key exists anywhere in the economy.
+                      </span>
+                      {restoreMessage ? (
+                        <span
+                          className={`mt-2 block text-[11px] ${
+                            restoreMessage.tone === "good"
+                              ? "text-green-800"
+                              : "text-red-800"
+                          }`}
+                        >
+                          {restoreMessage.text}
+                        </span>
+                      ) : null}
+                      <span className="mt-2 block">
+                        <Button
+                          disabled={restoringKey}
+                          onClick={() => void restoreDevKey()}
+                        >
+                          {restoringKey ? "Restoring…" : "Restore Dev Key"}
+                        </Button>
+                      </span>
+                    </span>
+                  ) : null}
+                </p>
               ) : (
                 <div className="max-h-[22rem] space-y-2 overflow-y-auto">
                   {rewards.map((reward) => (
@@ -331,6 +532,7 @@ export const ArcadeSettingsPanel: React.FC<{
               <ArcadeAudioSettings />
             </>
           ) : null}
+          </div>
         </div>
       </Panel>
     </Modal>

@@ -89,6 +89,10 @@ export class NightshadeArcadeScene extends ArcadeTiledScene {
 
     // Make Raven clickable to open shop
     ravenNpc.setInteractive({ cursor: "pointer" }).on("pointerdown", () => {
+      // Clicking the shopkeeper is not clicking a chest, so the streak ends
+      // here too — see `lib/chestStreak.ts`.
+      nightshadeArcadeEvents.emitNonChestClick();
+
       if (this.checkDistanceToSprite(ravenNpc as any, 50)) {
         nightshadeArcadeEvents.emitOpenShop();
       }
@@ -97,7 +101,9 @@ export class NightshadeArcadeScene extends ArcadeTiledScene {
     // RavenCoin icon display
     this.add.image(60, 103.5, "ravenCoinIcon").setScale(1);
 
-    // Handle clickable daily chests from the Tiled map
+    // The entryway chests. A click on either one advances the single streak they
+    // share; see `lib/chestStreak.ts`. These zones are the *only* interactive
+    // objects that do not emit `emitNonChestClick` first.
     const objectLayer = this.map.getObjectLayer("Collision");
 
     if (objectLayer) {

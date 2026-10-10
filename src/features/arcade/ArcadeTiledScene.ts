@@ -5,6 +5,7 @@ import { isTouchDevice } from "features/world/lib/device";
 import { translate } from "lib/i18n/translate";
 import { ArcadeBaseScene } from "./ArcadeBaseScene";
 import { getGameIdForMachine } from "./data/machineMap";
+import { nightshadeArcadeEvents } from "./lib/nightshadeArcadeEvents";
 import {
   minigamesEventEmitter,
   type MinigameType,
@@ -133,18 +134,25 @@ export abstract class ArcadeTiledScene extends ArcadeBaseScene {
       interactablesPolygons.forEach((polygon) => {
         const name = (polygon as any).name;
 
-        // Only make machines and special objects interactive
-        if (
-          name?.includes("Machine") ||
-          name === "daily chest" ||
-          name?.includes("prize desk")
-        ) {
+        // Only machines and prize desks. The entryway chests are deliberately
+        // **not** in this list: `NightshadeArcadeScene` registers its own zones
+        // over the same Tiled objects, and a second hit area here would both
+        // swallow the chest's own click and fire `emitNonChestClick` on it —
+        // resetting the streak on every single chest click (see
+        // `lib/chestStreak.ts`). Only the ground-floor map has chests, and that
+        // scene already handles them.
+        if (name?.includes("Machine") || name?.includes("prize desk")) {
           polygon
             .setInteractive({ cursor: "pointer" })
             .on("pointerdown", (p: Phaser.Input.Pointer) => {
               if (this.joystick?.pointer) return;
 
               if (p.downElement.nodeName === "CANVAS") {
+                // Everything in this layer is a machine or a prize desk, so
+                // reaching here is by definition a click that is not on a chest
+                // — which is what ends the chest streak.
+                nightshadeArcadeEvents.emitNonChestClick();
+
                 const distance = Phaser.Math.Distance.BetweenPoints(
                   this.currentPlayer as any,
                   polygon as Phaser.GameObjects.Polygon,

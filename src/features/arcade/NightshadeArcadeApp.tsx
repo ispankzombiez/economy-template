@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Modal } from "components/ui/Modal";
 import { getGameEntry, GAME_REGISTRY } from "./games/registry";
 import { NightshadeArcadePhaser } from "./NightshadeArcadePhaser";
@@ -9,9 +9,18 @@ import { MmoRoomProvider, useMmoBumpkinJoin } from "lib/mmo";
 import { submitScore } from "lib/portal/api";
 import { getMinigamesApiUrl } from "lib/portal/url";
 import { getNightshadeArcadeSpawn } from "./lib/spawns";
+import { chestStreak } from "./lib/chestStreak";
 import {
+  chestTallyConfigured,
+  fetchChestTally,
+  recordChestTicket,
+  type ChestTally,
+} from "./lib/chestApi";
+import {
+  classifyChestClaimRefusal,
   PLAY_TICKET_DAILY_CLAIM_ACTION,
   resolveActionAmounts,
+  resolveChestClickTrackerKey,
   resolvePlayTicketTokenKey,
   resolveRavenCoinMintAction,
   resolveRavenCoinTokenKey,
@@ -22,6 +31,7 @@ import type { RewardWinMeta } from "./games/adapters/portal";
 import { NightshadeArcadeHud } from "./components/NightshadeArcadeHud";
 import { NightshadeArcadeNotice } from "./components/NightshadeArcadeNotice";
 import type { ArcadeNotice } from "./components/NightshadeArcadeNotice";
+import { ArcadeChestLeaderboard } from "./components/ArcadeChestLeaderboard";
 import {
   ArcadeSettingsPanel,
   type ArcadeSettingsPage,
@@ -38,6 +48,36 @@ import { useArcadeMusic } from "./lib/useArcadeMusic";
  */
 const NIGHTSHADE_ARCADE_SCENE_ID = "nightshade-arcade";
 
+/**
+ * The chest's own copy. Quoted rather than paraphrased anywhere else, because
+ * the whole feature turns on the tone: the player is told to keep it quiet, and
+ * then — once the supply runs out — told, in the same breath, that people did
+ * not listen. {@link ArcadeNotice} titles are ours; the bodies are the owner's.
+ */
+const CHEST_REWARD_NOTICE: ArcadeNotice = {
+  title: "50 in a row",
+  body: "Congrats your dedication paid off! Who knew if you just randomly clicked @#$% you would get something out of it. Don't tell your friends about this, or you'll regret it!",
+  tone: "good",
+};
+
+const CHEST_SPENT_NOTICE: ArcadeNotice = {
+  title: "The chests are empty",
+  body: "Told you not to tell your friends about it, guess some people don't listen",
+  tone: "bad",
+};
+
+const CHEST_ALREADY_CLAIMED_NOTICE: ArcadeNotice = {
+  title: "Chest already emptied",
+  body: "You've claimed today's Play Ticket. Come back tomorrow, or top up with FLOWER from the Sunflower Land menu.",
+  tone: "bad",
+};
+
+const CHEST_UNAVAILABLE_NOTICE: ArcadeNotice = {
+  title: "Nothing inside",
+  body: "Today's Play Ticket isn't available right now. Please try again later.",
+  tone: "bad",
+};
+
 export const NightshadeArcadeApp: React.FC = () => {
   const {
     jwt,
@@ -48,8 +88,8 @@ export const NightshadeArcadeApp: React.FC = () => {
     farmId,
     playerData,
   } = useMinigameSession();
-  // Session first, Community API as a fallback: `farm.vip.expiresAt` is the only
-  // signal. See `lib/portal/vip.ts` and `lib/portal/communityVip.ts`.
+  // The session's own VIP answer: `farm.vip.isVip`, as the economies API resolves
+  // it. See `lib/portal/vip.ts`.
   const isVip = useVipAccess();
   const [tokenBalance, setTokenBalance] = useState(0);
   const [activeGameId, setActiveGameId] = useState<string | null>(null);
@@ -190,8 +230,16 @@ export const NightshadeArcadeApp: React.FC = () => {
       // The rule mints a fixed amount (1) per call, so a larger payout is N
       // calls. Every game currently reports `*_RAVEN_COIN_REWARD = 1`, so this
       // is a single call in practice.
+      //
+      // `meta.verify` rides along only on the **first** call: it is proof of one
+      // run, and resending it would ask the worker to certify the same run
+      // twice — the second of which rightly fails its nonce and rolls back.
       for (let i = 0; i < tokens; i++) {
-        dispatchAction({ action: mintAction, amounts });
+        dispatchAction({
+          action: mintAction,
+          amounts,
+          ...(i === 0 && meta?.verify ? { verify: meta.verify } : {}),
+        });
       }
     }
 
@@ -232,68 +280,187 @@ export const NightshadeArcadeApp: React.FC = () => {
   }, []);
 
   /**
-   * The entryway chests: **one** Play Ticket per player per day.
+   * How much of the chests' global supply is left, and who has taken the most.
    *
-   * Both chests dispatch the same published action, whose `cooldownSeconds:
-   * 86400` is what makes the pair a single daily allowance rather than two — the
-   * second chest of the day is refused by the server, and the player is told so
-   * instead of getting a silent nothing. (Its `dailyCap: 1` is belt-and-braces:
-   * that cap counts against `dailyMinted`, which held no `Claim-Play-Ticket`
-   * entry on a day the chest had already paid out, so the cooldown in
-   * `rules[<actionId>].ranAt` is the rule that actually holds.)
-   * Nothing here decides whether the player *may* have the ticket; the rule
-   * engine does, which is why the popup reports the server's verdict rather
-   * than a guess.
+   * Read once on entry so a player who arrives after the pot is empty is told on
+   * their first click rather than after fifty of them, and re-read after a
+   * payout so the tally stays current for whoever arrives next.
+   *
+   * Advisory, like everything in `lib/chestApi.ts`. The authoritative answer is
+   * the economy's refusal, which {@link claimChestTicket} still honours — so if
+   * this is stale in either direction the worst case is the wrong one of the two
+   * messages, never a free ticket.
+   */
+  const [chestTally, setChestTally] = useState<ChestTally | null>(null);
+
+  /**
+   * Latched once the pot is known to be empty, and deliberately its own boolean
+   * rather than a read of `chestTally.exhausted`.
+   *
+   * The server's refusal is the authority, and it arrives with no tally attached
+   * — in a build with no worker, or on the fetch that failed. Deriving the flag
+   * from the tally instead would mean re-discovering the empty pot by clicking
+   * fifty more times, every single time.
+   */
+  const [chestExhausted, setChestExhausted] = useState(false);
+
+  const refreshChestTally = useCallback(() => {
+    // No worker in this build: the chests keep working, they just never show a
+    // leaderboard. That is the safe degradation — `chestApi` failing is
+    // cosmetic, unlike the mint it would be reporting on.
+    if (!jwt || !chestTallyConfigured()) return;
+
+    void fetchChestTally(jwt).then((result) => {
+      if (result.ok) setChestTally(result.value);
+    });
+  }, [jwt]);
+
+  useEffect(() => {
+    refreshChestTally();
+  }, [refreshChestTally]);
+
+  useEffect(() => {
+    if (chestTally?.exhausted) setChestExhausted(true);
+  }, [chestTally?.exhausted]);
+
+  /**
+   * The entryway chests: **50 clicks in a row**, then one Play Ticket, once a
+   * day — until the arcade has handed out all 10 000 of them.
+   *
+   * Three things are going on and they are worth keeping apart:
+   *
+   *  1. **The streak** (`lib/chestStreak.ts`) is local, in memory, and gone on
+   *     refresh. It decides *whether* to ask for a ticket; it never decides
+   *     whether one is owed.
+   *  2. **The ticket** comes from `Claim-Play-Ticket`, whose `cooldownSeconds:
+   *     86400` is what makes the two chests one daily allowance rather than two.
+   *     The local rule engine enforces that cooldown from
+   *     `rules[<actionId>].ranAt`, so the second attempt of the day is refused
+   *     synchronously and the player is told so instead of getting a silent
+   *     nothing.
+   *  3. **The cap** is not here either. The action mints one
+   *     `chest_click_tracker` alongside the ticket, and that item's global
+   *     `supply` is what runs out — server-side, atomic with the mint. This
+   *     file only reacts to that refusal and to the worker's advisory tally.
    *
    * FLOWER purchases stay published on the host page as a top-up for a player who
-   * has already claimed today, so the refusal points at them.
+   * has already claimed today, so the cooldown refusal points at them.
    */
-  useEffect(() => {
-    const claimDailyPlayTicket = () => {
-      if (!actions?.[PLAY_TICKET_DAILY_CLAIM_ACTION]) {
-        setNotice({
-          title: "Nothing inside",
-          body: "Today's Play Ticket isn't available right now. Please try again later.",
-          tone: "bad",
-        });
+  const claimChestTicket = useCallback(() => {
+    if (!actions?.[PLAY_TICKET_DAILY_CLAIM_ACTION]) {
+      setNotice(CHEST_UNAVAILABLE_NOTICE);
+      return;
+    }
+
+    const ticketKey = resolvePlayTicketTokenKey({
+      economyMeta,
+      items: playerEconomy?.items,
+      balances: playerEconomy?.balances,
+    });
+    const trackerKey = resolveChestClickTrackerKey({
+      economyMeta,
+      items: playerEconomy?.items,
+      balances: playerEconomy?.balances,
+    });
+
+    // The action mints two tokens, and a *ranged* mint needs an explicit amount
+    // per token or the server answers `400 Missing or invalid mint amount`. The
+    // tracker is published fixed, so in practice only the ticket contributes —
+    // but resolving both means a fork that ranges the tracker does not silently
+    // fail to mint it.
+    const amounts = [ticketKey, trackerKey]
+      .filter((key): key is string => Boolean(key))
+      .map((tokenKey) =>
+        resolveActionAmounts({
+          actions,
+          actionId: PLAY_TICKET_DAILY_CLAIM_ACTION,
+          tokenKey,
+          amount: 1,
+        }),
+      )
+      .reduce<Record<string, number>>(
+        (merged, part) => Object.assign(merged, part),
+        {},
+      );
+
+    const result = dispatchAction({
+      action: PLAY_TICKET_DAILY_CLAIM_ACTION,
+      amounts: Object.keys(amounts).length ? amounts : undefined,
+    });
+
+    if (!result.ok) {
+      const refusal = classifyChestClaimRefusal(result.error);
+
+      // The pot is the server's to say, and this is it saying no. From here the
+      // chests stop being a streak and become a message.
+      if (refusal === "supply") {
+        setChestExhausted(true);
+        setNotice(CHEST_SPENT_NOTICE);
+        void refreshChestTally();
         return;
       }
 
-      const ticketKey = resolvePlayTicketTokenKey({
-        economyMeta,
-        items: playerEconomy?.items,
-        balances: playerEconomy?.balances,
-      });
-      const result = dispatchAction({
-        action: PLAY_TICKET_DAILY_CLAIM_ACTION,
-        amounts: resolveActionAmounts({
-          actions,
-          actionId: PLAY_TICKET_DAILY_CLAIM_ACTION,
-          tokenKey: ticketKey,
-          amount: 1,
-        }),
-      });
-
       setNotice(
-        result.ok
-          ? {
-              title: "You found a Play Ticket!",
-              body: "It's been added to your inventory. Spend it on any machine for one reward run.",
-              tone: "good",
-            }
-          : {
-              title: "Chest already emptied",
-              body: "You've claimed today's Play Ticket. Come back tomorrow, or top up with FLOWER from the Sunflower Land menu.",
-              tone: "bad",
-            },
+        refusal === "cooldown"
+          ? CHEST_ALREADY_CLAIMED_NOTICE
+          : CHEST_UNAVAILABLE_NOTICE,
       );
+      return;
+    }
+
+    setNotice(CHEST_REWARD_NOTICE);
+
+    // Report the payout to the worker's tally. Fire-and-forget on purpose: the
+    // ticket is already minted and nothing the player won depends on this, so a
+    // failure here costs a row on a leaderboard that is not shown until the pot
+    // is empty anyway. See `lib/chestApi.ts`.
+    if (jwt && chestTallyConfigured()) {
+      void recordChestTicket(jwt).then((recorded) => {
+        if (recorded.ok) refreshChestTally();
+      });
+    }
+  }, [
+    actions,
+    dispatchAction,
+    economyMeta,
+    jwt,
+    playerEconomy,
+    refreshChestTally,
+  ]);
+
+  useEffect(() => {
+    const onChestClick = () => {
+      // The notice is modal, but Phaser is still live underneath it. A click
+      // that lands on a chest *behind* the popup would otherwise swap one
+      // message for another mid-read — or fire a second claim while the player
+      // is still reading the result of the first. OK is the only way out of the
+      // dialog; the world waits for it.
+      if (notice) return;
+
+      // Once the supply is gone there is no streak to build, so the chests say so
+      // on the very next click rather than making the player earn the news.
+      if (chestExhausted) {
+        setNotice(CHEST_SPENT_NOTICE);
+        return;
+      }
+
+      if (chestStreak.click()) {
+        void claimChestTicket();
+      }
     };
 
-    nightshadeArcadeEvents.registerChestClickHandler(claimDailyPlayTicket);
+    // Anything that is not a chest ends the run. This is the scene telling us a
+    // click landed on a machine, a prize desk or Raven — see `chestStreak.ts`.
+    const onNonChestClick = () => chestStreak.miss();
+
+    nightshadeArcadeEvents.registerChestClickHandler(onChestClick);
+    nightshadeArcadeEvents.registerNonChestClickHandler(onNonChestClick);
+
     return () => {
       nightshadeArcadeEvents.registerChestClickHandler(null);
+      nightshadeArcadeEvents.registerNonChestClickHandler(null);
     };
-  }, [actions, dispatchAction, economyMeta, playerEconomy]);
+  }, [chestExhausted, claimChestTicket, notice]);
 
   const isGameOpen = Boolean(activeEntry && ActiveGameComponent);
 
@@ -342,8 +509,17 @@ export const NightshadeArcadeApp: React.FC = () => {
           It used to double as the home of the dev mint, which meant a developer
           opening a chest to check the daily ticket also got a mint form in the
           same dialog. The developer tools live under Settings → Developer now,
-          behind the Dev Key. */}
-      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)} />
+          behind the Dev Key. The one thing that still rides along is the chest
+          leaderboard, and only for the "the pots are empty" message it belongs
+          to — read-only, no second action, same question. */}
+      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)}>
+        {chestExhausted && notice === CHEST_SPENT_NOTICE && chestTally ? (
+          <ArcadeChestLeaderboard
+            entries={chestTally.entries}
+            you={chestTally.you}
+          />
+        ) : null}
+      </NightshadeArcadeNotice>
 
       {settingsPage ? (
         <ArcadeSettingsPanel

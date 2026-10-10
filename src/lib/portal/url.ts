@@ -196,6 +196,25 @@ export function getMinigamesApiUrl(): string | undefined {
   return undefined;
 }
 
+/**
+ * The arcade's own Worker — the only process that may write to this economy.
+ *
+ * Build-time `CONFIG.REWARDS_WORKER_URL` (`VITE_REWARDS_WORKER_URL`), trailing
+ * slash removed.
+ *
+ * This is not optional while the economy's "Require secret API key" toggle is on:
+ * the browser is refused `401 MISSING_PRIVATE_KEY` by the economies API, so every
+ * write has to come through here. It stays a getter rather than a constant so an
+ * unset variable is one clear error at the call site instead of a silent
+ * fall-through to a direct `POST /action` that cannot work.
+ */
+export function getEconomyWorkerUrl(): string | undefined {
+  const raw = CONFIG.REWARDS_WORKER_URL;
+  if (typeof raw !== "string") return undefined;
+  const trimmed = raw.trim().replace(/\/+$/, "");
+  return trimmed === "" ? undefined : trimmed;
+}
+
 /** Bumpkin raster sprites CDN (`/animate/...`, `animated_webp/...`). */
 export const ANIMATIONS_CDN_ORIGIN = "https://animations.sunflower-land.com";
 

@@ -19,6 +19,9 @@
           "min": 1,
           "max": 1,
           "dailyCap": 1
+        },
+        "25": {
+          "amount": 1
         }
       },
       "showInShop": false,
@@ -175,6 +178,18 @@
       "cooldownSeconds": 86400,
       "type": "custom"
     },
+    "Grant-Free-Run-SunflowerBrawler": {
+      "mint": {
+        "24": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "cooldownSeconds": 86400,
+      "type": "custom"
+    },
     "Grant-Free-Run-Tetris": {
       "mint": {
         "11": {
@@ -309,6 +324,17 @@
       "showInShop": false,
       "type": "custom"
     },
+    "Mint-Raven-Coin-SunflowerBrawler": {
+      "mint": {
+        "0": {
+          "min": 1,
+          "max": 1,
+          "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
     "Mint-Raven-Coin-Tetris": {
       "mint": {
         "0": {
@@ -326,6 +352,78 @@
           "min": 1,
           "max": 1,
           "dailyCap": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-BetaKey-1": {
+      "mint": {
+        "17": {
+          "amount": 1
+        },
+        "23": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-PlayTicket-1": {
+      "mint": {
+        "2": {
+          "amount": 1
+        },
+        "21": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-PlayTicket-3": {
+      "mint": {
+        "2": {
+          "amount": 3
+        },
+        "22": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-10": {
+      "mint": {
+        "0": {
+          "amount": 10
+        },
+        "18": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-50": {
+      "mint": {
+        "0": {
+          "amount": 50
+        },
+        "19": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
+    "Payout-RavenCoin-100": {
+      "mint": {
+        "0": {
+          "amount": 100
+        },
+        "20": {
+          "amount": 1
         }
       },
       "showInShop": false,
@@ -471,6 +569,20 @@
       "showInShop": false,
       "type": "custom"
     },
+    "Start-Free-Run-SunflowerBrawler": {
+      "burn": {
+        "24": {
+          "amount": 1
+        }
+      },
+      "mint": {
+        "3": {
+          "amount": 1
+        }
+      },
+      "showInShop": false,
+      "type": "custom"
+    },
     "Start-Free-Run-Tetris": {
       "burn": {
         "11": {
@@ -518,102 +630,6 @@
         "3": {
           "min": 1,
           "max": 1000
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-RavenCoin-10": {
-      "requireAbsent": ["18"],
-      "requireBelow": {
-        "18": 1
-      },
-      "mint": {
-        "0": {
-          "amount": 10
-        },
-        "18": {
-          "amount": 1
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-RavenCoin-50": {
-      "requireAbsent": ["19"],
-      "requireBelow": {
-        "19": 1
-      },
-      "mint": {
-        "0": {
-          "amount": 50
-        },
-        "19": {
-          "amount": 1
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-RavenCoin-100": {
-      "requireAbsent": ["20"],
-      "requireBelow": {
-        "20": 1
-      },
-      "mint": {
-        "0": {
-          "amount": 100
-        },
-        "20": {
-          "amount": 1
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-PlayTicket-1": {
-      "requireAbsent": ["21"],
-      "requireBelow": {
-        "21": 1
-      },
-      "mint": {
-        "2": {
-          "amount": 1
-        },
-        "21": {
-          "amount": 1
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-PlayTicket-3": {
-      "requireAbsent": ["22"],
-      "requireBelow": {
-        "22": 1
-      },
-      "mint": {
-        "2": {
-          "amount": 3
-        },
-        "22": {
-          "amount": 1
-        }
-      },
-      "showInShop": false,
-      "type": "custom"
-    },
-    "Payout-BetaKey-1": {
-      "requireAbsent": ["23"],
-      "requireBelow": {
-        "23": 1
-      },
-      "mint": {
-        "17": {
-          "amount": 1
-        },
-        "23": {
-          "amount": 1
         }
       },
       "showInShop": false,
@@ -744,8 +760,8 @@
       "name": "Nightshade Arcade Beta Key",
       "description": "A mark of early access to the Nightshade Arcade.",
       "id": 17,
-      "tradeable": false,
-      "max": 1
+      "max": 1,
+      "supply": 5
     },
     "18": {
       "name": "Payout Marker RC-10",
@@ -788,6 +804,20 @@
       "id": 23,
       "is_visible": false,
       "max": 1
+    },
+    "24": {
+      "name": "Free Run Token - SunflowerBrawler",
+      "description": "Internal arcade bookkeeping. Not a collectable.",
+      "id": 24,
+      "is_visible": false,
+      "max": 1
+    },
+    "25": {
+      "name": "chest_click_tracker",
+      "description": "Internal arcade bookkeeping. Draws down the entryway chests' global ticket supply.",
+      "id": 25,
+      "is_visible": false,
+      "supply": 10000
     }
   },
   "purchases": {

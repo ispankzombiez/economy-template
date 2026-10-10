@@ -1,0 +1,21 @@
+{
+  "name": "@nightshade/shared",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pure game-logic shared verbatim by the Vite client and the Cloudflare Worker. For anti-cheat, client and server MUST run the identical implementation — a separate copy would let them silently disagree about a roll or a rule, which is exactly the gap a cheater exploits.",
+  "exports": {
+    "./rng": {
+      "types": "./anticheat/rng.d.ts",
+      "default": "./anticheat/rng.js"
+    },
+    "./verify": {
+      "types": "./anticheat/verify.d.ts",
+      "default": "./anticheat/verify.js"
+    },
+    "./inputLog": {
+      "types": "./anticheat/inputLog.d.ts",
+      "default": "./anticheat/inputLog.js"
+    }
+  }
+}

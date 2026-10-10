@@ -21,6 +21,8 @@ import { useIsNarrowLayout } from "components/ui/useMediaQuery";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
+import type { VerifiedRun } from "lib/portal/api";
+import { encodeInputLog, inputMask } from "@nightshade/shared/anticheat/inputLog";
 import { NPCIcon } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
 import { SUNNYSIDE } from "example-assets/sunnyside";
@@ -69,6 +71,37 @@ import {
 } from "./session";
 
 const _portalState = (state: PortalMachineState) => state.context.state;
+
+/**
+ * One milestone of a run, as the verifier reads it.
+ *
+ * Captured when a wave is **cleared** — the moment the engine has finished
+ * scoring that wave (kills, the wave-clear bonus, and at wave 15 the finale
+ * bonus, all applied before `finishWave` returns) but before the next fight
+ * begins. That ordering is what makes `score` meaningful: each entry is the
+ * highest score reachable at that point, so the worker can compare it against
+ * the ceiling it computes from the same wave table.
+ *
+ * `wave` counts **waves cleared**, not the wave being fought — `hud.wave`
+ * reports `waveIndex + 1`, which is one ahead of what has been completed, and
+ * using it would make every checkpoint claim look one wave ahead of its score.
+ */
+type RunCheckpoint = {
+  /** Ordinal index, 0-based, contiguous. */
+  seq: number;
+  /** Waves cleared when this checkpoint was taken. */
+  wave: number;
+  /** Cumulative score at this checkpoint. */
+  score: number;
+  /** Player health, 0..maxHp. */
+  hp: number;
+  /** Magic meter, 0..MAGIC_MAX. */
+  magic: number;
+  /** Lives remaining. */
+  lives: number;
+  /** Elapsed run time in ms at this checkpoint. */
+  ms: number;
+};
 
 /**
  * Keys this cabinet owns.
@@ -407,6 +440,53 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   const hudVersionRef = useRef(0);
   const rewardGrantedRef = useRef(false);
 
+  /**
+   * Anti-cheat: the run's milestone log.
+   *
+   * One entry per wave cleared, captured from the live match the instant
+   * `waveIndex` advances — wave reached, score, health, magic, lives and the
+   * elapsed run time. On claim these go to the worker's `claim-verified`
+   * intent, which re-derives what a legitimate run could have scored at each of
+   * those waves and refuses anything unreachable. See
+   * `shared/anticheat/verify.js` for the exact invariants.
+   *
+   * Kept in a ref rather than state: this is written sixty times a second from
+   * the render loop and must never trigger a React render — only the count
+   * matters, and only at the moment of the claim.
+   */
+  const checkpointsRef = useRef<RunCheckpoint[]>([]);
+  /** `waveIndex` at the last capture, so a wave is logged exactly once. */
+  const loggedWaveRef = useRef(0);
+  /**
+   * The claim, frozen at the instant the finale was cleared.
+   *
+   * The run does not stop there — it goes on into endless, and the loop keeps
+   * running — but the *claim* is over the moment wave 15 falls. Reading the
+   * live array or the live match at payout time would instead describe
+   * something else: waves 16+ appended to a log the verifier rightly refuses as
+   * out of range, or a restarted match whose clock has nothing to do with the
+   * run being claimed. Freezing here means the player is paid for the run they
+   * finished, whether or not they keep playing after it.
+   */
+  const frozenClaimRef = useRef<VerifiedRun | null>(null);
+  /** `worldMs` when the run opened, so the claim can report its duration. */
+  const runStartedAtRef = useRef(0);
+  /**
+   * Per-tick input log for shadow replay (Stage B).
+   *
+   * One byte per simulated tick: bit0 left, bit1 right, bit2 up, bit3 down,
+   * bit4 attack, bit5 magic. Recorded *before* each `stepMatch`, because that
+   * is the input as the simulation is about to consume it — `drain` zeroes the
+   * buffers mid-step, so sampling afterwards would lose the press.
+   *
+   * A full byte per tick rather than the 6 bits it strictly needs: this is ~11 KB
+   * for a three-minute run, and packing would save about 8 KB of that. Not worth
+   * a shift-and-mask routine whose off-by-one would silently desync every replay.
+   */
+  const inputLogRef = useRef<number[]>([]);
+  /** The seed behind `inputLogRef`, so the claim carries what replay must use. */
+  const runSeedRef = useRef(0);
+
   const held = useHeldKeys();
   const isTouchDevice = useIsTouchDevice();
 
@@ -539,14 +619,48 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       input.magicBuf = 0;
       held.releaseAll();
 
+      // Chosen before the match exists so the same value can be stored for the
+      // claim; see the comment on `createMatch` for why it is client-side for
+      // now and what has to change before replay is enforced.
+      const seed = (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
+
       matchRef.current = createMatch({
         playerId,
         difficulty: runDifficulty,
         input,
+        // Per-run seed for the simulation RNG.
+        //
+        // Deliberately chosen *here* rather than inside the engine, so the
+        // engine never reads a clock during a tick — replay has to be a pure
+        // function of (seed, inputs), and a wall-clock read inside the step
+        // loop would make the same inputs replay to a different outcome.
+        //
+        // `Date.now()` supplies variety between runs; the random half stops the
+        // seed being guessable from the clock alone.
+        //
+        // TEMPORARY — this is a **client-chosen** seed. It is reproducible
+        // (which is all Stage A and B need) but it is not *binding*: a client
+        // that picked its own seed could shop for a favourable one. That is
+        // harmless while replay only records a match rate, because a mismatch
+        // changes nothing. It stops being harmless the moment a mismatch
+        // refuses payout (Stage C) — at which point the worker must issue the
+        // seed at run-open and the client must use that instead.
+        seed,
       });
       hudVersionRef.current = 0;
       setHud(readHud(matchRef.current));
       rewardGrantedRef.current = false;
+
+      // A fresh run starts a fresh log. Carrying checkpoints across runs would
+      // let a second attempt inherit the first one's progress, which is exactly
+      // the forgery the verifier exists to reject.
+      checkpointsRef.current = [];
+      loggedWaveRef.current = 0;
+      frozenClaimRef.current = null;
+      // The input log is per-run for the same reason, and for a second one: a
+      // log carried over would be replayed against a match it never drove.
+      inputLogRef.current = [];
+      runSeedRef.current = seed;
 
       ensureSheets([playerSpec.npc], () => FIGHTER_ANIMS);
       // Wave one's enemies are asked for immediately; the intro banner buys
@@ -645,21 +759,124 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
   // ── Loop ───────────────────────────────────────────────────────────────────
 
+  /**
+   * Simulation step, in milliseconds.
+   *
+   * ## Why fixed
+   *
+   * The loop used to hand `stepMatch` whatever the browser reported — 16.67ms
+   * on a healthy frame, 33ms on a stutter, whatever the tab gave it after
+   * being backgrounded. That float sequence is part of the simulation's state:
+   * enemy AI timers, combo windows and hitstop all integrate against it, so two
+   * machines running the same inputs arrive at different scores.
+   *
+   * Certification needs the opposite. The worker re-derives what a run *could*
+   * have scored, and a score that varies with the player's frame rate cannot be
+   * bounded by a single number without either rejecting honest play on a slow
+   * phone or setting the bound so loose it stops catching anything. Stepping in
+   * fixed slices makes the simulation's progress a function of *simulated* time
+   * alone, and `match.worldMs` — the value the checkpoints are stamped with —
+   * advances identically everywhere.
+   *
+   * Real time is accumulated rather than discarded, so a slow machine still
+   * keeps pace with the clock; it just takes more, smaller steps to do it. The
+   * clamp keeps a backgrounded tab from rejoining with a delta large enough to
+   * skip a whole wave in one step.
+   */
+  const FIXED_STEP_MS = 1000 / 60;
+
   useEffect(() => {
     if (!mode) return;
 
     let raf = 0;
     let last = performance.now();
+    let accumulator = 0;
+
+    /**
+     * Log a checkpoint for every wave cleared since the last one, and freeze
+     * the claim the moment the finale falls.
+     *
+     * Runs *after* the steps, against the settled match, so the score recorded
+     * already contains that wave's clear bonus (and, at wave 15, the finale
+     * bonus) — the engine applies both before `finishWave` returns.
+     *
+     * The loop rather than a single comparison because `waveIndex` can advance
+     * more than once across a long catch-up: skipping one would leave a gap in
+     * `seq`, and the verifier refuses a log with a gap in it.
+     *
+     * ## Why it stops at the finale
+     *
+     * Past wave 15 the run is endless and `waveIndex` keeps climbing, but the
+     * claim is already complete — the coin pays on clearing the *finite* run.
+     * Recording further would append waves the verifier rejects as out of
+     * range, so a player who fought well into endless would be refused for
+     * their own diligence. Capture and freeze together, so what is sent is
+     * exactly the fifteen waves the claim is about.
+     */
+    const captureCheckpoints = (match: MatchState) => {
+      if (frozenClaimRef.current) return;
+
+      while (match.waveIndex > loggedWaveRef.current) {
+        loggedWaveRef.current = match.waveIndex;
+        checkpointsRef.current.push({
+          seq: checkpointsRef.current.length,
+          wave: match.waveIndex,
+          score: match.score,
+          hp: match.player.hp,
+          magic: match.magic,
+          lives: match.lives,
+          ms: Math.round(match.worldMs),
+        });
+
+        // The finale is wave `WAVE_COUNT`; clearing it is the win. Freeze the
+        // whole claim here, in the same breath as the log that just completed,
+        // so the score, the log and the duration are all read from one settled
+        // state of the match rather than from a later frame.
+        if (match.waveIndex >= WAVE_TOTAL) {
+          frozenClaimRef.current = {
+            cabinet: "sunflower-brawler",
+            score: match.score,
+            checkpoints: checkpointsRef.current.slice(),
+            elapsedMs: Math.round(match.worldMs),
+            // Frozen with the rest of the claim, from the same settled state.
+            // The log keeps growing while the run continues into endless, but
+            // only the ticks that produced *this* claim belong to it — replaying
+            // further would ask the worker to reproduce waves nobody is claiming.
+            replay: {
+              seed: runSeedRef.current,
+              ticks: inputLogRef.current.length,
+              inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
+            },
+          };
+        }
+      }
+    };
 
     const tick = (now: number) => {
       raf = requestAnimationFrame(tick);
-      const dt = now - last;
+      const real = now - last;
       last = now;
 
       const match = matchRef.current;
       if (!match) return;
 
-      stepMatch(match, dt);
+      accumulator += Math.min(real, 250);
+      while (accumulator >= FIXED_STEP_MS) {
+        // Before the step, not after: `stepMatch` drains the attack and magic
+        // buffers, so sampling the input post-step would log the press as
+        // already spent and the replay would never see it.
+        //
+        // Stopped once the claim has frozen. The run goes on into endless, and
+        // nothing past the finale belongs to the claim — keeping a log of it
+        // would be a steadily growing buffer that no replay will ever read.
+        if (!frozenClaimRef.current) {
+          inputLogRef.current.push(inputMask(match.playerInput));
+        }
+        stepMatch(match, FIXED_STEP_MS);
+        accumulator -= FIXED_STEP_MS;
+      }
+
+      captureCheckpoints(match);
 
       const ctx = canvasRef.current?.getContext("2d");
       if (ctx) {
@@ -729,9 +946,27 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     }
 
     rewardGrantedRef.current = true;
+
+    // The coin is paid on proof, not on assertion. `frozenClaimRef` holds the
+    // run's milestone log, score and duration, captured and closed the instant
+    // the finale fell — before endless could append waves the verifier would
+    // reject as out of range, and before a restart could swap the match out
+    // from under it.
+    //
+    // Absent means the finale was reached without the log completing, which
+    // cannot happen while the loop is running. It is still checked, because
+    // claiming with an empty log would burn the voucher for nothing — and the
+    // voucher is the player's ticket, not ours to spend.
+    const claim = frozenClaimRef.current;
+    if (!claim) {
+      rewardGrantedRef.current = false;
+      return;
+    }
+
     portalService.send({
       type: "arcadeMinigame.ravenCoinWon",
       amount: SUNFLOWER_BRAWLER_RAVEN_COIN_REWARD,
+      verify: claim,
     });
   }, [hud, mode, portalService]);
 

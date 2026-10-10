@@ -40,7 +40,13 @@
  * nothing, because no rule requires it yet — so the window in which a key could
  * be grabbed by anyone else closes at the same instant the key starts to
  * matter. Verified: `Grant-Dev-Key` now answers
- * `400 Unknown action "Grant-Dev-Key"`, so the key can never be minted again.
+ * `400 Unknown action "Grant-Dev-Key"`.
+ *
+ * The one exception is `Bootstrap-Dev-Key`, a published action the worker calls
+ * from `POST /dev-key/bootstrap` to recover after an economy wipe. It is gated on
+ * the verified farm id, the caller holding no key, and no key circulating, and it
+ * leans on the item's `supply: 1` as the backstop. See the worker's
+ * `bootstrapDevKey` for the full argument.
  *
  * The key is `tradeable: false`, and the mint does not burn it, so the owner
  * keeps it indefinitely and mints as often as they like.

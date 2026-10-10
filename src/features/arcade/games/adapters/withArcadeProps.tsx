@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ComponentType } from "react";
 import type { Equipped } from "features/game/types/bumpkin";
-import { useVipAccess, useVipResolved, useMinigameSession } from "lib/portal";
+import { useVipAccess, useMinigameSession } from "lib/portal";
 import type { ArcadeGameProps } from "../../types";
 import type { GameState } from "./gameTypes";
 import { ArcadePortalProvider } from "./portal";
@@ -65,12 +65,10 @@ export function withArcadeProps(
       dispatchAction,
     } = useMinigameSession();
 
-    // VIP comes from the SFL farm's `vip.expiresAt`: the player economies session
-    // first, then the Community API as a fallback. A session-less boot stays VIP
-    // so a dev session can still exercise the per-cabinet reward path.
+    // VIP comes from the SFL farm's own record, as the economies session reports
+    // it (`farm.vip.isVip`). A session-less boot stays VIP so a dev session can
+    // still exercise the per-cabinet reward path.
     const isVip = useVipAccess();
-    // Whether that answer has settled, which the free-run grant waits for.
-    const vipResolved = useVipResolved();
 
     // Same source the arcade HUD shows, so the "has enough FLOWER" gate and
     // the number on screen can never disagree.
@@ -195,11 +193,6 @@ export function withArcadeProps(
     useEffect(() => {
       if (grantAttemptedRef.current) return;
       if (!jwt) return;
-      // Wait for VIP to settle. The token minted here is chosen by `isVip` — an
-      // arcade-wide one for a non-VIP, per-cabinet for a VIP — so granting while
-      // the answer is still pending hands out the wrong allowance and, because the
-      // grant carries a 24h cooldown, locks it in for the rest of the day.
-      if (!vipResolved) return;
       const entitlement = resolveFreeRunEntitlement({
         actions,
         economyMeta,
@@ -229,12 +222,21 @@ export function withArcadeProps(
         }),
         optimistic: false,
       });
-      // `vipResolved` is in the deps on purpose. The guard above is a ref, not a
-      // dep, so this effect re-runs freely — on VIP settling, on a session
-      // landing — while still dispatching at most once. Pinning the deps to `[]`
-      // looked tidier and was a real bug: the effect ran once while VIP was
-      // unresolved, returned early, and never ran again, so no token was ever
-      // granted and every machine demanded a Play Ticket.
+      // `isVip` is in the deps on purpose. The guard above is a ref, not a dep,
+      // so this effect re-runs freely — on a session landing, on the economy
+      // changing — while still dispatching at most once. Pinning the deps to
+      // `[]` looked tidier and was a real bug: the effect ran once before the
+      // session arrived, returned early, and never ran again, so no token was
+      // ever granted and every machine demanded a Play Ticket.
+      //
+      // A `vipResolved` guard sat alongside it until VIP moved onto the session.
+      // It existed because the token minted above is chosen by `isVip` —
+      // arcade-wide for a non-VIP, per-cabinet for a VIP — so granting against a
+      // pending answer handed out the wrong allowance and, because the grant
+      // carries a 24h cooldown, locked it in for the rest of the day. VIP is now
+      // a field on the session rather than a second network read, so it is
+      // settled from the first render and can no longer be pending. See
+      // `useVipAccess` in `lib/portal/vip.ts`.
     }, [
       jwt,
       actions,
@@ -243,7 +245,6 @@ export function withArcadeProps(
       isVip,
       minigame,
       playerEconomy,
-      vipResolved,
     ]);
 
     /**
@@ -319,6 +320,11 @@ export function withArcadeProps(
 
       return dispatchAction({
         action: openAction,
+        // The cabinet this free run is being played on. A VIP's open action
+        // already names it, but the arcade-wide one does not — it is a single
+        // allowance covering every machine — so the worker needs it said here to
+        // know which cabinet's rules the eventual claim must satisfy.
+        cabinet: minigame,
         amounts: resolveActionAmounts({
           actions,
           actionId: openAction,
@@ -361,6 +367,12 @@ export function withArcadeProps(
 
       return dispatchAction({
         action: TICKET_RUN_START_ACTION,
+        // The cabinet the ticket is being spent on. The worker fixes this to the
+        // farm when the run opens, and every later claim on the run is checked
+        // against it — which is what stops a verified cabinet's win from being
+        // paid through the trusting route by naming a machine that has not
+        // adopted verification.
+        cabinet: minigame,
         amounts: resolveActionAmounts({
           actions,
           actionId: TICKET_RUN_START_ACTION,
@@ -368,7 +380,7 @@ export function withArcadeProps(
           amount: 1,
         }),
       });
-    }, [actions, dispatchAction, economyMeta, playerEconomy]);
+    }, [actions, dispatchAction, economyMeta, minigame, playerEconomy]);
 
     return (
       <ArcadePortalProvider

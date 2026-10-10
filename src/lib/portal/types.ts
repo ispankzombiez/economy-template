@@ -70,14 +70,26 @@ export type MinigameSessionResponse = {
     /** When the economies API includes it, forwarded to MMO join as `username`. */
     username?: string;
     /**
-     * The farm's VIP block, when the session projection carries it.
+     * The farm's main-game VIP status, as the economies API resolves it.
      *
-     * Optional on purpose: the projection is server-side and currently ships
-     * `{ balance, bumpkin, username, faction }`. `resolveVipAccess` treats its
-     * absence as "cannot answer" and falls back rather than failing, so adding
-     * the field needs no coordinated release - see `vip.ts`.
+     * Optional on purpose, and doubly so: every field inside is omitted for a
+     * player who is not VIP, and an `economies-api` predating the block omits
+     * `vip` altogether. `resolveVipAccess` reads a missing block as non-VIP
+     * rather than failing, so adding or removing the field needs no coordinated
+     * release - see `vip.ts`.
      */
     vip?: {
+      /**
+       * The server's own answer, covering paid VIP, an active trial and the
+       * Lifetime Farmer Banner. Preferred over anything derived from the
+       * timestamp below.
+       */
+      isVip?: boolean;
+      /**
+       * Which of those three `isVip` covers: `paid`, `trial` or `lifetime`.
+       * Omitted when the player is not VIP.
+       */
+      type?: "paid" | "trial" | "lifetime";
       /** Millisecond timestamp; VIP while it is in the future. */
       expiresAt?: number;
       bundles?: unknown[];

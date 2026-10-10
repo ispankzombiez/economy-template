@@ -17,6 +17,100 @@ When changing **Phaser visuals**, read **`ART.md`** and keep gameplay art mapped
 - **Working title:** _[your game name]_
 - **One-line pitch:** _[what the player does in one sentence]_
 
+## The entryway chests (`lib/chestStreak.ts`, `NightshadeArcadeApp.tsx`)
+
+The two chests by the arcade door. **Fifty clicks in a row** on either of them
+pays one Play Ticket, once a day — and the arcade has ten thousand of those
+tickets to give away, to everyone, ever. Then the chests are empty and they say
+so.
+
+This is deliberately the one undocumented thing in the arcade. Nobody is told the
+chests pay, nobody is told there is a cap, and the player who works it out is
+told to keep it to themselves. That is the joke, and the reward message is half
+of it.
+
+| Rule | Value |
+|------|-------|
+| Clicks to pay out | **50**, on either chest — they share one streak |
+| Ends a streak | Clicking anything else (machine, prize desk, Raven) |
+| Ends a streak | A gap of **10 s** or more between chest clicks |
+| Ends a streak | Anything at all: a refresh starts everyone at zero |
+| Pays | **1 Play Ticket**, then the streak resets and can be rebuilt |
+| Fastest possible payout | **~8 minutes** — 49 gaps × the 10 s limit, so the streak cannot be rushed |
+| Daily limit | **1** per player, `cooldownSeconds: 86400` on `Claim-Play-Ticket` |
+| Global limit | **10 000** tickets, arcade-wide, forever — the `supply` on `chest_click_tracker` |
+| When spent | "Told you not to tell your friends about it, guess some people don't listen" + the leaderboard |
+
+### The count is never shown
+
+No progress bar, no tick sound, no floating number, no counter on the chest. The
+player gets one popup at fifty and silence otherwise, which is the only version of
+this that feels like the accident it is meant to be — a visible meter turns it
+into a chore. `chestStreak` lives in a module and nowhere else, so a refresh is
+also a reset for free.
+
+### Three limits, and none of them is in the browser
+
+The streak, the daily allowance and the global cap are enforced by three
+different things, and keeping them apart is most of the design:
+
+1. **The streak** — local, in memory, and therefore **honest about what it is**.
+   The player owns the runtime and could skip it entirely; skipping it only means
+   asking the server for a ticket they have not earned the click-streak for, and
+   the server is happy to oblige, because it does not know about click streaks.
+   The streak is the *invitation*, not the gate.
+2. **Once a day** — `Claim-Play-Ticket`'s `cooldownSeconds: 86400`, enforced by
+   the rule engine from `rules[<actionId>].ranAt`. Both chests dispatch the same
+   action, which is what makes the pair one daily allowance rather than two.
+3. **The 10 000** — the `supply` on a hidden item called `chest_click_tracker`,
+   which the same action mints alongside the ticket. This is the one that
+   matters, and it is worth being explicit about why it is an item:
+
+   A cap the client checks is not a cap. The player can delete the check, and a
+   global counter is not something a browser can even hold honestly. Published
+   against a global `supply`, the limit is decremented by Sunflower Land's own
+   server **inside the same action that hands over the ticket** — atomic, so
+   there is no window in which somebody holds a ticket the pot never paid for,
+   and unreachable by editing the game. Nothing in this repository can make that
+   limit go away, which is exactly why the cap lives there.
+
+   `chest_click_tracker` has no `max`, so a player's own balance is simply "how
+   many chest tickets I have ever won", and it accumulates rather than pinning at
+   1. That is deliberate: a per-player cap of 1 would make the second day's claim
+   fail for a reason that looks exactly like an exhausted global pot.
+
+### The leaderboard is bookkeeping, not a ledger
+
+The economy can express a global cap. It cannot express *a ranking* — there is no
+published top-ten and no per-player global figure to read. So the reward-request
+worker (`worker/`) keeps the tally: the game reports each payout after the mint
+succeeds, and reads the board back to display it once the pot is empty.
+
+That makes every number on it **advisory**. A player who closes the tab between
+winning and reporting is under-counted; so is anyone who never reports, including
+a cheater — who gains nothing by it, because the ticket was already minted and
+this worker cannot mint. `get`-then-`put` in KV is not atomic and KV is
+eventually consistent, so a burst of reports can lose a count or two.
+
+Losing a count is the only failure the design can produce. It cannot hand out a
+ticket the economy did not mint, which is the only direction that matters. The
+worker also mirrors the cap in `CHEST_TICKET_CAP` so the chests can speak *first*
+rather than waiting for a refusal — but the server's answer always wins.
+
+### The arithmetic, stated plainly
+
+One ticket per player per day means the pot drains at **one ticket per distinct
+player who completes the streak**, not per streak. At 10 000 that is 10 000
+players' worth of clicking — roughly fifty days at 200 players a day, or two
+years at fourteen. If the pot is meant to run out inside a launch, raise the cap
+or drop the daily cooldown; both are single values (`supply` on the item,
+`cooldownSeconds` on the action).
+
+**Publishing checklist:** the `chest_click_tracker` item (`is_visible: false`,
+`supply: 10000`) and the second mint inside `Claim-Play-Ticket`. Without the item
+the chest still pays, but the cap never engages and the leaderboard never appears.
+Both are in `nightshade-arcade-editor-sample.json`.
+
 ## Raven Bubbles (`src/features/arcade/games/ravenbubbles/`)
 
 The eleventh cabinet, on `Machine 11` — the first cabinet the original arcade

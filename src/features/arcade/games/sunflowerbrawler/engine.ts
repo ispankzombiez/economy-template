@@ -50,6 +50,36 @@ import {
   type Pickup,
 } from "./pickups";
 import type { SunflowerBrawlerDifficulty } from "./session";
+import {
+  advanceRng,
+  makeRngState,
+  type RngState,
+} from "@nightshade/shared/anticheat/rng";
+
+/**
+ * Advance the simulation's RNG.
+ *
+ * Every random decision the *simulation* makes goes through this rather than
+ * `Math.random()`, for two reasons that amount to the same requirement:
+ *
+ *  1. **Reproducibility.** A run can only be certified after the fact if the
+ *     server can re-simulate it and get the same AI rolls, drop rolls and
+ *     spawn counts. `Math.random()` is not seedable, so a server replay would
+ *     diverge on the first random branch and every check after it is noise.
+ *
+ *  2. **Stream isolation.** `renderMatch` still calls `Math.random()` for
+ *     screen shake, deliberately. If rendering drew from the same stream the
+ *     simulation would consume a *frame-rate-dependent* number of values
+ *     between two `stepMatch` calls, and the same inputs would replay to a
+ *     different outcome depending on the display's refresh rate. Keeping the
+ *     two streams separate is what makes "same inputs, same result" hold on a
+ *     60 Hz phone and a 144 Hz monitor alike.
+ *
+ * The state lives on the `MatchState` as a plain `{ a }` object rather than in
+ * a closure so it survives `JSON.stringify` at a verification chunk boundary —
+ * see `advanceRng` in `shared/anticheat/rng.js`.
+ */
+const rngNext = (match: MatchState): number => advanceRng(match.rng);
 
 /**
  * The run: a state machine over waves, and a frame of physics under it.
@@ -526,6 +556,27 @@ export type MatchState = {
   /** Highest 1-based wave reached, for the game-over panel. */
   bestWave: number;
   difficulty: SunflowerBrawlerDifficulty;
+  /**
+   * Seed this run's simulation RNG was created from.
+   *
+   * Kept alongside the live state rather than being discarded after seeding,
+   * because a verifier replaying from scratch needs to rebuild the stream from
+   * nothing, while one resuming at a chunk boundary needs `rng` as it currently
+   * stands. Two different restart points, one stored seed.
+   */
+  rngSeed: number;
+  /**
+   * Live simulation-RNG state — a single integer, as a plain object.
+   *
+   * Plain rather than a closure for a reason: a chunked verifier parks the
+   * world in D1 between requests, and a closed-over counter would come back
+   * `undefined` from `JSON.parse`, silently restarting the stream part-way
+   * through a run.
+   *
+   * Render-only randomness (screen shake) deliberately does **not** live here —
+   * see `rngNext`.
+   */
+  rng: RngState;
   playerInput: PlayerInput;
   nextId: number;
   /** Meter gained per point of damage the player deals. */
@@ -733,13 +784,13 @@ const makeEnemy = (
     enemyId: spec.id,
     isRoam,
     ai: {
-      timer: 90 + Math.random() * 200,
+      timer: 90 + rngNext(match) * 200,
       dx: entering,
       dz: 0,
       // Staggered so a wave's specials do not all come off cooldown on the
       // same tick, which would look like a synchronised attack rather than a
       // crowd.
-      specialCooldown: 400 + Math.random() * 900,
+      specialCooldown: 400 + rngNext(match) * 900,
     },
   };
 };
@@ -749,12 +800,29 @@ export const createMatch = ({
   playerId,
   difficulty,
   input,
+  seed,
 }: {
   playerId: FighterId;
   difficulty: SunflowerBrawlerDifficulty;
   input: PlayerInput;
+  /**
+   * Seed for the simulation RNG — **required** so that no caller can start a run
+   * without deciding where its randomness comes from. That provenance is the
+   * whole anti-cheat: a seed the client invents is reproducible but not binding
+   * (a cheater picks a favourable one), so once replay is enforced this must
+   * arrive from the server at run-open instead of being generated locally.
+   * Until then the game component supplies a per-run seed of its own, which
+   * preserves run-to-run variety while the determinism work lands.
+   *
+   * Coerced to uint32, so a caller may pass any number.
+   */
+  seed: number;
 }): MatchState => {
   const spec = getFighter(playerId);
+  // Coerced once here rather than at each use, so `rngSeed` and the live state
+  // are guaranteed to describe the same stream — a mismatch would let a
+  // verifier rebuild from the seed and diverge immediately.
+  const rngSeed = seed >>> 0;
 
   return {
     phase: "intro",
@@ -795,6 +863,8 @@ export const createMatch = ({
     reachedFinale: false,
     bestWave: 1,
     difficulty,
+    rngSeed,
+    rng: makeRngState(rngSeed),
     playerInput: input,
     nextId: 1,
     magicPerDamage: spec.magicPerDamage,
@@ -885,7 +955,7 @@ const applyHit = (
   // Thrown *away* from the attacker's own line, so a connected hit scatters
   // the crowd rather than sliding it sideways along one depth.
   const delta = victim.z - attacker.z;
-  const zDir = delta === 0 ? (Math.random() < 0.5 ? -1 : 1) : sign(delta);
+  const zDir = delta === 0 ? (rngNext(match) < 0.5 ? -1 : 1) : sign(delta);
   victim.knockZ = zDir * move.knockZ;
 
   syncAnim(victim);
@@ -930,12 +1000,16 @@ const maybeDrop = (match: MatchState, victim: ActorRT): void => {
   if (!victim.enemyId) return;
 
   const spec = getEnemySpec(victim.enemyId);
-  if (Math.random() >= spec.dropChance) return;
+  if (rngNext(match) >= spec.dropChance) return;
 
   const kind = rollPickup({
     hpPct: match.player.hp / match.player.maxHp,
     magicPct: match.magic / MAGIC_MAX,
-    random: Math.random,
+    // Thunked rather than passed as a value: `rollPickup` calls this 0+ times
+    // depending on the branch it takes, and drawing from the match's stream at
+    // call time keeps the roll in the same sequence the server replays. Passing
+    // a snapshot would both diverge and — worse — hand it the render stream.
+    random: () => rngNext(match),
   });
   if (!kind) return;
 
@@ -943,7 +1017,7 @@ const maybeDrop = (match: MatchState, victim: ActorRT): void => {
     kind,
     x: victim.x,
     z: clamp(victim.z, 12, Z_MAX - 12),
-    bobPhase: Math.random() * 1100,
+    bobPhase: rngNext(match) * 1100,
   });
 };
 
@@ -1121,18 +1195,42 @@ const stepAdvance = (a: ActorRT, match: MatchState, dt: number): void => {
   clampActor(a, match);
 };
 
+/**
+ * Knockback decay for one tick — `exp(-6 * dt)`, precomputed.
+ *
+ * `dt` is not free to vary: `stepMatch` clamps its argument and this file's only
+ * caller passes `FIXED_STEP_MS` (1000/60) unconditionally, so `dt` is always
+ * 1/60 of a second and the exponent is always exactly `-0.1`. The value below
+ * is therefore not an approximation of the old expression — it is the same
+ * double, since `-6 * dt === -0.1` exactly and `Math.exp(-0.1)` yields
+ * `0.9048374180359595` on V8.
+ *
+ * Written as a literal rather than left as `Math.exp(-6 * dt)` for
+ * portability: `Math.exp` is specified only as an "implementation-dependent
+ * approximation", so two engines may disagree in the last bit. A knockback
+ * factor differing by ~1e-16 is invisible to a player but is a divergence to a
+ * verifier, which would see positions drift apart over thousands of ticks. A
+ * decimal literal, by contrast, is required to parse to the correctly rounded
+ * double, so every engine and the server load the identical value.
+ *
+ * **If `FIXED_STEP_MS` ever changes, this constant must be recomputed.** The
+ * determinism harness asserts it against `Math.exp(-6 * (1000/60) / 1000)` so
+ * the drift is caught by the tests rather than by a mysterious replay failure.
+ */
+const KNOCK_DECAY_PER_TICK = 0.9048374180359595;
+
 const stepPhysics = (a: ActorRT, match: MatchState, dt: number): void => {
   // Knockback bleeds off exponentially: a shove that stops dead reads as a
   // teleport, and one that decays linearly reads as ice.
   if (a.knockV !== 0) {
     a.x += a.knockV * dt;
-    a.knockV *= Math.exp(-6 * dt);
+    a.knockV *= KNOCK_DECAY_PER_TICK;
     if (Math.abs(a.knockV) < 4) a.knockV = 0;
   }
 
   if (a.knockZ !== 0) {
     a.z += a.knockZ * dt;
-    a.knockZ *= Math.exp(-6 * dt);
+    a.knockZ *= KNOCK_DECAY_PER_TICK;
     if (Math.abs(a.knockZ) < 4) a.knockZ = 0;
   }
 
@@ -1150,7 +1248,11 @@ const stepPhysics = (a: ActorRT, match: MatchState, dt: number): void => {
  * wall you cannot walk around. If the `z` push would land either actor against
  * the edge of the plane it falls back to `x`, so nobody is ever trapped.
  */
-const separatePair = (a: ActorRT, b: ActorRT): void => {
+const separatePair = (
+  match: MatchState,
+  a: ActorRT,
+  b: ActorRT,
+): void => {
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const sepX = a.rx + b.rx;
@@ -1160,7 +1262,7 @@ const separatePair = (a: ActorRT, b: ActorRT): void => {
   if (penX <= 0 || penZ <= 0) return;
 
   if (penZ / sepZ < penX / sepX) {
-    const dir = dz === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dz);
+    const dir = dz === 0 ? (rngNext(match) < 0.5 ? -1 : 1) : Math.sign(dz);
     const half = penZ / 2;
     const az = clamp(a.z - dir * half, 0, Z_MAX);
     const bz = clamp(b.z + dir * half, 0, Z_MAX);
@@ -1172,7 +1274,7 @@ const separatePair = (a: ActorRT, b: ActorRT): void => {
     // Clamped against the edge of the plane — push along `x` instead.
   }
 
-  const dir = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
+  const dir = dx === 0 ? (rngNext(match) < 0.5 ? -1 : 1) : Math.sign(dx);
   const half = penX / 2;
   a.x -= dir * half;
   b.x += dir * half;
@@ -1183,7 +1285,7 @@ const separateAll = (match: MatchState): void => {
 
   for (const enemy of match.enemies) {
     if (!isLive(enemy)) continue;
-    separatePair(player, enemy);
+    separatePair(match, player, enemy);
   }
 
   for (let i = 0; i < match.enemies.length; i++) {
@@ -1192,7 +1294,7 @@ const separateAll = (match: MatchState): void => {
     for (let j = i + 1; j < match.enemies.length; j++) {
       const b = match.enemies[j];
       if (!isLive(b)) continue;
-      separatePair(a, b);
+      separatePair(match, a, b);
     }
   }
 
@@ -1226,7 +1328,15 @@ const stepPlayer = (match: MatchState, dt: number): void => {
 
   const dx = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const dz = (input.down ? 1 : 0) - (input.up ? 1 : 0);
-  const length = Math.hypot(dx, dz);
+  // `sqrt` rather than `hypot`, deliberately. Both axes are booleans coerced to
+  // 0/1, so the only possible inputs are (0,0), (±1,0), (0,±1) and (±1,±1) —
+  // giving 0, 1 or √2. `Math.sqrt` is required by IEEE-754 and the JS spec to
+  // be correctly rounded, so it returns the identical double everywhere;
+  // `Math.hypot` is specified only as an "implementation-dependent
+  // approximation", and a verifier that re-simulates this run on a different
+  // engine would get a last-bit difference here that compounds over thousands
+  // of ticks into a divergence.
+  const length = Math.sqrt(dx * dx + dz * dz);
 
   player.moving = length > 0;
   if (length > 0) {
@@ -1333,11 +1443,11 @@ const stepEnemyAi = (match: MatchState, enemy: ActorRT, dtMs: number): void => {
       inBand &&
       onLine &&
       countSwinging(match) < diff.maxAttackers &&
-      Math.random() < diff.aggression
+      rngNext(match) < diff.aggression
     ) {
       startMove(enemy, "special");
       ai.specialCooldown = cooldownMs ?? 4000;
-      ai.timer = diff.reactionMs * (0.7 + Math.random() * 0.6);
+      ai.timer = diff.reactionMs * (0.7 + rngNext(match) * 0.6);
       return;
     }
   }
@@ -1346,21 +1456,21 @@ const stepEnemyAi = (match: MatchState, enemy: ActorRT, dtMs: number): void => {
   if (isLive(player) && adx <= jab.reach && adz <= zReach) {
     if (
       countSwinging(match) < diff.maxAttackers &&
-      Math.random() < diff.aggression
+      rngNext(match) < diff.aggression
     ) {
       const heavy = enemy.moves.heavy;
-      const pick = heavy && Math.random() < diff.heavyChance ? "heavy" : "jab";
+      const pick = heavy && rngNext(match) < diff.heavyChance ? "heavy" : "jab";
       startMove(enemy, pick);
-      ai.timer = diff.reactionMs * (0.7 + Math.random() * 0.6);
+      ai.timer = diff.reactionMs * (0.7 + rngNext(match) * 0.6);
       return;
     }
   }
 
   // 3. Just finished a swing: sometimes give ground rather than press on.
-  if (enemy.postSwing > 0 && Math.random() < diff.spacingChance) {
+  if (enemy.postSwing > 0 && rngNext(match) < diff.spacingChance) {
     ai.dx = dx >= 0 ? -1 : 1;
     ai.dz = adz > 6 ? (dz >= 0 ? -1 : 1) : 0;
-    ai.timer = diff.reactionMs * (0.8 + Math.random() * 0.7);
+    ai.timer = diff.reactionMs * (0.8 + rngNext(match) * 0.7);
     return;
   }
 
@@ -1375,7 +1485,7 @@ const stepEnemyAi = (match: MatchState, enemy: ActorRT, dtMs: number): void => {
     ai.dx = inReach ? 0 : dx > 0 ? 1 : -1;
   }
 
-  ai.timer = diff.reactionMs * (0.65 + Math.random() * 0.7);
+  ai.timer = diff.reactionMs * (0.65 + rngNext(match) * 0.7);
 };
 
 const stepEnemy = (match: MatchState, enemy: ActorRT, dtMs: number): void => {
@@ -1387,7 +1497,11 @@ const stepEnemy = (match: MatchState, enemy: ActorRT, dtMs: number): void => {
     return;
   }
 
-  const length = Math.hypot(ai.dx, ai.dz);
+  // See `stepPlayer` for why this is `sqrt` rather than `hypot`: every
+  // assignment to `ai.dx`/`ai.dz` in the AI above is a literal of -1, 0 or 1,
+  // so the same three outcomes apply and only `sqrt` is guaranteed identical
+  // across engines.
+  const length = Math.sqrt(ai.dx * ai.dx + ai.dz * ai.dz);
   if (length > 0) {
     // Wave escalation rides on top of the difficulty band, so a wave is harder
     // than the setting says it should be. See `waveSpeedMultiplier`.
@@ -1451,7 +1565,8 @@ const startRoam = (match: MatchState): void => {
   const pool = roamPool(match.waveIndex);
   if (pool.length === 0) return;
 
-  const count = ROAM_MIN + Math.floor(Math.random() * (ROAM_MAX - ROAM_MIN + 1));
+  const count =
+    ROAM_MIN + Math.floor(rngNext(match) * (ROAM_MAX - ROAM_MIN + 1));
   const player = match.player;
 
   for (let i = 0; i < count; i++) {
@@ -1735,10 +1850,10 @@ const respawn = (match: MatchState): void => {
     const dz = enemy.z - player.z;
     if (Math.abs(dx) > 420 || Math.abs(dz) > 150) continue;
     enemy.knockV =
-      (dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx)) *
+      (dx === 0 ? (rngNext(match) < 0.5 ? -1 : 1) : Math.sign(dx)) *
       RESPAWN_SHOVE;
     enemy.knockZ =
-      (dz === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dz)) * 360;
+      (dz === 0 ? (rngNext(match) < 0.5 ? -1 : 1) : Math.sign(dz)) * 360;
   }
 
   // Back to whatever was happening, rather than straight to `fighting`.

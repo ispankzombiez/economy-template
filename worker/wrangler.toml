@@ -11,13 +11,58 @@ main = "src/index.js"
 compatibility_date = "2026-10-01"
 
 # ------------------------------------------------------------------
+# Asset loaders
+# ------------------------------------------------------------------
+# The replay verifier imports the game engine, which lives beside art the
+# server never draws. Wrangler bundles with esbuild and ships no loader for
+# these, so without this the worker does not build at all.
+#
+# `Data` rather than `Text`: a PNG decoded as UTF-8 is not reliably a string,
+# and handing back the raw bytes keeps the import a value no matter what the
+# file contains. Nothing on the server ever reads it — only render paths do —
+# so its type is irrelevant; only that the import resolves. (Wrangler 4 spells
+# this `Data`; `DataUrl` is the older form and is rejected outright.)
+#
+# The cost is that the tilesheet rides along as base64 — about 200 KB of a
+# worker whose real work is ~70 KB. Acceptable, because the alternative (a
+# pre-built sim-only bundle checked into the repo) would verify against a
+# *stale* engine whenever someone forgot to rebuild it, and a stale verifier is
+# worse than a heavy one: it fails silently and certifies the wrong thing.
+rules = [
+  { type = "Data", globs = ["**/*.png"], fallthrough = true },
+  { type = "Data", globs = ["**/*.webp"] },
+]
+
+# ------------------------------------------------------------------
 # Storage
 # ------------------------------------------------------------------
 # Paste the "id" that `wrangler kv namespace create REWARDS` prints here.
 # The placeholder below will make the first deploy fail loudly, on purpose.
 [[kv_namespaces]]
 binding = "REWARDS"
-id = "51acbdb2ee5c40b08a6d49a15055a5c1"
+id = "7d7f9d5b651a49bcb1201fa8e35893be"
+
+# ------------------------------------------------------------------
+# Ledger
+# ------------------------------------------------------------------
+# Authoritative record of what each player has been allowed to mint.
+#
+# KV stays for the reward queue and the chest tally, where eventual consistency is
+# fine because a stale read only ever costs a leaderboard row. This one gates
+# money and needs atomicity, so it is D1 (SQLite): a `daily_slots` insert against
+# its primary key is the mutual exclusion that keeps two concurrent claims for the
+# same daily allowance from both succeeding.
+#
+#   npx wrangler d1 create nightshade-arcade       # paste the printed id below
+#   npx wrangler d1 migrations apply LEDGER --remote
+#
+# `binding` must stay `LEDGER` — the worker code refers to `env.LEDGER`, so renaming
+# it is a code change too. `database_name` is only a label and must match what you
+# actually created, or `migrations apply` will not find it.
+[[d1_databases]]
+binding = "LEDGER"
+database_name = "nightshade-arcade"
+database_id = "84c6336f-2b2d-4801-8cc9-f26e792999f6"
 
 # ------------------------------------------------------------------
 # Settings
@@ -35,6 +80,35 @@ API_ENV = "mainnet"
 # The arcade's own origin and the local dev ports are already built in, so you
 # only need this for something like a staging domain.
 # ALLOWED_ORIGINS = "https://example.com"
+
+# ------------------------------------------------------------------
+# Secrets (declared here for reference only — never a value)
+# ------------------------------------------------------------------
+# ECONOMY_PRIVATE_KEY — the economy's "Require secret API key" credential
+# (sk_economy_...). Set it with, NOT by editing this file:
+#
+#     npx wrangler secret put ECONOMY_PRIVATE_KEY
+#
+# and paste the value at the prompt. Cloudflare stores it encrypted and it is not
+# readable back out of this file, which is the point: a secret in a committed
+# toml is a leaked secret. For `wrangler dev` locally, put it in `.dev.vars`
+# (gitignored) instead.
+#
+# With it set, the worker is the only process that can write to the economy — the
+# browser is refused with 401 MISSING_PRIVATE_KEY. Reads (`GET /data?type=session`)
+# still work without it.
+
+# How many Play Tickets the entryway chests hand out, arcade-wide, ever.
+#
+# DISPLAY ONLY. This is a mirror of the `supply` on the `chest_click_tracker` item
+# in the Economy Editor, and it only decides when the chests switch to the
+# "everybody who told their friends" message. The thing that actually stops the
+# mint is that item's supply, decremented by the Sunflower Land server inside the
+# same action that hands over the ticket.
+#
+# Change both together or they will disagree. `POST /chest/reset` (dev only) clears
+# the leaderboard and the count but cannot refill the real supply.
+CHEST_TICKET_CAP = "10000"
 
 # ------------------------------------------------------------------
 # Notes

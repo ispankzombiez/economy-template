@@ -4,7 +4,10 @@ import { useMinigameSession } from "lib/portal";
 import { Modal } from "components/ui/Modal";
 import { Panel } from "components/ui/Panel";
 import ravenCoinIcon from "../assets/RavenCoin.webp";
+import nightshadeTicketIcon from "../assets/nightshade_ticket.webp";
 import {
+  getPlayTicketBalance,
+  resolvePlayTicketTokenKey,
   resolveRavenCoinTokenKey,
   resolveRewardAttemptTokenKey,
 } from "../lib/ravenCoin";
@@ -133,7 +136,10 @@ const formatBalance = (value: number, decimals: number | null): string => {
 const NightshadeArcadeBalances: React.FC<{
   flowers: number;
   ravenCoins: number;
-}> = ({ flowers, ravenCoins }) => {
+  playTickets: number;
+  /** The published Play Ticket art, when the economy publishes one. */
+  playTicketIcon?: string;
+}> = ({ flowers, ravenCoins, playTickets, playTicketIcon }) => {
   // FLOWER carries far more precision than fits on the HUD, so the arcade
   // truncates to 2 decimals and only reveals the exact figure on click, for a
   // few seconds. Truncation rather than rounding: the shown number is never
@@ -164,6 +170,29 @@ const NightshadeArcadeBalances: React.FC<{
         <img
           alt="RavenCoins"
           src={ravenCoinIcon}
+          style={{ width: 25, height: 25 }}
+        />
+
+        {/*
+          Play Tickets sit beside the coins rather than on their own row, because
+          both are arcade currency: what a player is holding, and what they can
+          spend it on. FLOWER keeps its own row below since it is main-game money.
+
+          The count is shown even at zero. A player deciding whether to spend a
+          ticket needs to know they have none; hiding the row would make the
+          absence of a ticket ambiguous with "not loaded yet", and the arcade
+          treats a ticket as the price of an extra run — so "why is this cabinet
+          asking for a ticket" has to have a visible answer.
+        */}
+        <span
+          className="balance-text mt-0.5 ml-1"
+          title={`${formatBalance(playTickets, null)} Play Ticket${playTickets === 1 ? "" : "s"}`}
+        >
+          {formatBalance(playTickets, null)}
+        </span>
+        <img
+          alt="Play Tickets"
+          src={playTicketIcon ?? nightshadeTicketIcon}
           style={{ width: 25, height: 25 }}
         />
       </div>
@@ -207,6 +236,31 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
       readInventoryAmount(ravenCoinToken),
   );
   const totalRavenCoins = Math.max(0, baseRavenCoins + extraRavenCoins);
+
+  /**
+   * Play Tickets, read the same way as the coin.
+   *
+   * `getPlayTicketBalance` is the shared reader, so the HUD cannot drift from what
+   * a cabinet charges: both resolve the token by name and fall back to the same
+   * key. Showing a different number than the one being spent would be the worst
+   * possible bug here.
+   *
+   * The published item art is preferred over the bundled icon so the HUD matches
+   * whatever the owner uploaded in the Economy Editor. It is optional — an economy
+   * that publishes no image falls back to the local ticket, which keeps the row
+   * readable rather than showing a broken image.
+   */
+  const playTicketToken = resolvePlayTicketTokenKey({
+    economyMeta,
+    items: playerEconomy?.items,
+    balances: playerEconomy?.balances,
+  });
+  const playTickets = getPlayTicketBalance({
+    playerEconomy,
+    tokenKey: playTicketToken,
+  });
+  const playTicketIcon = economyMeta?.items?.[playTicketToken]?.image;
+
   const flowers = readAmount(
     playerData.resolvedProfile.balance ?? farm.balance,
   );
@@ -408,6 +462,8 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
           <NightshadeArcadeBalances
             flowers={flowers}
             ravenCoins={totalRavenCoins}
+            playTickets={playTickets}
+            playTicketIcon={playTicketIcon}
           />
         </div>
 

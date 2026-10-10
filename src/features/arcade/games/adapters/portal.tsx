@@ -6,6 +6,7 @@ import React, {
   useRef,
 } from "react";
 import type { GameState, Minigame, MinigameName } from "./gameTypes";
+import type { VerifiedRun } from "lib/portal/api";
 import { isFreeRewardRunAvailableForMinigame } from "../poker/session";
 
 /**
@@ -32,7 +33,17 @@ export type PortalMachineState = {
 export type PortalEvent =
   | { type: "arcadeMinigame.started"; name: MinigameName }
   | { type: "arcadeMinigame.rewardRunConfirmed"; name: MinigameName }
-  | { type: "arcadeMinigame.ravenCoinWon"; amount: number };
+  | {
+      type: "arcadeMinigame.ravenCoinWon";
+      amount: number;
+      /**
+       * Anti-cheat proof for cabinets that certify their runs: the milestone
+       * log, score and duration. Carried to `onWin` and sent with the claim so
+       * the worker can re-derive the run before minting. Absent for cabinets
+       * that have not adopted verification.
+       */
+      verify?: VerifiedRun;
+    };
 
 /** How a reward run is paid for.
  *
@@ -56,6 +67,12 @@ export type RewardWinMeta = {
    * already knows both the run and the player's status.
    */
   isVip?: boolean;
+  /**
+   * Anti-cheat proof, when the cabinet certifies its runs. Present means the
+   * claim must go through `claim-verified` rather than the trusting
+   * `claim-result` — see `VerifiedRun`.
+   */
+  verify?: VerifiedRun;
 };
 
 export type PortalSendResult =
@@ -257,9 +274,10 @@ class ArcadePortalStore implements PortalService {
         const fundedBy = this.runFunding;
         const machine = this.runMachine;
         const isVip = this.isVip;
+        const verify = event.verify;
         this.runFunding = "free";
         this.runMachine = undefined;
-        this.onWin(event.amount ?? 0, { fundedBy, machine, isVip });
+        this.onWin(event.amount ?? 0, { fundedBy, machine, isVip, verify });
         return { ok: true, funding: fundedBy };
       }
     }

@@ -16,6 +16,11 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         "@sl-assets": imagesAssets,
+        // The anti-cheat verifier the Worker also bundles. Aliased to source so
+        // the client and the worker run the *identical* implementation — a
+        // separate copy would let them disagree, which is the exact gap a
+        // cheater exploits.
+        "@nightshade/shared": path.resolve(__dirname, "shared"),
       },
     },
     server: {
