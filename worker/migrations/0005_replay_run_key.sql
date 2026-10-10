@@ -1,0 +1,28 @@
+-- Nightshade Arcade — bind a parked replay to the run that wrote it.
+--
+-- `replay_state` was created with `started_at`, recording when the park
+-- happened. That is the wrong fact. A parked replay is resumed by the *next*
+-- request of the same claim, and what has to be true is that the state belongs
+-- to the run now being claimed — not when it was written.
+--
+-- ## Why the difference matters
+--
+-- A claim that never finishes verifying leaves its replay parked. The next
+-- claim from that farm then arrives, and without a run identity the resume
+-- check can only ask "is there a park, and is its tick count the same?". Two
+-- different runs can easily have the same log length, so that test would
+-- happily resume run A's match state against run B's inputs — a replay that
+-- diverges immediately, and would be recorded as a mismatch against an honest
+-- player.
+--
+-- `run_key` is `active_runs.opened_at`: the moment the run was opened. It is
+-- read, never sent, so a claim cannot choose it — it was written by
+-- `recordActiveRun` in a request made before any claim existed, whose answer no
+-- later request can rewrite. A park resumes only when it names the run now
+-- being claimed; anything stale falls through to a fresh start and is
+-- overwritten.
+--
+-- The rename rather than a second column: `started_at` has no other reader, and
+-- two columns holding near-identical timestamps is exactly the ambiguity this
+-- change exists to remove.
+ALTER TABLE replay_state RENAME COLUMN started_at TO run_key;

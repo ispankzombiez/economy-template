@@ -1,6 +1,13 @@
 import type { MinigameSessionResponse, MinigameActionResponse } from "./types";
 import { PLAYER_ECONOMY_GENERATOR_COLLECTED_ACTION } from "./playerEconomyTypes";
 import { getEconomyWorkerUrl, getMinigamesApiUrl, getUrl } from "./url";
+// The same two numbers the worker replays with. Chosen together there and here
+// because a continuation budget short of the worker's log ceiling would strand
+// a legal submission mid-verification — see `replayBudget.js`.
+import {
+  CHUNK_TICKS,
+  MAX_REPLAY_TICKS,
+} from "@nightshade/shared/anticheat/replayBudget";
 
 export async function getPortalPlayerProfile({
   token,
@@ -138,6 +145,7 @@ export type EconomyWriteIntent =
   | "start-ticket-run"
   | "claim-result"
   | "claim-verified"
+  | "continue-verification"
   | "void-attempt"
   | "claim-play-ticket"
   | "buy-item"
@@ -146,6 +154,23 @@ export type EconomyWriteIntent =
 
 const GRANT_PREFIX = "Grant-Free-Run-";
 const START_FREE_PREFIX = "Start-Free-Run-";
+
+/**
+ * How many continuation requests one replay may send before giving up.
+ *
+ * Derived rather than chosen. The worker steps `CHUNK_TICKS` per request and
+ * accepts logs up to `MAX_REPLAY_TICKS`, so anything short of the ceiling
+ * divided by the chunk strands a legal submission: the client gives up before
+ * the replay finishes, the park is left half-stepped, and the verdict is never
+ * recorded. Both limits are shared constants for exactly this — a hand-typed
+ * 100 against a 64,000-tick ceiling covered only 60,000 of the logs the worker
+ * will accept.
+ *
+ * Stopping early is still the right call when it does happen: a log long enough
+ * to exhaust this is inflated rather than slow, and an inflated log is exactly
+ * what should not be replayed to the end.
+ */
+const MAX_CONTINUATIONS = Math.ceil(MAX_REPLAY_TICKS / CHUNK_TICKS);
 
 /**
  * The intent that means a given published action.
@@ -196,6 +221,7 @@ async function postEconomyWrite({
   cabinet,
   checkpoints,
   elapsedMs,
+  replay,
 }: {
   token: string;
   intent: EconomyWriteIntent;
@@ -208,7 +234,9 @@ async function postEconomyWrite({
   checkpoints?: unknown[];
   /** Only read by `claim-verified`: the run's wall-clock duration in ms. */
   elapsedMs?: number;
-}): Promise<MinigameActionResponse> {
+  /** Only read by `claim-verified`: the run's per-tick input trace. */
+  replay?: VerifiedRun["replay"];
+}): Promise<{ data: MinigameActionResponse; verification?: Record<string, unknown> }> {
   const base = getEconomyWorkerUrl();
   if (!base) {
     throw new Error(
@@ -235,11 +263,17 @@ async function postEconomyWrite({
       ...(cabinet !== undefined ? { cabinet } : {}),
       ...(checkpoints !== undefined ? { checkpoints } : {}),
       ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      ...(replay !== undefined ? { replay } : {}),
     }),
   });
 
   const bodyText = await response.text();
-  let envelope: { data?: MinigameActionResponse; error?: string } = {};
+  let envelope: {
+    data?: MinigameActionResponse;
+    error?: string;
+    /** Present on `claim-verified` and its continuation: the anti-cheat verdict. */
+    verification?: Record<string, unknown>;
+  } = {};
   try {
     envelope = bodyText ? JSON.parse(bodyText) : {};
   } catch {
@@ -258,7 +292,14 @@ async function postEconomyWrite({
     throw new Error("Invalid action response (missing data)");
   }
 
-  return envelope.data;
+  // The envelope rather than `data` alone: `claim-verified` and its
+  // continuation report the anti-cheat verdict beside the data, and the
+  // continuation loop cannot tell "keep going" from "finished" without it.
+  // Callers that only want the data read `.data`.
+  return {
+    data: envelope.data,
+    ...(envelope.verification !== undefined ? { verification: envelope.verification } : {}),
+  };
 }
 
 async function postMinigameEconomyActionRequest(
@@ -358,6 +399,25 @@ export type VerifiedRun = {
   replay?: {
     /** The simulation RNG seed the run was created with. */
     seed: number;
+    /**
+     * Which champion the run was played as.
+     *
+     * Not cosmetic for replay: fighters differ in health and reach, so the
+     * worker cannot reproduce the run without it. Checked against the engine's
+     * own roster, so an unrecognised id fails the replay rather than silently
+     * simulating the wrong fighter.
+     */
+    playerId: string;
+    /**
+     * Which difficulty the run was played on, by registry name.
+     *
+     * The single largest influence on the outcome — it sets enemy reaction
+     * time, aggression, speed and health. Without it a replay would pit the
+     * inputs against a differently-tuned game and disagree with nearly every
+     * honest run, which would make the match rate useless. Read from the same
+     * table the client played on.
+     */
+    difficulty: string;
     /** Number of simulated ticks in the log — must equal `inputs` length. */
     ticks: number;
     /** Per-tick input bitmask, base64. One byte per tick; see `encodeInputLog`. */
@@ -395,12 +455,17 @@ export async function postPlayerEconomyAction(params: {
         `Refusing to send run proof with "${params.action}": only a win claim can be verified.`,
       );
     }
-    return postEconomyWrite({
+    const { data } = await postEconomyWrite({
       token: params.token,
       intent: "claim-verified",
       actionId: params.action,
       ...params.verify,
     });
+    // The verdict is deliberately not returned here. It belongs to the
+    // continuation loop below, which is the only thing that needs to keep
+    // driving the replay; every caller of this function wants the same thing
+    // it always did — whether the write went through.
+    return data;
   }
 
   const intent = intentForAction(params.action);
@@ -409,12 +474,71 @@ export async function postPlayerEconomyAction(params: {
       `This arcade has no server route for "${params.action}", so it cannot be run safely.`,
     );
   }
-  return postEconomyWrite({
+  const { data } = await postEconomyWrite({
     token: params.token,
     intent,
     actionId: params.action,
     ...(params.cabinet !== undefined ? { cabinet: params.cabinet } : {}),
   });
+  return data;
+}
+
+/**
+ * Drive a verified claim's replay to completion, one chunk per request.
+ *
+ * A run to the finale is ~10,000 ticks and the worker's CPU budget is 10 ms per
+ * request, so the claim cannot re-simulate the whole run in one call. The first
+ * claim parks the match mid-replay; this keeps calling `continue-verification`
+ * until the worker says the replay is done and has recorded its verdict.
+ *
+ * ## Why the player never sees this
+ *
+ * In Stage B the replay only *records* whether it agreed — the payout rests on
+ * the checkpoints, which are checked in the same request as the claim. So there
+ * is nothing to wait for and nothing to report: the coin is already decided by
+ * the time this starts, and all it does is let the anti-cheat finish measuring.
+ * That is also why it never throws into the caller's path. A failed continuation
+ * costs a delayed verdict, and a verdict that never arrives costs one row of
+ * shadow-mode telemetry — neither is worth breaking a claim over.
+ *
+ * ## Why it is bounded
+ *
+ * A client that kept this loop alive forever would hold one D1 row and one
+ * isolate per open replay, so the chunk budget caps the number of continuations
+ * outright rather than trusting the caller to stop. The cap is generous — it
+ * covers a run several times longer than any legal one — because hitting it
+ * means the log was absurd, not that the player was slow.
+ *
+ * @returns The final verdict, or `null` if it never resolved. Never throws.
+ */
+export async function continueRunVerification(params: {
+  token: string;
+  maxContinuations?: number;
+}): Promise<Record<string, unknown> | null> {
+  const budget = params.maxContinuations ?? MAX_CONTINUATIONS;
+  for (let sent = 0; sent < budget; sent += 1) {
+    let response: { data: MinigameActionResponse; verification?: Record<string, unknown> };
+    try {
+      response = await postEconomyWrite({
+        token: params.token,
+        intent: "continue-verification",
+      });
+    } catch {
+      return null;
+    }
+
+    const verdict = response.verification;
+    if (!verdict) return null;
+
+    // "In progress" is the only reason to send another. Anything else — a final
+    // match, a mismatch, a refusal — is the replay having reached a verdict, and
+    // continuing past it would be work against a park that is already gone.
+    if (verdict.replayReason !== "replay in progress") return verdict;
+  }
+
+  // The worker's own cap is authoritative; this one only exists so a worker that
+  // keeps saying "in progress" cannot hold the loop open indefinitely.
+  return null;
 }
 
 /** Minigames `POST /action` with `type: "score.submitted"` and integer `score` ≥ 0. */
@@ -422,9 +546,10 @@ export async function submitScore(params: {
   token: string;
   score: number;
 }): Promise<MinigameActionResponse> {
-  return postEconomyWrite({
+  const { data } = await postEconomyWrite({
     token: params.token,
     intent: "submit-score",
     score: Math.max(0, Math.floor(params.score)),
   });
+  return data;
 }

@@ -47,6 +47,7 @@ import {
 import { PICKUP_ART } from "./pickups";
 import { STAGE_H, STAGE_W, loadStage } from "./stage";
 import {
+  FIXED_STEP_MS,
   INPUT_BUFFER_MS,
   MAGIC_COST,
   MAGIC_MAX,
@@ -487,6 +488,22 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   /** The seed behind `inputLogRef`, so the claim carries what replay must use. */
   const runSeedRef = useRef(0);
 
+  /**
+   * The champion and difficulty the current run was opened with.
+   *
+   * Frozen into the replay payload for the same reason the seed is: replay is a
+   * pure function of (seed, playerId, difficulty, inputs), and two of those four
+   * are chosen in the lobby rather than read off the match. Stashed here rather
+   * than read from state at claim time because the lobby can be open behind a
+   * running match — a player who finishes a run, opens the champion picker and
+   * then sees the claim fire would otherwise have their proof rebuilt against a
+   * fighter they never played.
+   */
+  const runConfigRef = useRef<{ playerId: FighterId; difficulty: string }>({
+    playerId: "barlow",
+    difficulty: "medium",
+  });
+
   const held = useHeldKeys();
   const isTouchDevice = useIsTouchDevice();
 
@@ -661,6 +678,10 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       // log carried over would be replayed against a match it never drove.
       inputLogRef.current = [];
       runSeedRef.current = seed;
+      runConfigRef.current = {
+        playerId,
+        difficulty: runDifficulty.name,
+      };
 
       ensureSheets([playerSpec.npc], () => FIGHTER_ANIMS);
       // Wave one's enemies are asked for immediately; the intro banner buys
@@ -760,7 +781,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   // ── Loop ───────────────────────────────────────────────────────────────────
 
   /**
-   * Simulation step, in milliseconds.
+   * The fixed-timestep loop.
    *
    * ## Why fixed
    *
@@ -783,8 +804,6 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
    * clamp keeps a backgrounded tab from rejoining with a delta large enough to
    * skip a whole wave in one step.
    */
-  const FIXED_STEP_MS = 1000 / 60;
-
   useEffect(() => {
     if (!mode) return;
 
@@ -839,11 +858,17 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             checkpoints: checkpointsRef.current.slice(),
             elapsedMs: Math.round(match.worldMs),
             // Frozen with the rest of the claim, from the same settled state.
-            // The log keeps growing while the run continues into endless, but
-            // only the ticks that produced *this* claim belong to it — replaying
-            // further would ask the worker to reproduce waves nobody is claiming.
+            // The whole log belongs to it: the push happens *before* each step
+            // and stops the moment this freeze lands, while the freeze is
+            // observed only after the frame's last step — so the number of
+            // logged inputs is exactly the number of steps that produced this
+            // `score` and `worldMs`. Truncating to "the last tick that mattered"
+            // would be a guess, and a wrong one: replaying one tick short lands
+            // before the finale bonus and mismatches every honest run.
             replay: {
               seed: runSeedRef.current,
+              playerId: runConfigRef.current.playerId,
+              difficulty: runConfigRef.current.difficulty,
               ticks: inputLogRef.current.length,
               inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
             },

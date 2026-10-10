@@ -1,0 +1,32 @@
+-- Nightshade Arcade — everything a continuation needs that only the claim had.
+--
+-- A replay outlives the request that started it: ten thousand ticks cannot be
+-- re-simulated inside one 10 ms CPU budget, so `claim-verified` parks the match
+-- part-way and `continue-verification` finishes it. Three facts from that first
+-- request have to survive to the last one, because the continuation receives
+-- none of them — it is deliberately sent nothing but its intent, so that the
+-- inputs it steps are the inputs that were validated rather than whatever the
+-- caller feels like resending.
+--
+-- **`inputs`** is the validated per-tick input log, base64, the same bytes the
+-- claim submitted. This is the one the continuation cannot do without: without
+-- it there is nothing to feed `stepMatch`, and the resume would dereference a
+-- missing log on its first tick. Parked rather than re-sent because a
+-- continuation that supplied its own log could supply a *different* one of the
+-- same length, steering the re-simulation away from what was claimed while the
+-- parked match carried on — corrupting precisely the match rate Stage B exists
+-- to measure.
+--
+-- **`claim_score`** is the number the replay is judged against. Without it the
+-- continuation could only record what the replay produced and never whether
+-- that agreed with anything, so every verdict would be NULL and the match rate
+-- would measure nothing. Nullable because a park can exist for a claim that
+-- asserted no score at all, and "nothing claimed" is a truthful answer.
+--
+-- **`cabinet`** is which machine the run was played on. The verdict row records
+-- it, and the continuation has no open run to read it from — `claim-verified`
+-- settles the run as it pays, so by the time the replay finishes there is no
+-- `active_runs` row left to ask.
+ALTER TABLE replay_state ADD COLUMN claim_score INTEGER;
+ALTER TABLE replay_state ADD COLUMN cabinet TEXT;
+ALTER TABLE replay_state ADD COLUMN inputs TEXT;

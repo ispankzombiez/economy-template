@@ -251,6 +251,54 @@ if (process.argv.includes("--child")) {
   const originalSnapshot = plainSnapshot(original);
   const replayedSnapshot = plainSnapshot(replayed);
 
+  // ── Chunked-park fidelity ────────────────────────────────────────────────
+  //
+  // The same replay, but re-serialised between chunks — which is what the
+  // worker *actually* does. A run to the finale is ~10,000 ticks and the
+  // Worker's CPU budget is 10 ms per request, so `claim-verified` steps 600
+  // ticks, parks the match as JSON in D1, and lets `continue-verification`
+  // resume it. Every one of those hops goes through `JSON.stringify` and
+  // `JSON.parse`.
+  //
+  // That is the assumption the whole continuation design rests on, and it is a
+  // genuinely risky one: JSON cannot express `NaN`, `Infinity` or `-0` (all
+  // become `0` or `null`), nor `undefined` inside an array. Any of those in the
+  // live `MatchState` would round-trip into a *different* number and the
+  // resumed replay would diverge from the client's run — not visibly failing,
+  // but silently reporting a mismatch against an honest player, which would
+  // poison the match rate Stage B exists to measure.
+  //
+  // So this is the direct test rather than an argument: park it the way D1
+  // does, resume, and require the final state to be identical to an unparked
+  // replay of the same log.
+  let parked = createMatch({
+    playerId: "barlow",
+    difficulty,
+    input: emptyInput(),
+    seed,
+  });
+  const CHUNK = 600; // the worker's configured chunk size
+  let parks = 0;
+  for (let i = 0; i < logged.length; i += CHUNK) {
+    for (const mask of logged.slice(i, i + CHUNK)) {
+      applyMask(parked.playerInput, mask, mod.INPUT_BUFFER_MS);
+      stepMatch(parked, TICK_MS);
+    }
+    // The park — `JSON.parse(JSON.stringify(match))`, which is verbatim what
+    // `replay_state` does to the match between requests. No restoration, no
+    // special-casing: if the match needs a helping hand to survive this, the
+    // worker does not get one either, and the honest failure is the point.
+    //
+    // (`playerInput` is a plain record of booleans and small numbers held only
+    // by the match itself, so it crosses as data — verified by this very check
+    // rather than assumed.)
+    if (i + CHUNK < logged.length) {
+      parked = JSON.parse(JSON.stringify(parked));
+      parks += 1;
+    }
+  }
+  const parkedSnapshot = plainSnapshot(parked);
+
   process.stdout.write(
     JSON.stringify({
       ...plainSnapshot(match),
@@ -270,6 +318,10 @@ if (process.argv.includes("--child")) {
       // The first field on which the two runs disagree, so a failure names the
       // divergence instead of only reporting that one occurred.
       fidelityDivergesAt: firstDivergingKey(originalSnapshot, replayedSnapshot),
+      // The same comparison for the chunked, JSON-parked path.
+      parkedMatched: JSON.stringify(originalSnapshot) === JSON.stringify(parkedSnapshot),
+      parkedDivergesAt: firstDivergingKey(originalSnapshot, parkedSnapshot),
+      parkedParks: parks,
     }),
   );
   process.exit(0);
@@ -433,6 +485,30 @@ for (const r of covered) {
       : `diverged at ${r.fidelityDivergesAt} after ${r.fidelityTicks} ticks ` +
         `(original score=${r.fidelityScore}/${r.fidelityPhase}/lives=${r.fidelityLives}, ` +
         `replay score=${r.replayScore})`,
+  );
+}
+
+// 6. Chunked-park fidelity — the check Stage B3 rests on.
+//
+// The worker cannot replay ten thousand ticks inside one 10 ms request, so it
+// parks the match as JSON in D1 and resumes on the next call. That makes every
+// replay a sequence of `JSON.parse(JSON.stringify(...))` hops, and JSON is not
+// a faithful transport for every number JavaScript can hold: `NaN` and
+// `Infinity` collapse to `null`, and `-0` arrives back as `0`. A match that
+// carried any of those would resume into a subtly different simulation and
+// report a mismatch against a run the player actually played.
+//
+// Asserted separately from #5 because it can fail on its own: a run that
+// replays perfectly in one piece can still fall apart at a park boundary, and
+// #5 would stay green while every real continuation diverged.
+for (const r of covered) {
+  check(
+    r.parkedMatched === true,
+    `seed ${r.seed}/${r.variant} survives ${r.parkedParks} JSON park(s) byte-for-byte`,
+    r.parkedMatched
+      ? ""
+      : `diverged at ${r.parkedDivergesAt} after ${r.fidelityTicks} ticks ` +
+        `(unparked replay agrees; the park is the difference)`,
   );
 }
 

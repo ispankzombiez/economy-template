@@ -69,6 +69,20 @@
 // a rule, a cheater would exploit whichever one is more lenient. See the header
 // of shared/anticheat/verify.js for what "reachable" means here.
 import { verifyCheckpoints } from "@nightshade/shared/verify";
+// Input-log replay, shared verbatim with the Vite client for the same reason as
+// above — and one step further: `replay.js` bundles the client's *engine*, so
+// the worker re-simulates a claimed run with the identical `stepMatch` the
+// player stepped with. See the header of replay.js for why that is the whole
+// anti-cheat.
+import {
+  CHUNK_TICKS,
+  ReplayInputError,
+  isReplayComplete,
+  replayOutcome,
+  resumeReplay,
+  startReplay,
+  stepReplay,
+} from "./replay.js";
 import { MAX_RUN_SCORE, MAX_SCORE_BY_WAVE } from "./scoreRules.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
@@ -1715,17 +1729,128 @@ async function recordActiveRun(env, farmId, cabinet) {
  */
 async function readActiveRun(env, farmId) {
   const row = await env.LEDGER.prepare(
-    `SELECT cabinet FROM active_runs WHERE farm_id = ?`,
+    `SELECT cabinet, opened_at FROM active_runs WHERE farm_id = ?`,
   )
     .bind(farmId)
     .first();
-  return row ? row.cabinet : null;
+  // `opened_at` travels with the cabinet because it is the same fact — *which*
+  // run is open — read at the same moment from the same row. Splitting it into
+  // a second query would risk the two disagreeing if a run were opened between
+  // them, and it is used as the identity of a parked replay, where a torn read
+  // would resume one run's state against another run's inputs.
+  return row ? { cabinet: row.cabinet, runKey: row.opened_at } : null;
 }
 
 /** Drop the binding once the run has been settled, so it cannot be reused. */
 async function clearActiveRun(env, farmId) {
   await env.LEDGER.prepare(`DELETE FROM active_runs WHERE farm_id = ?`)
     .bind(farmId)
+    .run();
+}
+
+/**
+ * Store an unfinished replay so the next request can resume it.
+ *
+ * `MatchState` is plain data — numbers, strings, arrays of the same — so JSON
+ * round-trips it exactly. That exactness is load-bearing: a resumed replay only
+ * reproduces the client's run if the state comes back bit-identical, and any
+ * value JSON cannot express (a `NaN`, an `Infinity`) would diverge silently
+ * from the browser's run rather than visibly failing. The engine keeps none of
+ * those in the simulation; the two `Math.random` sites that remain are confined
+ * to `renderMatch`, which is never stepped here.
+ *
+ * The cursor travels beside the state rather than inside it, so the progress
+ * read and the "is this finished" test do not have to parse the whole blob.
+ */
+async function writeReplayState(env, farmId, park) {
+  await env.LEDGER.prepare(
+    `INSERT INTO replay_state (farm_id, state, cursor, total, run_key, claim_score, cabinet, inputs)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(farm_id) DO UPDATE SET
+       state = excluded.state, cursor = excluded.cursor,
+       total = excluded.total, run_key = excluded.run_key,
+       claim_score = excluded.claim_score, cabinet = excluded.cabinet,
+       inputs = excluded.inputs`,
+  )
+    .bind(
+      farmId,
+      JSON.stringify(park.state),
+      park.cursor,
+      park.total,
+      park.runKey,
+      park.claimScore ?? null,
+      park.cabinet ?? null,
+      park.inputs ?? null,
+    )
+    .run();
+}
+
+/**
+ * The parked replay for a farm, or `null` when there is none.
+ *
+ * The `match` field is revived by `startReplay`'s caller rather than here,
+ * because a parked row is only ever resumed — never created — by this path, and
+ * keeping the revive beside the create keeps the two representations in step.
+ */
+async function readReplayState(env, farmId) {
+  const row = await env.LEDGER.prepare(
+    `SELECT state, cursor, total, run_key, claim_score, cabinet, inputs
+       FROM replay_state WHERE farm_id = ?`,
+  )
+    .bind(farmId)
+    .first();
+  if (!row) return null;
+  return {
+    state: JSON.parse(row.state),
+    cursor: row.cursor,
+    total: row.total,
+    runKey: row.run_key,
+    claimScore: row.claim_score ?? null,
+    cabinet: row.cabinet ?? null,
+    inputs: row.inputs ?? null,
+  };
+}
+
+/** Drop a replay once it has been judged, so it cannot be resumed twice. */
+async function clearReplayState(env, farmId) {
+  await env.LEDGER.prepare(`DELETE FROM replay_state WHERE farm_id = ?`)
+    .bind(farmId)
+    .run();
+}
+
+/**
+ * Record a replay's verdict.
+ *
+ * Written even though the verdict does not yet decide the payout: Stage B is
+ * shadow mode, where the checkpoints still pay and the replay only records
+ * whether it agreed. That record is the entire point of the stage — a match
+ * rate measured on real runs is the only way to learn whether replay is safe to
+ * enforce before it starts refusing money. Tabled rather than logged because it
+ * has to survive the isolate and be counted across players.
+ *
+ * `matched` is `null` for a replay that could not be completed at all, and
+ * `false` for one that completed and disagreed. Collapsing the two would fill
+ * the mismatch column with protocol errors — abandoned replays and malformed
+ * logs — and the rate would measure the plumbing rather than the play.
+ */
+async function recordReplayVerdict(
+  env,
+  { farmId, cabinet, matched, replayScore, claimScore, reason },
+) {
+  await env.LEDGER.prepare(
+    `INSERT INTO replay_verdicts
+       (farm_id, cabinet, matched, replay_score, claim_score, reason, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      farmId,
+      cabinet,
+      matched === null || matched === undefined ? null : matched ? 1 : 0,
+      replayScore ?? null,
+      claimScore ?? null,
+      reason ?? null,
+      Date.now(),
+    )
     .run();
 }
 
@@ -1974,7 +2099,8 @@ async function intentClaimResult({ session, env, farmId }) {
   // where nothing has been written yet. `handleEconomyWrite` awaits this factory
   // for exactly that reason.
   const openedOn = await readActiveRun(env, farmId);
-  if (openedOn !== null && VERIFIED_CABINETS[openedOn]) {
+  const openedCabinet = openedOn?.cabinet ?? null;
+  if (openedCabinet !== null && VERIFIED_CABINETS[openedCabinet]) {
     throw new HttpError(
       400,
       "That cabinet certifies its runs. Claim it through the verified route instead.",
@@ -1994,6 +2120,161 @@ async function intentClaimResult({ session, env, farmId }) {
       return data;
     },
   };
+}
+
+/**
+ * Advance a claim's replay by one chunk, parking it if more ticks remain.
+ *
+ * Called with the run already opened and the checkpoints already accepted, so
+ * this is the last gate before minting. It never throws: a replay that cannot
+ * start, cannot resume or runs out of budget produces a *recorded non-match*
+ * rather than an error, because the alternative is a player being refused a
+ * coin they fairly earned because verification was unavailable. Stage B is
+ * shadow mode — the checkpoints still pay — so the honest outcome is always
+ * "pay, and note what the replay said".
+ *
+ * The returned verdict is `{ matched, reason }` with `matched` tri-state:
+ * `true` (replayed to the claimed outcome), `false` (completed and disagreed),
+ * or `null` (could not be completed — rejected input, exhaustion, or a
+ * throw). The caller records it and pays regardless; Stage C is where `false`
+ * starts refusing.
+ *
+ * @param {object} args
+ * @param {object} args.env      D1 and KV bindings.
+ * @param {number} args.farmId   The claiming farm.
+ * @param {object} args.payload  The claim body, whose `replay` field drives it.
+ * @param {string} args.cabinet  The cabinet the run was opened on, for the record.
+ * @param {number} args.claimScore The score the claim asserts, kept beside the
+ *                                 replayed one so a mismatch is a diff rather
+ *                                 than an assertion.
+ * @returns {Promise<{ matched: boolean|null, reason: string|null }>}
+ */
+async function runReplayVerification({ env, farmId, payload, cabinet, claimScore, runKey }) {
+  // Validation runs on every request, resumed or not: it is what binds the
+  // parked state to *this* claim's inputs. Construction runs on the first chunk
+  // only, because a resumed replay already holds the match it was stepping and
+  // building another would spend the cold-start cost to immediately discard it.
+  let validated;
+  try {
+    validated = validateReplay(payload?.replay);
+  } catch (error) {
+    // A malformed submission is not evidence of anything — it says the client
+    // and worker disagree about the protocol, or that someone is probing. Either
+    // way it must not count as a mismatch, or protocol noise would drown the
+    // signal Stage B exists to measure.
+    const reason =
+      error instanceof ReplayInputError ? error.message : "the replay could not be started";
+    await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
+    return { matched: null, reason };
+  }
+
+  // Resumed rather than restarted when a previous request already parked this
+  // claim's replay. Re-stepping from tick zero would spend the budget on work
+  // that is already done and exhaust the request before it reaches the end.
+  //
+  // The run key is what makes the resume safe. A claim that never finished
+  // verifying leaves its state parked, and the *next* claim must not inherit a
+  // cursor from a different run — so a park only resumes when it names this
+  // run, and any stale row falls through to a fresh start and is overwritten.
+  // `cabinet` is compared beside it as belt-and-braces: implied by the run key
+  // since one run plays one cabinet, but the failure it guards against —
+  // resuming a replay under a different cabinet's rule set — is worth one more
+  // comparison.
+  const parked = await readReplayState(env, farmId);
+  let state;
+  if (
+    parked &&
+    parked.runKey === runKey &&
+    parked.cabinet === cabinet &&
+    parked.total === validated.total
+  ) {
+    state = {
+      match: parked.state,
+      inputs: validated.inputs,
+      cursor: parked.cursor,
+      total: parked.total,
+    };
+  } else {
+    state = startReplay(payload.replay);
+  }
+
+  try {
+    stepReplay(state, CHUNK_TICKS);
+
+    if (!isReplayComplete(state)) {
+      // Out of request budget, not out of replay. Park the match exactly as it
+      // stands and let the next request pick it up — this is the chunked
+      // continuation the 10 ms budget forces, and the reason `replay_state`
+      // carries a cursor rather than a whole log.
+      await writeReplayState(env, farmId, {
+        state: state.match,
+        cursor: state.cursor,
+        total: state.total,
+        runKey,
+        claimScore,
+        cabinet,
+        // The log itself, base64, exactly as validated above. Parked rather
+        // than left for the continuation to resend: the continuation is sent
+        // only its intent, so the inputs it steps are necessarily the ones this
+        // claim submitted and the worker decoded — see `resumeReplay`.
+        inputs: String(payload.replay.inputs),
+      });
+      await recordReplayVerdict(env, {
+        farmId,
+        cabinet,
+        matched: null,
+        replayScore: state.match.score,
+        claimScore,
+        reason: `replay still in progress at ${state.cursor} of ${state.total} ticks`,
+      });
+      return { matched: null, reason: "replay in progress" };
+    }
+
+    await clearReplayState(env, farmId);
+
+    // The comparison is deliberately narrow. `score` is the number the coin is
+    // minted against, and `reachedFinale` is the event it is minted for — those
+    // two together are the claim. Wave, health, magic and lives are *not*
+    // compared, because replaying to the same score by a different route is
+    // still a legitimately played run, and demanding identity on every field
+    // would refuse honest players whose play simply differed from the replay's
+    // tie-breaks. Same score, same win: that is the claim, and that is checked.
+    const outcome = replayOutcome(state);
+    const matched = outcome.score === claimScore && outcome.reachedFinale === true;
+
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched,
+      replayScore: outcome.score,
+      claimScore,
+      reason: matched
+        ? null
+        : `replay produced score ${outcome.score}` +
+          `${outcome.reachedFinale ? "" : " without reaching the finale"}` +
+          ` for a claim of ${claimScore}`,
+    });
+
+    return {
+      matched,
+      reason: matched
+        ? null
+        : `the re-simulated run scored ${outcome.score}, not ${claimScore}`,
+    };
+  } catch (error) {
+    // A throw mid-replay is a defect in the worker, not in the player. Recording
+    // it as "could not complete" keeps it out of the mismatch column — counting
+    // our own crashes as suspected cheating would corrupt every rate derived
+    // from this table.
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: null,
+      claimScore,
+      reason: `the replay threw: ${String(error?.message ?? error).slice(0, 200)}`,
+    });
+    return { matched: null, reason: "the replay could not be completed" };
+  }
 }
 
 /**
@@ -2036,7 +2317,7 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
   // mismatch means the log was assembled for a different machine than the
   // voucher was minted on, and is refused outright.
   const openedOn = await readActiveRun(env, farmId);
-  if (openedOn !== cabinetId) {
+  if (openedOn === null || openedOn.cabinet !== cabinetId) {
     throw new HttpError(
       400,
       openedOn === null
@@ -2065,7 +2346,35 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     );
   }
 
+  // Replayed in `build`, not `run`, for the same reason the checkpoints are:
+  // this is a gate, and a gate that only closed after the mint would have
+  // already paid. It sits *after* the checkpoint check so the cheap structural
+  // invariants reject a forgery before any simulation budget is spent — there
+  // is no reason to re-simulate a log whose waves are out of order.
+  //
+  // Deliberately not awaited into a throw: `runReplayVerification` reports what
+  // the replay said rather than deciding anything, because Stage B is shadow
+  // mode. `matched === false` does not refuse the claim yet — that flip is
+  // Stage C, and it must come with a server-issued seed, since a client-chosen
+  // seed lets a cheater shop for one the replay cannot reproduce.
+  const replayVerdict = await runReplayVerification({
+    env,
+    farmId,
+    payload,
+    cabinet: cabinetId,
+    claimScore: claimedScore,
+    runKey: openedOn.runKey,
+  });
+
   return {
+    // Surfaced so a player whose claim was refused can tell which gate refused
+    // it, and so the shadow-mode record is visible in the field rather than
+    // only in the ledger. Additive: callers that ignore it are unaffected.
+    verification: {
+      checkpoints: "passed",
+      replay: replayVerdict.matched,
+      ...(replayVerdict.reason ? { replayReason: replayVerdict.reason } : {}),
+    },
     async run() {
       const data = await callEconomy(env, session, {
         type: "minigame.action",
@@ -2074,6 +2383,145 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
       });
       await clearActiveRun(env, farmId);
       return data;
+    },
+  };
+}
+
+/**
+ * Drive a parked replay forward by one more chunk.
+ *
+ * The claim cannot fit a whole replay in one request — a run to the finale is
+ * ~10,000 ticks and a Worker gets 10 ms of CPU per call — so the first claim
+ * parks the match mid-replay and this intent advances it. The client keeps
+ * calling it while the response says "in progress"; each call steps another
+ * `CHUNK_TICKS` and parks again, and the call that finishes records the
+ * verdict and drops the park.
+ *
+ * ## What it is allowed to touch
+ *
+ * Only the parked replay belonging to *this* farm and *this* run. Both checks
+ * are read from the ledger rather than taken from the request: the park is
+ * keyed by farm, and the run identity is `active_runs.opened_at`, which no
+ * later request can rewrite. A continuation for a run that is not open, or a
+ * park written by a different run, is refused rather than resumed.
+ *
+ * ## What it may not do
+ *
+ * It never touches the economy. By the time it runs, the claim has already been
+ * paid or refused — this advances a *replay*, which in Stage B only records
+ * whether it agreed. So it holds no voucher, mints nothing and burns nothing,
+ * and there is nothing to refund: a continuation that fails costs a delayed
+ * verdict and nothing else.
+ */
+async function intentContinueVerification({ env, farmId }) {
+  // Bound to the park, not to an open run. The claim that started this replay
+  // settles the run as it pays — `clearActiveRun` — so by the time the first
+  // continuation arrives there is no open run to name, and requiring one would
+  // make this intent unreachable by construction.
+  //
+  // The park is keyed by farm and already carries the run key written under
+  // `claim-verified`, so it names its own run. What that buys is expiry against
+  // the *next* claim: a fresh claim overwrites the row with a new run key, so a
+  // continuation left over from the previous run finds a key that is no longer
+  // its own and is refused rather than stepping someone else's match.
+  const parked = await readReplayState(env, farmId);
+  if (parked === null) {
+    // No park means the replay already finished and recorded its verdict, or
+    // its claim never started one. Either way there is nothing to advance.
+    throw new HttpError(400, "There is no replay in progress for this run.");
+  }
+
+  // The claim body is not resent: the parked row *is* the claim's replay, down
+  // to the validated log it stepped with, so `resumeReplay` decodes those exact
+  // bytes rather than trusting whatever this request might have carried. It
+  // also re-checks that the log still describes `total` ticks — a row that was
+  // truncated or overwritten fails here, as a recorded non-match, instead of
+  // dereferencing a missing input mid-step.
+  let replay;
+  try {
+    replay = resumeReplay(parked);
+  } catch (error) {
+    const reason =
+      error instanceof ReplayInputError ? error.message : "the parked replay could not be resumed";
+    await clearReplayState(env, farmId);
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet: parked.cabinet,
+      matched: null,
+      claimScore: parked.claimScore,
+      reason,
+    });
+    throw new HttpError(400, `That run's replay could not be resumed: ${reason}`);
+  }
+
+  stepReplay(replay, CHUNK_TICKS);
+
+  if (!isReplayComplete(replay)) {
+    await writeReplayState(env, farmId, {
+      state: replay.match,
+      cursor: replay.cursor,
+      total: replay.total,
+      runKey: parked.runKey,
+      claimScore: parked.claimScore,
+      cabinet: parked.cabinet,
+      // Re-parked unchanged. The log is not re-derived: it is the same bytes
+      // `resumeReplay` just decoded, and re-encoding here could only introduce
+      // a difference between what was stepped and what the next chunk steps.
+      inputs: parked.inputs,
+    });
+    return {
+      verification: {
+        checkpoints: "passed",
+        replay: null,
+        replayProgress: `${replay.cursor} of ${replay.total} ticks`,
+        replayReason: "replay in progress",
+      },
+      async run() {
+        return { continued: true, complete: false };
+      },
+    };
+  }
+
+  await clearReplayState(env, farmId);
+
+  // The comparison is deliberately narrow. `score` is the number the coin is
+  // minted against, and `reachedFinale` is the event it is minted for — those
+  // two together are the claim. Wave, health, magic and lives are *not*
+  // compared, because replaying to the same score by a different route is
+  // still a legitimately played run, and demanding identity on every field
+  // would refuse honest players whose play simply differed from the replay's
+  // tie-breaks. Same score, same win: that is the claim, and that is checked.
+  const outcome = replayOutcome(replay);
+  const matched =
+    outcome.score === parked.claimScore && outcome.reachedFinale === true;
+
+  await recordReplayVerdict(env, {
+    farmId,
+    cabinet: parked.cabinet,
+    matched,
+    replayScore: outcome.score,
+    claimScore: parked.claimScore,
+    reason: matched
+      ? null
+      : `replay produced score ${outcome.score} and reachedFinale=${outcome.reachedFinale}, ` +
+        `against a claim of ${parked.claimScore}`,
+  });
+
+  return {
+    verification: {
+      checkpoints: "passed",
+      // The real verdict, not a placeholder: this is the number the client's
+      // loop stops on, and in Stage C it is the number that will decide the
+      // payout. Reporting null here would make a finished replay
+      // indistinguishable from one that never produced one.
+      replay: matched,
+      replayReason: matched
+        ? `replay agreed at ${outcome.score}`
+        : `replay produced score ${outcome.score} and reachedFinale=${outcome.reachedFinale}, ` +
+          `against a claim of ${parked.claimScore}`,
+    },
+    async run() {
+      return { continued: true, complete: true };
     },
   };
 }
@@ -2258,6 +2706,7 @@ const INTENTS = {
   "start-ticket-run": intentStartTicketRun,
   "claim-result": intentClaimResult,
   "claim-verified": intentClaimVerified,
+  "continue-verification": intentContinueVerification,
   "void-attempt": intentVoidAttempt,
   "claim-play-ticket": intentClaimPlayTicket,
   "buy-item": intentBuyItem,
@@ -2357,7 +2806,16 @@ async function handleEconomyWrite(request, env, headers) {
     await settleAttempt(env, nonce, "settled", intent);
     // The envelope is byte-compatible with the economies API's own, so the game's
     // existing response handling needs no changes.
-    return json({ data }, 200, headers);
+    //
+    // `verification` is additive and optional: only `claim-verified` produces
+    // it. It rides beside `data` rather than inside it precisely so the
+    // compatibility above holds — a caller that reads `data` as the economies
+    // API's own shape never sees it, and one that wants the verdict can opt in.
+    return json(
+      plan.verification ? { data, verification: plan.verification } : { data },
+      200,
+      headers,
+    );
   } catch (error) {
     // Refund the ledger slot only on a **definitive** refusal — a 400 from the
     // rule engine, which means a rule said no and nothing was written.

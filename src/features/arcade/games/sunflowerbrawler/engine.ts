@@ -182,6 +182,17 @@ const SPAWN_MS = 420;
  */
 export const INPUT_BUFFER_MS = 140;
 
+/**
+ * The simulation's timestep, in ms — 60 steps per second.
+ *
+ * Exported because it is part of the replay contract, not just a loop detail:
+ * the worker re-simulates a logged run with this exact step, and a client that
+ * stepped at a different rate would produce inputs that replay to a different
+ * outcome. Declared here rather than in the game component so the two ends
+ * cannot drift — one constant, one file, imported by whoever steps the match.
+ */
+export const FIXED_STEP_MS = 1000 / 60;
+
 /** Window in which the next press plays the *next* swing rather than the first. */
 const COMBO_WINDOW_MS = 640;
 

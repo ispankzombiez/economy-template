@@ -14,6 +14,7 @@ import type {
   PortalPlayerData,
 } from "./types";
 import {
+  continueRunVerification,
   postPlayerEconomyAction,
   postPlayerEconomyGeneratorCollect,
 } from "./api";
@@ -171,11 +172,27 @@ export function MinigameSessionProvider({
               cabinet: input.cabinet,
             });
 
+      // A verified claim's replay outlives the request that started it: the
+      // worker cannot re-simulate ten thousand ticks inside one 10 ms CPU
+      // budget, so it parks the match mid-replay and the continuation finishes
+      // it. Captured inside the branch rather than read off `input` in the
+      // callback below, because there `input` has narrowed to the union of both
+      // variants and `verify` is no longer visible on every member of it.
+      const verifiedReplay = "collectJobId" in input ? undefined : input.verify?.replay;
+
       void postPromise.then(
         (res) => {
           setPlayerEconomy((prev) =>
             mergeMinigameEconomyFromApi(prev, authoritativePlayerEconomy(res)),
           );
+
+          // Runs *after* the economy is already settled, and is deliberately
+          // fire-and-forget: in Stage B the replay only records whether it
+          // agreed, so nothing the player is owed waits on it, and a failure
+          // here costs one row of telemetry rather than a broken claim.
+          if (verifiedReplay) {
+            void continueRunVerification({ token: bootstrap.jwt as string });
+          }
         },
         (err) => {
           const message = err instanceof Error ? err.message : String(err);

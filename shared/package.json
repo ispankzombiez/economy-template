@@ -16,6 +16,10 @@
     "./inputLog": {
       "types": "./anticheat/inputLog.d.ts",
       "default": "./anticheat/inputLog.js"
+    },
+    "./replayBudget": {
+      "types": "./anticheat/replayBudget.d.ts",
+      "default": "./anticheat/replayBudget.js"
     }
   }
 }
