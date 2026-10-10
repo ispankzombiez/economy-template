@@ -33,6 +33,23 @@ rules = [
   { type = "Data", globs = ["**/*.webp"] },
 ]
 
+# The replay verifier imports the client's engine *and* its roster
+# (`fighters.ts` → `lib/npcs`, `lib/portal/url` → `lib/config.ts`). Those client
+# modules read `import.meta.env.VITE_*` at module scope, which Vite rewrites at
+# build time — but Workers have no `import.meta.env`, so the deployed bundle
+# throws `Cannot read properties of undefined (reading 'VITE_API_URL')` the
+# moment Cloudflare evaluates it at upload. Bundling alone does not catch this:
+# `wrangler deploy --dry-run` only compiles, and only the real deploy runs the
+# module.
+#
+# Defining it away rather than untangling the import: the worker never *uses*
+# any of these values (identity comes from the portal JWT, not from Vite), and
+# every read in `config.ts` falls through to its own fallback when the key is
+# missing. Same substitution the test bundles in `scripts/` already make, so
+# all three environments evaluate the same graph the same way.
+[define]
+"import.meta.env" = "{}"
+
 # ------------------------------------------------------------------
 # Storage
 # ------------------------------------------------------------------
