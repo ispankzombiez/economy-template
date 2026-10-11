@@ -73,13 +73,23 @@
 import {
   CHUNK_TICKS,
   ReplayInputError,
+  appendChunkInputs,
   isReplayComplete,
+  openChunkReplay,
   replayOutcome,
   resumeReplay,
   startReplay,
   stepReplay,
   validateReplay,
 } from "./replay.js";
+// The input-log codec, imported here rather than re-exported by `replay.js`:
+// several intents encode as well as decode (a parked replay is written back as
+// the same base64 it arrived as), and a symbol used on both sides belongs on
+// both import lists. `decodeInputLog` was once *used* here without being
+// imported, and the resulting ReferenceError was swallowed by the chunk
+// handler's catch — every streamed chunk in the ledger died as "not
+// decodable", silently, for weeks.
+import { decodeInputLog, encodeInputLog } from "@nightshade/shared/inputLog";
 // Solitaire's verifier. It shares nothing with `replay.js` beyond its job,
 // because the two games' proofs are structurally different: a brawler run is
 // re-simulated tick by tick and may span requests; a Solitaire game's move log
@@ -2450,38 +2460,55 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
 /**
  * Verify a single chunk of a run DURING play.
  *
- * The client generates a `runKey` when the cabinet opens and sends one chunk
- * (600 ticks of inputs) at each wave clear. This spreads the replay budget
- * across the play session so the final claim only needs to verify the last
- * chunk — the player never waits at the win screen.
+ * The client posts one window (`CHUNK_TICKS` ticks) of the input log whenever
+ * a full one exists, in order, while the run is being played. Each call steps
+ * the window it just received and parks the match, so the replay budget is
+ * spread across the play session instead of landing on the win screen — where
+ * a whole finale run (~25,000 ticks) cannot be re-simulated inside one 10 ms
+ * request, and the claim that tried would refuse the player's own honest win.
  *
  * ## What it is allowed to touch
  *
- * Only the parked replay for this farm. The `runKey` binds the park to the
- * run; a park written by a different run (or none) is refused. The client
- * sends the chunk's inputs so the worker never has to store the full log at
- * once — only the 600 ticks being verified now.
+ * Only the parked replay of the farm's *open* run. Both the run identity and
+ * its cabinet are read from `active_runs` — the same ledger row the claim
+ * reads — rather than taken from the request, so a chunk can neither resume a
+ * different run's park nor disagree with the claim about which machine the run
+ * was played on.
  *
  * ## What it may not do
  *
  * It never touches the economy. It only advances a replay and parks it.
  */
 async function intentVerifyChunk({ env, farmId, payload }) {
-  const runKey = Number(payload?.runKey);
   const chunkIndex = Number(payload?.chunkIndex);
-  const inputsB64 = String(payload?.inputs ?? "");
-
-  if (!Number.isInteger(runKey) || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
-    throw new HttpError(400, "Invalid runKey or chunkIndex.");
+  if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    throw new HttpError(400, "Invalid chunkIndex.");
   }
+
+  // The run the chunks belong to, read from the ledger — the same identity the
+  // claim reads, and the one field here the request cannot choose.
+  //
+  // It used to be the client's own `runKey`, which could never equal the
+  // `opened_at` the claim resumes against: every park the chunks wrote was
+  // therefore refused at claim time and the replay restarted from tick zero,
+  // which no single 10 ms request can finish. The run that is *open* is the
+  // run its chunks belong to, and it binds cabinet and identity in one read —
+  // taken the same way, on both sides of the run.
+  const openedOn = await readActiveRun(env, farmId);
+  if (openedOn === null || !VERIFIED_CABINETS.has(openedOn.cabinet)) {
+    throw new HttpError(400, "No verified run is open on that cabinet.");
+  }
+  const { runKey, cabinet } = openedOn;
 
   let inputs;
   try {
-    inputs = decodeInputLog(inputsB64);
+    inputs = decodeInputLog(String(payload?.inputs ?? ""));
   } catch {
     throw new HttpError(400, "Chunk inputs not decodable.");
   }
-
+  if (inputs.length === 0) {
+    throw new HttpError(400, "Chunk is empty.");
+  }
   if (inputs.length > CHUNK_TICKS) {
     throw new HttpError(400, `Chunk exceeds ${CHUNK_TICKS} ticks.`);
   }
@@ -2489,27 +2516,30 @@ async function intentVerifyChunk({ env, farmId, payload }) {
   const parked = await readReplayState(env, farmId);
 
   let replay;
-  if (parked && parked.runKey === runKey) {
-    // Continuing an existing park — but the client sent THIS chunk's inputs,
-    // not the whole log. We resume the park and the client's inputs REPLACE
-    // the corresponding slice. This means a cheater who rewrites a past chunk
-    // will be caught when the final claim re-verifies the whole log.
+  if (parked && parked.runKey === runKey && parked.cabinet === cabinet) {
+    // Continuing this run's own park — but the client sent THIS window's
+    // inputs, not the whole log. The window replaces the parked log's matching
+    // slice, and the park grows by exactly the ticks it receives, so `total`
+    // stays the length of the log received so far and `resumeReplay`'s own
+    // binding keeps holding across every write.
+    //
+    // Rewriting a *past* window cannot help: the park's match has already been
+    // stepped over the bytes it is replacing, so the settled state is the one
+    // the original stream simulated — and the final claim compares against the
+    // score that state produced.
     try {
       const base = resumeReplay(parked);
       // Sanity: the parked cursor should match the chunk we're being sent.
       if (base.cursor !== chunkIndex * CHUNK_TICKS) {
         throw new ReplayInputError(`chunk ${chunkIndex} expects cursor ${chunkIndex * CHUNK_TICKS}, park has ${base.cursor}`);
       }
-      // Replace the logged inputs for this chunk with what the client just sent.
-      // The rest of the log (past/future chunks) stays from the park.
-      base.inputs.set(inputs, base.cursor);
-      replay = base;
+      replay = appendChunkInputs(base, inputs);
     } catch (error) {
       const reason = error instanceof ReplayInputError ? error.message : "the parked replay could not be resumed";
       await clearReplayState(env, farmId);
       await recordReplayVerdict(env, {
         farmId,
-        cabinet: parked.cabinet,
+        cabinet,
         matched: null,
         claimScore: parked.claimScore,
         reason,
@@ -2517,37 +2547,42 @@ async function intentVerifyChunk({ env, farmId, payload }) {
       throw new HttpError(400, `Replay resume failed: ${reason}`);
     }
   } else {
-    // First chunk of this run — no park yet. Build a minimal replay state
-    // with just this chunk's inputs. The total is unknown until claim time,
-    // so we use a sentinel and the claim will overwrite with the real total.
+    // First window of this run — no park yet, or a stale one from a previous
+    // run that this write overwrites. The engine context (seed, champion,
+    // difficulty) rides on the window that opens the run; every later window
+    // inherits it from the park.
     if (chunkIndex !== 0) {
       throw new HttpError(400, "First chunk must be chunkIndex 0.");
     }
-    const seed = Number(payload?.seed);
-    const playerId = String(payload?.playerId ?? "");
-    const difficulty = DIFFICULTY_BY_NAME.get(String(payload?.difficulty ?? ""));
-    if (!Number.isFinite(seed) || !VALID_FIGHTER_IDS.has(playerId) || !difficulty) {
-      throw new HttpError(400, "First chunk missing seed/playerId/difficulty.");
+    try {
+      replay = openChunkReplay({
+        seed: payload?.seed,
+        playerId: payload?.playerId,
+        difficulty: payload?.difficulty,
+        inputs,
+      });
+    } catch (error) {
+      throw new HttpError(
+        400,
+        error instanceof ReplayInputError
+          ? `First chunk is not a valid opening: ${error.message}.`
+          : "First chunk missing seed/playerId/difficulty.",
+      );
     }
-    replay = {
-      match: createMatch({ playerId, difficulty, input: emptyInput(), seed }),
-      inputs: new Uint8Array(CHUNK_TICKS), // placeholder; will be replaced
-      cursor: 0,
-      total: CHUNK_TICKS, // grows as chunks arrive
-    };
-    replay.inputs.set(inputs, 0);
   }
 
   stepReplay(replay, CHUNK_TICKS);
 
-  // Park for the next chunk. Extend total if this wasn't the last.
+  // Park for the next window: the cursor has advanced over the ticks stepped,
+  // `total` is the length of the log received so far, and the buffer is the
+  // log itself — base64, the same encoding the claim will carry.
   await writeReplayState(env, farmId, {
     state: replay.match,
     cursor: replay.cursor,
     total: replay.total,
     runKey,
     claimScore: null,
-    cabinet: payload.cabinet ?? null,
+    cabinet,
     inputs: encodeInputLog(replay.inputs),
   });
 

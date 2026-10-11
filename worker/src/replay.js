@@ -198,6 +198,91 @@ export function resumeReplay(park) {
 }
 
 /**
+ * Open the replay of a run whose chunks arrive *during* play, not at claim.
+ *
+ * Same engine, same seeding rule as `startReplay` — the difference is what it
+ * validates. A claim carries a finished log and asserts its own length; the
+ * first chunk carries the opening window of a run still being played, so there
+ * is no `ticks` to check yet. Everything else the window names (seed, champion,
+ * difficulty) is validated the same way and against the same engine-derived
+ * tables, because a park that opened a different match than the run it came
+ * from would diverge for reasons that have nothing to do with cheating.
+ *
+ * @param {{ seed: unknown, playerId: unknown, difficulty: unknown,
+ *           inputs: Uint8Array }} first The opening window, already decoded.
+ * @returns {{ match: object, inputs: Uint8Array, cursor: number, total: number }}
+ * @throws {ReplayInputError} when the chunk cannot open a run.
+ */
+export function openChunkReplay({ seed, playerId, difficulty, inputs }) {
+  const numericSeed = Number(seed);
+  if (!Number.isFinite(numericSeed)) {
+    throw new ReplayInputError("the first chunk is missing its seed");
+  }
+
+  const id = String(playerId ?? "");
+  if (!VALID_FIGHTER_IDS.has(id)) {
+    throw new ReplayInputError(`unknown champion "${id.slice(0, 32)}"`);
+  }
+
+  const diff = DIFFICULTY_BY_NAME.get(String(difficulty ?? ""));
+  if (!diff) {
+    throw new ReplayInputError(
+      `unknown difficulty "${String(difficulty).slice(0, 32)}"`,
+    );
+  }
+
+  if (!(inputs instanceof Uint8Array) || inputs.length === 0) {
+    throw new ReplayInputError("the first chunk carries no inputs");
+  }
+
+  return {
+    match: createMatch({
+      playerId: id,
+      difficulty: diff,
+      input: emptyInput(),
+      seed: numericSeed,
+    }),
+    inputs,
+    cursor: 0,
+    total: inputs.length,
+  };
+}
+
+/**
+ * Splice one more live window into a parked replay.
+ *
+ * The park is a *growing* log: the buffer is exactly as long as the windows
+ * received so far, `total` is that same length — which is what keeps
+ * `resumeReplay`'s length check true across every write — and the window lands
+ * at the cursor, which for a stream that kept its order is the first tick not
+ * yet logged. Growing by reallocation rather than pre-sizing to
+ * `MAX_REPLAY_TICKS`: a park that died mid-run should cost the bytes it
+ * verified, not the ceiling it never reached.
+ *
+ * @param {{ match: object, inputs: Uint8Array, cursor: number,
+ *           total: number }} state The park, grown in place.
+ * @param {Uint8Array} chunk The next window; at most `CHUNK_TICKS` long, a
+ *   length the caller checks, since the budget is its own concern.
+ * @returns {object} `state`.
+ * @throws {ReplayInputError} when the window has nothing to add.
+ */
+export function appendChunkInputs(state, chunk) {
+  if (chunk.length === 0) {
+    throw new ReplayInputError("the chunk carries no inputs");
+  }
+
+  const end = state.cursor + chunk.length;
+  if (end > state.inputs.length) {
+    const grown = new Uint8Array(end);
+    grown.set(state.inputs);
+    state.inputs = grown;
+  }
+  state.inputs.set(chunk, state.cursor);
+  state.total = state.inputs.length;
+  return state;
+}
+
+/**
  * Advance the replay by up to `CHUNK_TICKS`, mutating `state`.
  *
  * The input is restored the way the client wrote it — masked onto the shared

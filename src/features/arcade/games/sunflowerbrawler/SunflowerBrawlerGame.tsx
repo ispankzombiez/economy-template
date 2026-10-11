@@ -509,16 +509,29 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   });
 
   /**
-   * Unique key for this run, generated at start. Binds the streamed chunks
-   * together so the worker can resume the same replay across requests.
-   */
-  const runKeyRef = useRef(0);
-
-  /**
-   * Which chunk we're sending next (0, 1, 2...). Each chunk is CHUNK_TICKS
-   * of inputs. Incremented at each wave clear.
+   * Windows of the input log the worker has already been sent, counted in
+   * windows: `chunkIndexRef * CHUNK_TICKS` is the first tick not yet streamed.
+   * Incremented the moment a window is queued, so two pumps can never queue
+   * the same one — the worker resumes a park only at exactly the cursor the
+   * next window belongs at, and windows out of order void the park.
    */
   const chunkIndexRef = useRef(0);
+  /** A window is on the wire. At most one: the ordering above is the reason. */
+  const chunkBusyRef = useRef(false);
+  /** A window was refused or dropped; the stream is doomed and stops. */
+  const chunkBrokenRef = useRef(false);
+  /**
+   * Every window is chained, never raced — same ordering rule as above, held
+   * across the request boundary.
+   */
+  const chunkQueueRef = useRef<Promise<void>>(Promise.resolve());
+  /**
+   * Set when the claim freezes: resolves once every window of the frozen log
+   * has been answered. The payout waits on it, because a claim that lands
+   * before the park holds the whole log makes the worker replay from tick
+   * zero — which a run this long cannot survive.
+   */
+  const chunkDrainedRef = useRef<Promise<void> | null>(null);
 
   const held = useHeldKeys();
   const isTouchDevice = useIsTouchDevice();
@@ -698,9 +711,15 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         playerId,
         difficulty: runDifficulty.name,
       };
-      // Streaming verification: new run key, reset chunk counter.
-      runKeyRef.current = Date.now() + Math.floor(Math.random() * 10000);
+      // Streaming verification: the stream restarts with the run — a window
+      // of the previous run's log would be spliced into this run's park, and
+      // a park inherited from it would be resumed as though this run stepped
+      // it.
       chunkIndexRef.current = 0;
+      chunkBusyRef.current = false;
+      chunkBrokenRef.current = false;
+      chunkQueueRef.current = Promise.resolve();
+      chunkDrainedRef.current = null;
 
       ensureSheets([playerSpec.npc], () => FIGHTER_ANIMS);
       // Wave one's enemies are asked for immediately; the intro banner buys
@@ -831,27 +850,23 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     let accumulator = 0;
 
     /**
-     * Send the next chunk of inputs for streaming verification.
+     * Post one window of the input log — a full `CHUNK_TICKS` of it, or the
+     * short tail that closes a frozen log — and chain it behind every window
+     * already sent.
      *
-     * Called at each wave clear. The worker verifies CHUNK_TICKS of inputs
-     * and parks the replay. The final claim will only need to verify the
-     * last chunk, so the player never waits at the win screen.
+     * The chain is the whole point. The worker resumes a park only at exactly
+     * the cursor the next window belongs at, so two windows in flight at once
+     * would arrive in whichever order the network pleased and the second would
+     * void the park the first just built.
      */
     // Plain async fn (NOT useCallback — this lives inside the loop effect,
     // where a hook call is illegal and crashes React with error #321).
-    const sendVerificationChunk = async (
-      chunkIndex: number,
-      isFinal: boolean,
-    ) => {
-      {
+    const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
+      const send = async () => {
+        if (chunkBrokenRef.current) return;
         // Guard: bootstrap may not exist in practice mode or if context is missing
         const jwt = bootstrap?.jwt;
         if (!jwt) return;
-        const start = chunkIndex * CHUNK_TICKS;
-        const end = isFinal ? inputLogRef.current.length : Math.min(start + CHUNK_TICKS, inputLogRef.current.length);
-        if (start >= end) return; // nothing new to send
-        const chunkInputs = inputLogRef.current.slice(start, end);
-        if (chunkInputs.length === 0) return;
 
         try {
           const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
@@ -864,29 +879,68 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             body: JSON.stringify({
               intent: "verify-chunk",
               nonce: writeNonce(),
-              runKey: runKeyRef.current,
               chunkIndex,
-              inputs: encodeInputLog(Uint8Array.from(chunkInputs)),
-              // First chunk needs the full context; later chunks don't.
+              inputs: encodeInputLog(bytes),
+              // First window carries the run's engine context; the worker
+              // binds it to the open run and carries it through the park.
               ...(chunkIndex === 0
                 ? {
                     seed: runSeedRef.current,
                     playerId: runConfigRef.current.playerId,
                     difficulty: runConfigRef.current.difficulty,
-                    cabinet: "sunflower-brawler",
                   }
                 : {}),
             }),
           });
           if (!res.ok) {
-            // Fire-and-forget still, but surface why the worker rejected it.
+            // Surface why the worker rejected it, and stop: windows are
+            // ordered, so the ones behind a refused window would be refused
+            // for the cursor rather than for their contents.
             const detail = await res.text().catch(() => "");
             console.warn(`[verify-chunk] ${res.status}`, detail);
+            chunkBrokenRef.current = true;
           }
         } catch {
-          // Fire-and-forget: a failed chunk only delays the verdict, doesn't break the claim.
+          // A dropped window cannot be re-sent out of order — the next window
+          // would arrive at a cursor the park no longer has — so the stream
+          // ends here and the claim has to replay the run itself, which a run
+          // this long will not fit in one request.
+          chunkBrokenRef.current = true;
         }
-      }
+      };
+
+      chunkQueueRef.current = chunkQueueRef.current.then(send);
+    };
+
+    /**
+     * Queue every complete window the log has grown since the last one.
+     *
+     * A run logs ~1,669 ticks a wave and a window is 600, so the old
+     * chunk-per-wave-clear cadence trailed the log by tens of thousands of
+     * ticks — the finale's window alone carried ~16,600 of them, which the
+     * worker refuses outright. The window is the unit now: one is queued
+     * whenever a full one exists, whatever frame that happens to be.
+     */
+    const pumpVerificationChunks = () => {
+      if (chunkBusyRef.current || chunkBrokenRef.current) return;
+
+      const start = chunkIndexRef.current * CHUNK_TICKS;
+      if (inputLogRef.current.length - start < CHUNK_TICKS) return;
+
+      const end = start + CHUNK_TICKS;
+      const chunkIndex = chunkIndexRef.current;
+      chunkIndexRef.current += 1;
+      postVerificationWindow(
+        chunkIndex,
+        Uint8Array.from(inputLogRef.current.slice(start, end)),
+      );
+
+      // One window on the wire at a time: the response is what proves the park
+      // took it, and the next window may only be built on a park that did.
+      chunkBusyRef.current = true;
+      void chunkQueueRef.current.finally(() => {
+        chunkBusyRef.current = false;
+      });
     };
 
     /**
@@ -925,21 +979,11 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
           ms: Math.round(match.worldMs),
         });
 
-        // Stream a verification chunk at each wave clear (except the finale,
-        // which is handled by the claim itself).
-        if (match.waveIndex < WAVE_TOTAL) {
-          void sendVerificationChunk(chunkIndexRef.current, false);
-          chunkIndexRef.current += 1;
-        }
-
         // The finale is wave `WAVE_COUNT`; clearing it is the win. Freeze the
         // whole claim here, in the same breath as the log that just completed,
         // so the score, the log and the duration are all read from one settled
         // state of the match rather than from a later frame.
         if (match.waveIndex >= WAVE_TOTAL) {
-          // Send the final chunk (whatever remains) before freezing.
-          void sendVerificationChunk(chunkIndexRef.current, true);
-
           frozenClaimRef.current = {
             cabinet: "sunflower-brawler",
             score: match.score,
@@ -961,7 +1005,38 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
               inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
             },
           };
+
+          // Close the log with the windows still unwritten — normally just the
+          // short tail, more if the pump fell behind a throttled tab. Every
+          // one is chained behind the windows already on the wire, and the
+          // payout effect waits for the chain: a claim that overtakes its own
+          // tail finds a park holding less log than it claims, and the worker
+          // — quite rightly — starts the replay over and refuses the run.
+          if (mode === "reward" && !chunkBrokenRef.current) {
+            const log = inputLogRef.current;
+            let start = chunkIndexRef.current * CHUNK_TICKS;
+            while (start < log.length) {
+              const end = Math.min(start + CHUNK_TICKS, log.length);
+              postVerificationWindow(
+                chunkIndexRef.current,
+                Uint8Array.from(log.slice(start, end)),
+              );
+              chunkIndexRef.current += 1;
+              start = end;
+            }
+          }
+          chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
         }
+      }
+
+      // Stream every full window the log has accumulated since the last one —
+      // every frame, not every wave clear: a wave runs ~1,669 ticks and a
+      // window is 600, so a chunk per wave would trail the log by tens of
+      // thousands of ticks by the time the finale falls. Not after a freeze:
+      // the tail above already closed the log, and windows of endless play
+      // belong to no claim.
+      if (!frozenClaimRef.current && mode === "reward") {
+        pumpVerificationChunks();
       }
     };
 
@@ -1076,10 +1151,18 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       return;
     }
 
-    portalService.send({
-      type: "arcadeMinigame.ravenCoinWon",
-      amount: SUNFLOWER_BRAWLER_RAVEN_COIN_REWARD,
-      verify: claim,
+    // The tail windows are still on the wire when this effect runs — the
+    // freeze, the tail and the `reachedFinale` that triggered this are all
+    // observed in the same frame. The claim may only land once the park holds
+    // the whole log: overtaking it makes the worker start the replay from tick
+    // zero, and a run this long cannot be re-simulated inside one request, so
+    // the refusal that follows is of an honestly won coin.
+    void (chunkDrainedRef.current ?? Promise.resolve()).then(() => {
+      portalService.send({
+        type: "arcadeMinigame.ravenCoinWon",
+        amount: SUNFLOWER_BRAWLER_RAVEN_COIN_REWARD,
+        verify: claim,
+      });
     });
   }, [hud, mode, portalService]);
 

@@ -111,7 +111,9 @@ const {
   CHUNK_TICKS,
   MAX_REPLAY_TICKS,
   ReplayInputError,
+  appendChunkInputs,
   isReplayComplete,
+  openChunkReplay,
   replayOutcome,
   resumeReplay,
   startReplay,
@@ -416,6 +418,137 @@ for (const [ticks, seed, variant] of SCENARIOS) {
     clientContinuations >= steps,
     "the client's continuation budget covers the worker's own ceiling",
     `client=${clientContinuations} needed=${steps}`,
+  );
+}
+
+// ── 5. Live streaming ─────────────────────────────────────────────────────────
+//
+// The claim's park is no longer the only writer: during play the client posts
+// the log's windows as they accumulate, and the park the claim finally resumes
+// is the one *those* built. That path holds different code — `openChunkReplay`
+// and `appendChunkInputs` — and it died once in ways no section above could
+// see, because nothing exercised it at all. These checks replay a run exactly
+// the way the live worker receives it: window, park-as-JSON, resume, next
+// window, verbatim what `intentVerifyChunk` does between two requests.
+
+{
+  const TICKS_STREAM = 3137; // 5 full windows and a 137-tick tail
+  const { logged } = playAndLog(TICKS_STREAM, 2025, 2);
+  const claim = {
+    seed: 2025,
+    playerId: "barlow",
+    difficulty: difficulty.name,
+    ticks: logged.length,
+    inputs: encodeInputLog(Uint8Array.from(logged)),
+  };
+
+  const windows = [];
+  for (let start = 0; start < logged.length; start += CHUNK_TICKS) {
+    windows.push(
+      Uint8Array.from(logged.slice(start, Math.min(start + CHUNK_TICKS, logged.length))),
+    );
+  }
+
+  const rejects = (fn, label, want) => {
+    try {
+      fn();
+      check(false, label, "no error thrown");
+    } catch (error) {
+      check(
+        error instanceof ReplayInputError && error.message.includes(want),
+        label,
+        `threw ${error?.constructor?.name}: ${error?.message}`,
+      );
+    }
+  };
+
+  // The worker's live path, window by window.
+  let state = null;
+  for (const [index, bytes] of windows.entries()) {
+    if (state === null) {
+      state = openChunkReplay({
+        seed: claim.seed,
+        playerId: claim.playerId,
+        difficulty: claim.difficulty,
+        inputs: bytes,
+      });
+    } else {
+      const park = {
+        state: JSON.parse(JSON.stringify(state.match)),
+        cursor: state.cursor,
+        total: state.total,
+        inputs: encodeInputLog(state.inputs),
+      };
+      const base = resumeReplay(park);
+      check(
+        base.cursor === index * CHUNK_TICKS,
+        `stream window ${index}: the park resumes at exactly its own cursor`,
+        `cursor=${base.cursor} expected=${index * CHUNK_TICKS}`,
+      );
+      state = appendChunkInputs(base, bytes);
+    }
+    stepReplay(state, CHUNK_TICKS);
+  }
+
+  // The binding the claim's `parked.total === validated.total` resume check
+  // compares — and the one a fixed-size window buffer could never satisfy: the
+  // park has to grow with every window it receives.
+  check(
+    state.total === claim.ticks && state.cursor === state.total && isReplayComplete(state),
+    "a streamed park holds the whole log and completes when the tail lands",
+    `cursor=${state.cursor} total=${state.total} log=${claim.ticks}`,
+  );
+
+  // Streamed stepping is the same simulation, not an approximation of it.
+  const streamed = replayOutcome(state);
+  const one = replayInOnePass(claim);
+  check(
+    JSON.stringify(streamed) === JSON.stringify(replayOutcome(one)),
+    "a streamed replay reaches the same outcome as a single-pass replay",
+    `streamed=${JSON.stringify(streamed)} one-pass=${JSON.stringify(replayOutcome(one))}`,
+  );
+
+  // What the claim does with a park this complete: resume it under the
+  // claim's own validated log, step the remainder — which is none — and keep
+  // the outcome the windows produced.
+  const final = {
+    match: JSON.parse(JSON.stringify(state.match)),
+    inputs: decodeInputLog(claim.inputs),
+    cursor: state.cursor,
+    total: state.total,
+  };
+  stepReplay(final, CHUNK_TICKS);
+  check(
+    isReplayComplete(final) &&
+      JSON.stringify(replayOutcome(final)) === JSON.stringify(streamed),
+    "the claim resumes a complete streamed park, steps nothing, keeps the outcome",
+  );
+
+  // The rejections that keep the stream honest.
+  rejects(
+    () => appendChunkInputs(state, new Uint8Array(0)),
+    "appendChunkInputs refuses an empty window",
+    "no inputs",
+  );
+  rejects(
+    () => openChunkReplay({ seed: undefined, playerId: "barlow", difficulty: difficulty.name, inputs: windows[0] }),
+    "openChunkReplay refuses a missing seed",
+    "seed",
+  );
+  rejects(
+    () => openChunkReplay({ seed: 2025, playerId: "nobody", difficulty: difficulty.name, inputs: windows[0] }),
+    "openChunkReplay refuses an unknown champion",
+    "unknown champion",
+  );
+  rejects(
+    () => openChunkReplay({ seed: 2025, playerId: "barlow", difficulty: "nightmare", inputs: windows[0] }),
+    "openChunkReplay refuses an unknown difficulty",
+    "unknown difficulty",
+  );
+  rejects(
+    () => openChunkReplay({ seed: 2025, playerId: "barlow", difficulty: difficulty.name, inputs: new Uint8Array(0) }),
+    "openChunkReplay refuses a window with no inputs",
+    "no inputs",
   );
 }
 
