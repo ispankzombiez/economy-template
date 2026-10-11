@@ -679,7 +679,7 @@ synchronised attack rather than a crowd.
 | Difficulty | `reactionMs` | `aggression` | `heavyChance` | `spacingChance` | `speed` | `hpMultiplier` | `maxAttackers` |
 |---|---|---|---|---|---|---|---|
 | Easy | 430 | 0.42 | 0.15 | 0.35 | 0.86 | 0.90 | **1** |
-| Medium | 310 | 0.58 | 0.28 | 0.25 | 0.96 | 1.00 | **2** |
+| Medium | 340 | 0.55 | 0.28 | 0.25 | 0.96 | 1.00 | **2** |
 | Hard | 220 | 0.70 | 0.40 | 0.18 | 1.05 | 1.08 | **2** |
 | Expert | 150 | 0.84 | 0.52 | 0.12 | 1.12 | 1.16 | **3** |
 
@@ -688,6 +688,15 @@ the single most effective difficulty control the genre has. The wave is still
 dangerous with one: it is the *others* closing in while you deal with it that do
 the work. But it is the number that decides whether a mistake costs one hit or
 three.
+
+Medium was nudged from 310 / 0.58 to **340 / 0.55** after live playtesting:
+reaching wave 15 on Medium was fine, but the Gorga finale — 625 HP plus a
+Grimtooth add, both ticking on the band's own reaction clock, against three
+lives shared across all fifteen waves with no refill — outlasted the player
+rather than testing them. ~14 % fewer swing attempts eases both halves, because
+bosses read the band like everything else; trimming Gorga's health instead would
+have shortened only the finale and applied to every band. Waves 1–15 scaling,
+the spawn lists, and Hard/Expert are untouched.
 
 **Controls.** ← → walk along the street, ↑ ↓ step in and out of the plane,
 **Space** attack (three-hit combo), **X** magic (50 meter). Touch gets a

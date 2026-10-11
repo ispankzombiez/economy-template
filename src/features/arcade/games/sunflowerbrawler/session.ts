@@ -94,7 +94,15 @@ const difficulty = (
 
 export const SUNFLOWER_BRAWLER_DIFFICULTIES: SunflowerBrawlerDifficulty[] = [
   difficulty("easy", "Easy", 3, 430, 0.42, 0.15, 0.35, 0.86, 0.9, 1),
-  difficulty("medium", "Medium", 3, 310, 0.58, 0.28, 0.25, 0.96, 1, 2),
+  // Medium sat at 310 / 0.58 and played as a wall rather than a fight: the
+  // wave-15 Gorga finale — 625 HP plus a Grimtooth add, both ticking on this
+  // band's own reaction clock — reliably outlasted a competent player's three
+  // lives, because those lives are shared across all fifteen waves with no
+  // refill. 340 / 0.55 is ~14 % fewer swing attempts across every wave, which
+  // eases the run *and* the finale it pays for; bosses read the band like
+  // everything else, so no enemy-specific numbers moved. Hard and Expert
+  // untouched.
+  difficulty("medium", "Medium", 3, 340, 0.55, 0.28, 0.25, 0.96, 1, 2),
   difficulty("hard", "Hard", 2, 220, 0.7, 0.4, 0.18, 1.05, 1.08, 2),
   difficulty("expert", "Expert", 1, 150, 0.84, 0.52, 0.12, 1.12, 1.16, 3),
 ];
