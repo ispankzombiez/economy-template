@@ -837,9 +837,16 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
      * and parks the replay. The final claim will only need to verify the
      * last chunk, so the player never waits at the win screen.
      */
-    const sendVerificationChunk = useCallback(
-      async (chunkIndex: number, isFinal: boolean) => {
-        if (!bootstrap.jwt) return;
+    // Plain async fn (NOT useCallback — this lives inside the loop effect,
+    // where a hook call is illegal and crashes React with error #321).
+    const sendVerificationChunk = async (
+      chunkIndex: number,
+      isFinal: boolean,
+    ) => {
+      {
+        // Guard: bootstrap may not exist in practice mode or if context is missing
+        const jwt = bootstrap?.jwt;
+        if (!jwt) return;
         const start = chunkIndex * CHUNK_TICKS;
         const end = isFinal ? inputLogRef.current.length : Math.min(start + CHUNK_TICKS, inputLogRef.current.length);
         if (start >= end) return; // nothing new to send
@@ -847,12 +854,12 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         if (chunkInputs.length === 0) return;
 
         try {
-          await fetch(getEconomyWorkerUrl() + "/economy/write", {
+          const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
             method: "POST",
             headers: {
               "content-type": "application/json;charset=UTF-8",
               accept: "application/json",
-              Authorization: `Bearer ${bootstrap.jwt}`,
+              Authorization: `Bearer ${jwt}`,
             },
             body: JSON.stringify({
               intent: "verify-chunk",
@@ -871,12 +878,16 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
                 : {}),
             }),
           });
+          if (!res.ok) {
+            // Fire-and-forget still, but surface why the worker rejected it.
+            const detail = await res.text().catch(() => "");
+            console.warn(`[verify-chunk] ${res.status}`, detail);
+          }
         } catch {
           // Fire-and-forget: a failed chunk only delays the verdict, doesn't break the claim.
         }
-      },
-      [bootstrap.jwt],
-    );
+      }
+    };
 
     /**
      * Log a checkpoint for every wave cleared since the last one, and freeze
