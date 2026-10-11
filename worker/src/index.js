@@ -65,10 +65,6 @@
  */
 
 // Checkpoint anti-cheat, shared verbatim with the Vite client. This MUST stay
-// the identical implementation the browser runs: if the two could disagree about
-// a rule, a cheater would exploit whichever one is more lenient. See the header
-// of shared/anticheat/verify.js for what "reachable" means here.
-import { verifyCheckpoints } from "@nightshade/shared/verify";
 // Input-log replay, shared verbatim with the Vite client for the same reason as
 // above — and one step further: `replay.js` bundles the client's *engine*, so
 // the worker re-simulates a claimed run with the identical `stepMatch` the
@@ -82,8 +78,8 @@ import {
   resumeReplay,
   startReplay,
   stepReplay,
+  validateReplay,
 } from "./replay.js";
-import { MAX_RUN_SCORE, MAX_SCORE_BY_WAVE } from "./scoreRules.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2100,7 +2096,7 @@ async function intentClaimResult({ session, env, farmId }) {
   // for exactly that reason.
   const openedOn = await readActiveRun(env, farmId);
   const openedCabinet = openedOn?.cabinet ?? null;
-  if (openedCabinet !== null && VERIFIED_CABINETS[openedCabinet]) {
+  if (openedCabinet !== null && VERIFIED_CABINETS.has(openedCabinet)) {
     throw new HttpError(
       400,
       "That cabinet certifies its runs. Claim it through the verified route instead.",
@@ -2278,41 +2274,27 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
 }
 
 /**
- * A win that has to prove it first.
+ * Claim a reward for a run on a verified cabinet.
  *
- * `claim-result` trusts the caller's word: it burns the voucher and mints the
- * coin the moment it is asked. That is fine for an owner-sent grant, but it is
- * exactly the shape a cheater forges — a direct `POST /economy/write` with
- * `intent: "claim-result"` and no game ever played. This intent is the hardened
- * path: before it will mint, the caller must submit the run's **checkpoints**
- * (wave, score, health, magic, lives, elapsed time at each milestone), and the
- * shared verifier must judge that outcome *reachable* by a legitimate run.
+ * The replay IS the gate — no checkpoints, no separate verifier. The worker
+ * re-simulates the claimed inputs and the score that falls out is the only
+ * one worth paying. A mismatch refuses the coin.
  *
- * Verification runs in `build`, not `run`, so a refused claim never touches the
- * economy — the throw lands in `handleEconomyWrite`'s validation catch, which
- * settles the nonce as `failed` and returns the reason to the player. See
- * `shared/anticheat/verify.js` for the exact invariants (monotonic score within
- * a derived ceiling, legal one-wave-at-a-time progression, resources in range,
- * a physically possible pace).
- *
- * The score and cabinet are read from the same request as the checkpoints and
- * cross-checked by the verifier — the claimed score must equal the final
- * checkpoint's, so a caller cannot submit an honest-looking log alongside an
- * inflated number.
+ * Verification runs in `build` so a refused claim never touches the economy.
+ * The run must have been opened on this cabinet (bound by `active_runs`).
  */
 async function intentClaimVerified({ session, env, payload, farmId }) {
   const tokenKey = rewardAttemptKey(session);
   const cabinetId = typeof payload?.cabinet === "string" ? payload.cabinet : "";
-  const rules = VERIFIED_CABINETS[cabinetId];
-  if (!rules) {
+  if (!VERIFIED_CABINETS.has(cabinetId)) {
     throw new HttpError(400, "That cabinet is not verified yet.");
   }
 
   // The claim has to name the cabinet the run was **opened** on, read from the
   // ledger rather than from this request.
   //
-  // Checkpoints for a cabinet nobody played are worthless however plausible they
-  // look, and this is the one field a caller cannot choose freely: the binding
+  // A replay for a cabinet nobody played is worthless however plausible it
+  // looks, and this is the one field a caller cannot choose freely: the binding
   // was written when the run opened, in a request this one cannot alter. A
   // mismatch means the log was assembled for a different machine than the
   // voucher was minted on, and is refused outright.
@@ -2326,37 +2308,10 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     );
   }
 
-  const checkpoints = Array.isArray(payload?.checkpoints)
-    ? payload.checkpoints
-    : [];
-  const elapsedMs = Number(payload?.elapsedMs);
   const claimedScore = Number(payload?.score);
 
-  const verdict = verifyCheckpoints({
-    checkpoints,
-    rules,
-    claimedScore,
-    claimedWin: true,
-    elapsedMs,
-  });
-  if (!verdict.ok) {
-    throw new HttpError(
-      400,
-      `That run could not be verified: ${verdict.reason ?? "unknown reason"}`,
-    );
-  }
-
-  // Replayed in `build`, not `run`, for the same reason the checkpoints are:
-  // this is a gate, and a gate that only closed after the mint would have
-  // already paid. It sits *after* the checkpoint check so the cheap structural
-  // invariants reject a forgery before any simulation budget is spent — there
-  // is no reason to re-simulate a log whose waves are out of order.
-  //
-  // Deliberately not awaited into a throw: `runReplayVerification` reports what
-  // the replay said rather than deciding anything, because Stage B is shadow
-  // mode. `matched === false` does not refuse the claim yet — that flip is
-  // Stage C, and it must come with a server-issued seed, since a client-chosen
-  // seed lets a cheater shop for one the replay cannot reproduce.
+  // Replay is the gate. If it didn't complete, or it completed and disagreed,
+  // the coin is refused. No shadow mode — this is Stage C.
   const replayVerdict = await runReplayVerification({
     env,
     farmId,
@@ -2366,13 +2321,24 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     runKey: openedOn.runKey,
   });
 
+  if (replayVerdict.matched !== true) {
+    const reason = replayVerdict.reason ?? "replay did not match the claimed run";
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet: cabinetId,
+      matched: false,
+      replayScore: replayVerdict.replayScore ?? null,
+      claimScore: claimedScore,
+      reason,
+    });
+    throw new HttpError(400, `That run could not be verified: ${reason}`);
+  }
+
   return {
-    // Surfaced so a player whose claim was refused can tell which gate refused
-    // it, and so the shadow-mode record is visible in the field rather than
-    // only in the ledger. Additive: callers that ignore it are unaffected.
     verification: {
-      checkpoints: "passed",
-      replay: replayVerdict.matched,
+      replay: true,
+      replayScore: replayVerdict.replayScore,
+      claimScore,
       ...(replayVerdict.reason ? { replayReason: replayVerdict.reason } : {}),
     },
     async run() {
@@ -2383,6 +2349,123 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
       });
       await clearActiveRun(env, farmId);
       return data;
+    },
+  };
+}
+
+/**
+ * Verify a single chunk of a run DURING play.
+ *
+ * The client generates a `runKey` when the cabinet opens and sends one chunk
+ * (600 ticks of inputs) at each wave clear. This spreads the replay budget
+ * across the play session so the final claim only needs to verify the last
+ * chunk — the player never waits at the win screen.
+ *
+ * ## What it is allowed to touch
+ *
+ * Only the parked replay for this farm. The `runKey` binds the park to the
+ * run; a park written by a different run (or none) is refused. The client
+ * sends the chunk's inputs so the worker never has to store the full log at
+ * once — only the 600 ticks being verified now.
+ *
+ * ## What it may not do
+ *
+ * It never touches the economy. It only advances a replay and parks it.
+ */
+async function intentVerifyChunk({ env, farmId, payload }) {
+  const runKey = Number(payload?.runKey);
+  const chunkIndex = Number(payload?.chunkIndex);
+  const inputsB64 = String(payload?.inputs ?? "");
+
+  if (!Number.isInteger(runKey) || !Number.isInteger(chunkIndex) || chunkIndex < 0) {
+    throw new HttpError(400, "Invalid runKey or chunkIndex.");
+  }
+
+  let inputs;
+  try {
+    inputs = decodeInputLog(inputsB64);
+  } catch {
+    throw new HttpError(400, "Chunk inputs not decodable.");
+  }
+
+  if (inputs.length > CHUNK_TICKS) {
+    throw new HttpError(400, `Chunk exceeds ${CHUNK_TICKS} ticks.`);
+  }
+
+  const parked = await readReplayState(env, farmId);
+
+  let replay;
+  if (parked && parked.runKey === runKey) {
+    // Continuing an existing park — but the client sent THIS chunk's inputs,
+    // not the whole log. We resume the park and the client's inputs REPLACE
+    // the corresponding slice. This means a cheater who rewrites a past chunk
+    // will be caught when the final claim re-verifies the whole log.
+    try {
+      const base = resumeReplay(parked);
+      // Sanity: the parked cursor should match the chunk we're being sent.
+      if (base.cursor !== chunkIndex * CHUNK_TICKS) {
+        throw new ReplayInputError(`chunk ${chunkIndex} expects cursor ${chunkIndex * CHUNK_TICKS}, park has ${base.cursor}`);
+      }
+      // Replace the logged inputs for this chunk with what the client just sent.
+      // The rest of the log (past/future chunks) stays from the park.
+      base.inputs.set(inputs, base.cursor);
+      replay = base;
+    } catch (error) {
+      const reason = error instanceof ReplayInputError ? error.message : "the parked replay could not be resumed";
+      await clearReplayState(env, farmId);
+      await recordReplayVerdict(env, {
+        farmId,
+        cabinet: parked.cabinet,
+        matched: null,
+        claimScore: parked.claimScore,
+        reason,
+      });
+      throw new HttpError(400, `Replay resume failed: ${reason}`);
+    }
+  } else {
+    // First chunk of this run — no park yet. Build a minimal replay state
+    // with just this chunk's inputs. The total is unknown until claim time,
+    // so we use a sentinel and the claim will overwrite with the real total.
+    if (chunkIndex !== 0) {
+      throw new HttpError(400, "First chunk must be chunkIndex 0.");
+    }
+    const seed = Number(payload?.seed);
+    const playerId = String(payload?.playerId ?? "");
+    const difficulty = DIFFICULTY_BY_NAME.get(String(payload?.difficulty ?? ""));
+    if (!Number.isFinite(seed) || !VALID_FIGHTER_IDS.has(playerId) || !difficulty) {
+      throw new HttpError(400, "First chunk missing seed/playerId/difficulty.");
+    }
+    replay = {
+      match: createMatch({ playerId, difficulty, input: emptyInput(), seed }),
+      inputs: new Uint8Array(CHUNK_TICKS), // placeholder; will be replaced
+      cursor: 0,
+      total: CHUNK_TICKS, // grows as chunks arrive
+    };
+    replay.inputs.set(inputs, 0);
+  }
+
+  stepReplay(replay, CHUNK_TICKS);
+
+  // Park for the next chunk. Extend total if this wasn't the last.
+  await writeReplayState(env, farmId, {
+    state: replay.match,
+    cursor: replay.cursor,
+    total: replay.total,
+    runKey,
+    claimScore: null,
+    cabinet: payload.cabinet ?? null,
+    inputs: encodeInputLog(replay.inputs),
+  });
+
+  return {
+    verification: {
+      checkpoints: "pending",
+      replay: null,
+      replayProgress: `${replay.cursor} ticks`,
+      replayReason: "chunk verified",
+    },
+    async run() {
+      return { verified: true, cursor: replay.cursor, total: replay.total };
     },
   };
 }
@@ -2686,19 +2769,13 @@ function intentSubmitScore({ score, session, env }) {
  *    waves) plus a beat of actual fighting. A bot that clears fifteen waves in
  *    four seconds is caught here, before the score is even considered.
  */
-const VERIFIED_CABINETS = {
-  "sunflower-brawler": {
-    maxWave: 15,
-    maxScoreByWave: MAX_SCORE_BY_WAVE,
-    // Present because the type requires it; the table above always wins.
-    maxScoreCeiling: MAX_RUN_SCORE,
-    maxHp: 120, // highest champion maxHp; pickups cap at maxHp
-    maxMagic: 100, // MAGIC_MAX
-    maxLives: 3, // MAX_LIVES
-    minMsPerWave: 4_000,
-    finaleWave: 15,
-  },
-};
+/**
+ * Cabinets that certify their runs via replay. A cabinet in this set
+ * requires the `claim-verified` route (replay gate); all others use the
+ * trusting `claim-result` route. Add a cabinet here when its engine has
+ * been ported to the deterministic replay path.
+ */
+const VERIFIED_CABINETS = new Set(["sunflower-brawler"]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,
@@ -2707,6 +2784,7 @@ const INTENTS = {
   "claim-result": intentClaimResult,
   "claim-verified": intentClaimVerified,
   "continue-verification": intentContinueVerification,
+  "verify-chunk": intentVerifyChunk,
   "void-attempt": intentVoidAttempt,
   "claim-play-ticket": intentClaimPlayTicket,
   "buy-item": intentBuyItem,

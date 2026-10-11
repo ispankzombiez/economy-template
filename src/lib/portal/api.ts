@@ -1,6 +1,8 @@
 import type { MinigameSessionResponse, MinigameActionResponse } from "./types";
 import { PLAYER_ECONOMY_GENERATOR_COLLECTED_ACTION } from "./playerEconomyTypes";
 import { getEconomyWorkerUrl, getMinigamesApiUrl, getUrl } from "./url";
+
+export { getEconomyWorkerUrl };
 // The same two numbers the worker replays with. Chosen together there and here
 // because a continuation budget short of the worker's log ceiling would strand
 // a legal submission mid-verification — see `replayBudget.js`.
@@ -197,7 +199,7 @@ function intentForAction(action: string): EconomyWriteIntent | undefined {
 }
 
 /** A nonce so a double-tap, a retry or a replayed request cannot mint twice. */
-function writeNonce(): string {
+export function writeNonce(): string {
   const random =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()

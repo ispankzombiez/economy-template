@@ -27,6 +27,7 @@ import {
   authoritativePlayerEconomy,
   normalizeMinigameFromApi,
 } from "./runtimeHelpers";
+import { BootstrapProvider } from "./BootstrapContext";
 
 /**
  * Payload the session will send on `POST /action` after an optimistic update.
@@ -447,7 +448,7 @@ export function MinigameSessionProvider({
 
   return (
     <MinigameSessionContext.Provider value={value}>
-      {children}
+      <BootstrapProvider bootstrap={bootstrap}>{children}</BootstrapProvider>
     </MinigameSessionContext.Provider>
   );
 }

@@ -21,7 +21,10 @@ import { useIsNarrowLayout } from "components/ui/useMediaQuery";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
+import { useBootstrap } from "lib/portal/BootstrapContext";
 import type { VerifiedRun } from "lib/portal/api";
+import { writeNonce, getEconomyWorkerUrl } from "lib/portal/api";
+import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
 import { encodeInputLog, inputMask } from "@nightshade/shared/anticheat/inputLog";
 import { NPCIcon } from "../adapters/NPCIcon";
 import { NPC_WEARABLES } from "lib/npcs";
@@ -373,6 +376,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState });
+  const bootstrap = useBootstrap();
 
   const hasRewardRun = useMemo(
     () => isSunflowerBrawlerRewardRunAvailable({ game: portalGameState, isVip }),
@@ -503,6 +507,18 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     playerId: "barlow",
     difficulty: "medium",
   });
+
+  /**
+   * Unique key for this run, generated at start. Binds the streamed chunks
+   * together so the worker can resume the same replay across requests.
+   */
+  const runKeyRef = useRef(0);
+
+  /**
+   * Which chunk we're sending next (0, 1, 2...). Each chunk is CHUNK_TICKS
+   * of inputs. Incremented at each wave clear.
+   */
+  const chunkIndexRef = useRef(0);
 
   const held = useHeldKeys();
   const isTouchDevice = useIsTouchDevice();
@@ -682,6 +698,9 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         playerId,
         difficulty: runDifficulty.name,
       };
+      // Streaming verification: new run key, reset chunk counter.
+      runKeyRef.current = Date.now() + Math.floor(Math.random() * 10000);
+      chunkIndexRef.current = 0;
 
       ensureSheets([playerSpec.npc], () => FIGHTER_ANIMS);
       // Wave one's enemies are asked for immediately; the intro banner buys
@@ -812,6 +831,54 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     let accumulator = 0;
 
     /**
+     * Send the next chunk of inputs for streaming verification.
+     *
+     * Called at each wave clear. The worker verifies CHUNK_TICKS of inputs
+     * and parks the replay. The final claim will only need to verify the
+     * last chunk, so the player never waits at the win screen.
+     */
+    const sendVerificationChunk = useCallback(
+      async (chunkIndex: number, isFinal: boolean) => {
+        if (!bootstrap.jwt) return;
+        const start = chunkIndex * CHUNK_TICKS;
+        const end = isFinal ? inputLogRef.current.length : Math.min(start + CHUNK_TICKS, inputLogRef.current.length);
+        if (start >= end) return; // nothing new to send
+        const chunkInputs = inputLogRef.current.slice(start, end);
+        if (chunkInputs.length === 0) return;
+
+        try {
+          await fetch(getEconomyWorkerUrl() + "/economy/write", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json;charset=UTF-8",
+              accept: "application/json",
+              Authorization: `Bearer ${bootstrap.jwt}`,
+            },
+            body: JSON.stringify({
+              intent: "verify-chunk",
+              nonce: writeNonce(),
+              runKey: runKeyRef.current,
+              chunkIndex,
+              inputs: encodeInputLog(Uint8Array.from(chunkInputs)),
+              // First chunk needs the full context; later chunks don't.
+              ...(chunkIndex === 0
+                ? {
+                    seed: runSeedRef.current,
+                    playerId: runConfigRef.current.playerId,
+                    difficulty: runConfigRef.current.difficulty,
+                    cabinet: "sunflower-brawler",
+                  }
+                : {}),
+            }),
+          });
+        } catch {
+          // Fire-and-forget: a failed chunk only delays the verdict, doesn't break the claim.
+        }
+      },
+      [bootstrap.jwt],
+    );
+
+    /**
      * Log a checkpoint for every wave cleared since the last one, and freeze
      * the claim the moment the finale falls.
      *
@@ -847,11 +914,21 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
           ms: Math.round(match.worldMs),
         });
 
+        // Stream a verification chunk at each wave clear (except the finale,
+        // which is handled by the claim itself).
+        if (match.waveIndex < WAVE_TOTAL) {
+          void sendVerificationChunk(chunkIndexRef.current, false);
+          chunkIndexRef.current += 1;
+        }
+
         // The finale is wave `WAVE_COUNT`; clearing it is the win. Freeze the
         // whole claim here, in the same breath as the log that just completed,
         // so the score, the log and the duration are all read from one settled
         // state of the match rather than from a later frame.
         if (match.waveIndex >= WAVE_TOTAL) {
+          // Send the final chunk (whatever remains) before freezing.
+          void sendVerificationChunk(chunkIndexRef.current, true);
+
           frozenClaimRef.current = {
             cabinet: "sunflower-brawler",
             score: match.score,
