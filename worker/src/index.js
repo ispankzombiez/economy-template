@@ -110,6 +110,14 @@ import {
   runGoFishReplay,
   validateGoFishReplay,
 } from "./gofishReplay.js";
+// Blackjack's verifier — the Solitaire/Go Fish twin again: a session of hands
+// whose proof is the bet/action list. Replays whole in one request.
+import {
+  BlackjackReplayInputError,
+  blackjackReplayOutcome,
+  runBlackjackReplay,
+  validateBlackjackReplay,
+} from "./blackjackReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2432,11 +2440,69 @@ async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore
 }
 
 /**
+ * Verify a Blackjack claim — validate, replay, and record the verdict.
+ *
+ * The Blackjack twin of runSolitaireVerification, for the same structural
+ * reason as Solitaire: a turn-based session proof is its bet/action list,
+ * which replays whole in one request. The three outcomes mirror the others:
+ * an input error (BlackjackReplayInputError) records matched: null as
+ * protocol noise rather than a mismatch, a throw mid-replay records
+ * matched: null because a crash is our defect and not evidence against the
+ * player, and only a completed replay records a real verdict through
+ * blackjackReplayOutcome — the only path that may refuse the coin.
+ *
+ * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
+ */
+async function runBlackjackVerification({ env, farmId, payload, cabinet, claimScore }) {
+  let validated;
+  try {
+    validated = validateBlackjackReplay(payload?.replay);
+  } catch (error) {
+    const reason =
+      error instanceof BlackjackReplayInputError
+        ? error.message
+        : "the replay could not be started";
+    await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
+    return { matched: null, reason };
+  }
+
+  try {
+    const replayed = runBlackjackReplay(validated);
+    const outcome = blackjackReplayOutcome(replayed, claimScore);
+
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      claimScore,
+      reason: outcome.reason,
+    });
+
+    return {
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      reason: outcome.reason,
+    };
+  } catch (error) {
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: null,
+      claimScore,
+      reason: "the replay threw: " + String(error?.message ?? error).slice(0, 200),
+    });
+    return { matched: null, reason: "the replay could not be completed" };
+  }
+}
+
+/**
  * Turn-based cabinets' whole-log verifiers, keyed by cabinet.
  *
  * These games replay their entire ask/move list inside the claim's own
  * request — no parking, no chunks, no continuation (see the headers of
- * `solitaireReplay.js` and `gofishReplay.js` for why). A table rather than
+ * `solitaireReplay.js`, `gofishReplay.js`, and `blackjackReplay.js` for why). A table rather than
  * another nested branch, so the next turn-based cabinet joins with a row:
  * the brawler's chunked verifier stays the default, and an unknown verified
  * cabinet falling through to it fails closed — its validator rejects any
@@ -2446,6 +2512,7 @@ async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore
 const WHOLE_LOG_VERIFIERS = {
   solitaire: runSolitaireVerification,
   gofish: runGoFishVerification,
+  blackjack: runBlackjackVerification,
 };
 
 /**
@@ -2999,6 +3066,7 @@ const VERIFIED_CABINETS = new Set([
   "sunflower-brawler",
   "solitaire",
   "gofish",
+  "blackjack",
 ]);
 
 /**

@@ -3,12 +3,11 @@ import React, {
   useCallback,
   useContext,
   useMemo,
-  useReducer,
+  useRef,
   useState,
 } from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Card } from "../poker/types";
-import { BlackjackDeck } from "./deck";
 import { OuterPanel, InnerPanel } from "components/ui/Panel";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
@@ -21,7 +20,6 @@ import { useVipAccess } from "../adapters/useVipAccess";
 import {
   BLACKJACK_BET_AMOUNTS,
   BlackjackBetAmount,
-  BlackjackGameState,
   BlackjackResult,
 } from "./types";
 import {
@@ -29,127 +27,39 @@ import {
   BLACKJACK_RAVEN_COIN_REWARD,
   BlackjackMode,
   BlackjackDifficulty,
-  calculateHandValue,
   getBlackjackDifficulty,
   isBlackjackRewardRunAvailable,
 } from "./session";
+// The rules live in engine.ts — the same module the worker's replay imports —
+// so this component is a view over one implementation, never a second one.
+import {
+  applyAction,
+  createInitialState,
+  nextHand,
+  startHand,
+  type BlackjackState,
+  calculateHandValue,
+} from "./engine";
+import {
+  encodeBlackjackActionLog,
+  encodeBlackjackLog,
+  MAX_BLACKJACK_ACTIONS,
+} from "@nightshade/shared/anticheat/blackjackLog";
+import type { VerifiedRun } from "lib/portal/api";
 
 // ─── Shared panel size (matches poker) ───────────────────────────────────────
 
 const bjPanelClassName =
   "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
 
-// ─── Reducer ─────────────────────────────────────────────────────────────────
+// ─── Card suit images (same assets as poker) ────────────────────────────────
 
-type GameAction =
-  | {
-      type: "START_HAND";
-      startingChips: number;
-      bet: BlackjackBetAmount | number;
-    }
-  | { type: "DEAL"; playerHand: Card[]; dealerHand: Card[] }
-  | { type: "HIT"; card: Card }
-  | { type: "DOUBLE"; card: Card }
-  | { type: "STAND" }
-  | {
-      type: "RESOLVE";
-      dealerHand: Card[];
-      result: BlackjackResult;
-      netChips: number;
-    }
-  | { type: "NEXT_HAND"; startingChips: number }
-  | { type: "RESET_SESSION"; startingChips: number };
-
-const createInitialState = (startingChips: number): BlackjackGameState => ({
-  status: "idle",
-  playerHand: [],
-  dealerHand: [],
-  currentBet: 10,
-  playerChips: startingChips,
-  lastResult: null,
-  lastNetChips: 0,
-  handsPlayed: 0,
-  totalWinnings: 0,
-  totalLosses: 0,
-});
-
-function reducer(
-  state: BlackjackGameState,
-  action: GameAction,
-): BlackjackGameState {
-  switch (action.type) {
-    case "START_HAND":
-      return {
-        ...state,
-        status: "dealing",
-        playerHand: [],
-        dealerHand: [],
-        currentBet: action.bet,
-        playerChips: action.startingChips - action.bet,
-        lastResult: null,
-        lastNetChips: 0,
-        handsPlayed: state.handsPlayed + 1,
-      };
-
-    case "DEAL":
-      return {
-        ...state,
-        status: "player_turn",
-        playerHand: action.playerHand,
-        dealerHand: action.dealerHand,
-      };
-
-    case "HIT":
-      return {
-        ...state,
-        playerHand: [...state.playerHand, action.card],
-      };
-
-    case "DOUBLE":
-      return {
-        ...state,
-        playerChips: state.playerChips - state.currentBet,
-        currentBet: state.currentBet * 2,
-        playerHand: [...state.playerHand, action.card],
-        status: "dealer_turn",
-      };
-
-    case "STAND":
-      return { ...state, status: "dealer_turn" };
-
-    case "RESOLVE": {
-      const won = action.netChips > 0 ? action.netChips : 0;
-      const lost = action.netChips < 0 ? Math.abs(action.netChips) : 0;
-      return {
-        ...state,
-        status: "gameover",
-        dealerHand: action.dealerHand,
-        playerChips: state.playerChips + state.currentBet + action.netChips,
-        lastResult: action.result,
-        lastNetChips: action.netChips,
-        totalWinnings: state.totalWinnings + won,
-        totalLosses: state.totalLosses + lost,
-      };
-    }
-
-    case "NEXT_HAND":
-      return {
-        ...state,
-        status: "idle",
-        playerHand: [],
-        dealerHand: [],
-        lastResult: null,
-        lastNetChips: 0,
-        playerChips: action.startingChips,
-      };
-
-    case "RESET_SESSION":
-      return createInitialState(action.startingChips);
-
-    default:
-      return state;
-  }
-}
+const suitImages: Record<string, string> = {
+  Kale: ITEM_DETAILS.Kale.image,
+  Barley: ITEM_DETAILS.Barley.image,
+  Wheat: ITEM_DETAILS.Wheat.image,
+  Radish: ITEM_DETAILS.Radish.image,
+};
 
 // ─── Portal state selector ────────────────────────────────────────────────────
 
@@ -172,18 +82,13 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState, type: "full" });
 
-  const [gameState, dispatch] = useReducer(
-    reducer,
-    initialChips,
-    createInitialState,
-  );
-
-  const [deck, setDeck] = useState<BlackjackDeck | null>(null);
+  const [gameState, setGameState] = useState<BlackjackState | null>(null);
   const [selectedBet, setSelectedBet] = useState<BlackjackBetAmount>(10);
   const [sessionMode, setSessionMode] = useState<BlackjackMode | null>(null);
   const [showRules, setShowRules] = useState(false);
   const [confirmExit, setConfirmExit] = useState(false);
   const [rewardRunStarted, setRewardRunStarted] = useState(false);
+  const [rewardSubmitted, setRewardSubmitted] = useState(false);
   const [rewardGranted, setRewardGranted] = useState(false);
 
   const difficulty: BlackjackDifficulty = useMemo(
@@ -200,277 +105,237 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
 
   const realChips = initialChips || BLACKJACK_STARTING_CHIPS;
 
-  // Derived state
-  const playerValue = useMemo(
-    () => calculateHandValue(gameState.playerHand),
-    [gameState.playerHand],
-  );
-  const dealerValue = useMemo(
-    () => calculateHandValue(gameState.dealerHand),
-    [gameState.dealerHand],
-  );
-  const chipsToGoal = Math.max(targetChips - gameState.playerChips, 0);
-  const handsRemaining = Math.max(maxHands - gameState.handsPlayed, 0);
-  const sessionWon = gameState.playerChips >= targetChips;
-  const sessionLost =
-    gameState.status === "gameover" &&
-    !sessionWon &&
-    (gameState.playerChips <= 0 || gameState.handsPlayed >= maxHands);
-  const sessionComplete = sessionWon || sessionLost;
-  const canPlayNextHand = gameState.status === "gameover" && !sessionComplete;
+  // ─── Reward run hook ────────────────────────────────────────────────────────
 
-  const handleSessionExit = () => {
-    // Finished: leave the arcade outright. A half-finished run asks first —
-    // in-game, because `window.confirm` is auto-dismissed in this iframe.
-    if (sessionComplete) {
-      setShowRules(false);
-      onClose?.();
-      return;
-    }
-
-    setConfirmExit(true);
-  };
-
-  /**
-   * The "are you sure?" box, built once and rendered by **every** screen.
-   *
-   * This has to be shared across branches: `handleSessionExit` is reachable from
-   * the opening bet screen as well as the in-hand and results screens, but each
-   * screen is its own early `return`. When the confirm only existed in the main
-   * branch, opening it from the bet screen set the flag and rendered nothing —
-   * a dead EXIT button that left the player stuck in the cabinet with a paid
-   * run still open (and its Play Ticket already spent).
-   */
-  const sessionExitConfirm = confirmExit ? (
-    <ConfirmPanel
-      title="EXIT BLACKJACK?"
-      body="Your current hand and chips in this session will be lost. This cannot be undone."
-      confirmLabel="CONFIRM — EXIT"
-      onCancel={() => setConfirmExit(false)}
-      onConfirm={() => {
-        setConfirmExit(false);
-        setShowRules(false);
-        onClose?.();
-      }}
-    />
-  ) : null;
-
-  // ─── Card suit images (same assets as poker) ────────────────────────────────
-
-  const suitImages: Record<string, string> = {
-    Kale: ITEM_DETAILS.Kale.image,
-    Barley: ITEM_DETAILS.Barley.image,
-    Wheat: ITEM_DETAILS.Wheat.image,
-    Radish: ITEM_DETAILS.Radish.image,
-  };
-
-  // ─── Game logic ───────────────────────────────────────────────────────────
-
-  const startHand = useCallback(
-    (mode: BlackjackMode) => {
-      const bet = selectedBet;
-      const chips =
-        gameState.status === "idle" && gameState.handsPlayed === 0
-          ? realChips
-          : gameState.playerChips;
-
-      if (chips < bet) return;
-
-      setSessionMode(mode);
-      const newDeck = new BlackjackDeck();
-      setDeck(newDeck);
-
-      dispatch({ type: "START_HAND", startingChips: chips, bet });
-
-      // Deal 2 cards each
-      const playerHand = [newDeck.deal(), newDeck.deal()];
-      const dealerHand = [newDeck.deal(), newDeck.deal()];
-
-      setTimeout(() => {
-        dispatch({ type: "DEAL", playerHand, dealerHand });
-
-        // Start reward attempt on first reward hand
-        if (mode === "reward" && !rewardRunStarted) {
-          portalService.send({
-            type: "arcadeMinigame.started",
-            name: "blackjack",
-          });
-          startAttempt();
-          setRewardRunStarted(true);
-        }
-
-        // Immediate blackjack check
-        const pv = calculateHandValue(playerHand);
-        const dv = calculateHandValue(dealerHand);
-
-        if (pv.isBlackjack || dv.isBlackjack) {
-          setTimeout(() => {
-            resolveHand(
-              playerHand,
-              dealerHand,
-              newDeck,
-              chips - bet,
-              bet,
-              mode,
-            );
-          }, 600);
-        }
-      }, 300);
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [selectedBet, gameState, realChips, rewardRunStarted],
-  );
-
-  // Free run first, then 1 burned Play Ticket per attempt — with the "are you
-  // sure?" box in between. `isBlackjackRewardRunAvailable` is kept as the
-  // availability check so the button and the store can never disagree.
   const rewardRun = useRewardRun({
     game: portalGameState,
     minigame: "blackjack",
     isVip,
     portalService,
-    startRewardRun: () => startHand("reward"),
+    startRewardRun: () => startSession("reward"),
   });
 
-  const resolveHand = useCallback(
-    (
-      finalPlayerHand: Card[],
-      finalDealerHand: Card[],
-      activeDeck: BlackjackDeck,
-      chipsAfterBet: number,
-      bet: number,
-      mode: BlackjackMode | null,
-    ) => {
-      // Dealer hits until 17+
-      const dealerFinal = [...finalDealerHand];
-      let dv = calculateHandValue(dealerFinal);
+  /** The run's proof, captured as it happens rather than reconstructed after.
+   *
+   * `moveLogRef` holds every bet and action the engine actually applied,
+   * `runSeedRef` the seed the decks were shuffled from, and
+   * `runStartedAtRef` when the session opened. The claim is built from these
+   * at the moment the session ends; see `completeRewardIfNeeded`.
+   */
+  const moveLogRef = useRef<{
+    difficultyIdx: number;
+    hands: { betIdx: number; actions: number[] }[];
+  }>({ difficultyIdx: 0, hands: [] });
+  const runSeedRef = useRef<number | null>(null);
+  const runStartedAtRef = useRef<number>(0);
+  const currentHandLogRef = useRef<number[]>([]);
 
-      while (dv.soft < 17) {
-        dealerFinal.push(activeDeck.deal());
-        dv = calculateHandValue(dealerFinal);
-      }
+  const getRunSeed = useCallback(() => {
+    return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+  }, []);
 
-      const pv = calculateHandValue(finalPlayerHand);
+  const getDifficultyIdx = useCallback(() => {
+    // Must match session.ts BLACKJACK_DIFFICULTIES order
+    return ["easy", "medium", "hard", "expert"].findIndex(
+      (d) => d === difficulty.name,
+    );
+  }, [difficulty]);
 
-      let result: BlackjackResult;
-      let netChips: number;
+  const returnToMenu = useCallback(() => {
+    setShowRules(false);
+    setConfirmExit(false);
+    setSessionMode(null);
+    setGameState(null);
+    moveLogRef.current = { difficultyIdx: 0, hands: [] };
+    runSeedRef.current = null;
+  }, []);
 
-      if (pv.isBust) {
-        result = "dealer";
-        netChips = -bet;
-      } else if (dv.isBust) {
-        result = pv.isBlackjack ? "blackjack" : "player";
-        netChips = pv.isBlackjack ? Math.floor(bet * 1.5) : bet;
-      } else if (pv.isBlackjack && !dv.isBlackjack) {
-        result = "blackjack";
-        netChips = Math.floor(bet * 1.5);
-      } else if (pv.soft > dv.soft) {
-        result = "player";
-        netChips = bet;
-      } else if (dv.soft > pv.soft) {
-        result = "dealer";
-        netChips = -bet;
-      } else {
-        result = "push";
-        netChips = 0;
-      }
+  const startSession = useCallback(
+    (mode: BlackjackMode) => {
+      const seed = getRunSeed();
 
-      const finalChips = chipsAfterBet + bet + netChips;
-      const wonSession = finalChips >= targetChips;
-      const endSession =
-        wonSession || finalChips <= 0 || gameState.handsPlayed >= maxHands;
+      setSessionMode(mode);
+      setRewardSubmitted(false);
+      setRewardGranted(false);
+      moveLogRef.current = { difficultyIdx: getDifficultyIdx(), hands: [] };
+      runSeedRef.current = seed;
+      runStartedAtRef.current = Date.now();
+      setGameState(createInitialState(seed, difficulty));
 
-      dispatch({ type: "RESOLVE", dealerHand: dealerFinal, result, netChips });
-
-      if (mode === "reward" && endSession) {
-        submitScore({ score: Math.max(finalChips, 0) });
-
-        if (wonSession && !rewardGranted) {
-          portalService.send({
-            type: "arcadeMinigame.ravenCoinWon",
-            amount: BLACKJACK_RAVEN_COIN_REWARD,
-          });
-          setRewardGranted(true);
-        }
+      if (mode === "reward" && !rewardRunStarted) {
+        portalService.send({ type: "arcadeMinigame.started", name: "blackjack" });
+        startAttempt();
+        setRewardRunStarted(true);
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [targetChips, maxHands, gameState.handsPlayed, rewardGranted],
+    [getRunSeed, getDifficultyIdx, portalService, rewardRunStarted],
   );
 
-  const handleHit = useCallback(() => {
-    if (!deck || gameState.status !== "player_turn") return;
-    const card = deck.deal();
-    dispatch({ type: "HIT", card });
+  const startNewHand = useCallback(
+    (bet: number) => {
+      if (!gameState) return;
+      currentHandLogRef.current = [];
+      const next = startHand(gameState, bet);
+      if (next.currentHand) {
+        // Record the bet
+        const betIdx = BLACKJACK_BET_AMOUNTS.findIndex((b) => b === bet);
+        if (betIdx >= 0) {
+          moveLogRef.current.hands.push({ betIdx, actions: [] });
+        }
+      }
+      setGameState(next);
+    },
+    [gameState],
+  );
 
-    const newHand = [...gameState.playerHand, card];
-    const pv = calculateHandValue(newHand);
+  const handleAction = useCallback(
+    (action: number) => {
+      if (!gameState) return;
+      const next = applyAction(gameState, action);
+      if (next === gameState) return;
 
-    if (pv.isBust || pv.soft === 21) {
-      setTimeout(() => {
-        resolveHand(
-          newHand,
-          gameState.dealerHand,
-          deck,
-          gameState.playerChips,
-          gameState.currentBet,
-          sessionMode,
-        );
-      }, 400);
-    }
-  }, [deck, gameState, sessionMode, resolveHand]);
+      // Record the action if state changed
+      currentHandLogRef.current.push(action);
+      const hands = moveLogRef.current.hands;
+      if (hands.length > 0) {
+        hands[hands.length - 1].actions = [...currentHandLogRef.current];
+      }
 
-  const handleStand = useCallback(() => {
-    if (!deck || gameState.status !== "player_turn") return;
-    dispatch({ type: "STAND" });
-
-    setTimeout(() => {
-      resolveHand(
-        gameState.playerHand,
-        gameState.dealerHand,
-        deck,
-        gameState.playerChips,
-        gameState.currentBet,
-        sessionMode,
-      );
-    }, 300);
-  }, [deck, gameState, sessionMode, resolveHand]);
-
-  const handleDouble = useCallback(() => {
-    if (!deck || gameState.status !== "player_turn") return;
-    if (gameState.playerChips < gameState.currentBet) return;
-
-    const card = deck.deal();
-    dispatch({ type: "DOUBLE", card });
-
-    const newHand = [...gameState.playerHand, card];
-
-    setTimeout(() => {
-      resolveHand(
-        newHand,
-        gameState.dealerHand,
-        deck,
-        gameState.playerChips - gameState.currentBet,
-        gameState.currentBet * 2,
-        sessionMode,
-      );
-    }, 400);
-  }, [deck, gameState, sessionMode, resolveHand]);
+      setGameState(next);
+    },
+    [gameState],
+  );
 
   const handleNextHand = useCallback(() => {
-    dispatch({ type: "NEXT_HAND", startingChips: gameState.playerChips });
-  }, [gameState.playerChips]);
+    if (!gameState) return;
+    const next = nextHand(gameState);
+    setGameState(next);
+  }, [gameState]);
 
   const handlePracticeAgain = useCallback(() => {
+    if (sessionMode !== "practice") return;
+    const seed = getRunSeed();
+    runSeedRef.current = seed;
+    runStartedAtRef.current = Date.now();
+    moveLogRef.current = { difficultyIdx: getDifficultyIdx(), hands: [] };
+    currentHandLogRef.current = [];
+    setGameState(createInitialState(seed, difficulty));
     setRewardRunStarted(false);
     setRewardGranted(false);
-    dispatch({ type: "RESET_SESSION", startingChips: realChips });
-  }, [realChips]);
+    setConfirmExit(false);
+  }, [getRunSeed, getDifficultyIdx, difficulty, sessionMode]);
 
-  // ─── Shared CardDisplay (same look as poker) ──────────────────────────────
+  const handleSessionExit = () => {
+    if (sessionComplete) {
+      setShowRules(false);
+      onClose?.();
+      return;
+    }
+    setConfirmExit(true);
+  };
+
+  // ─── Derived state ────────────────────────────────────────────────────────
+
+  const currentHand = gameState?.currentHand ?? null;
+  const handStatus = currentHand?.status ?? "idle";
+
+  const playerValue = useMemo(
+    () => (currentHand
+      ? calculateHandValue(currentHand.playerHand)
+      : { hard: 0, soft: 0, isBust: false, isBlackjack: false }),
+    [currentHand?.playerHand],
+  );
+  const dealerValue = useMemo(
+    () => (currentHand
+      ? calculateHandValue(currentHand.dealerHand)
+      : { hard: 0, soft: 0, isBust: false, isBlackjack: false }),
+    [currentHand?.dealerHand],
+  );
+  const chipsToGoal = gameState
+    ? Math.max(targetChips - gameState.playerChips, 0)
+    : targetChips;
+  const handsRemaining = gameState
+    ? Math.max(maxHands - gameState.handsPlayed, 0)
+    : maxHands;
+  const sessionWon = gameState?.sessionWon ?? false;
+  const sessionLost =
+    handStatus === "gameover" &&
+    !sessionWon &&
+    ((gameState?.playerChips ?? 0) <= 0 || (gameState?.handsPlayed ?? 0) >= maxHands);
+  const sessionComplete = sessionWon || sessionLost;
+  const canPlayNextHand =
+    handStatus === "gameover" && !sessionComplete;
+
+  // ─── Settlement at session end ──────────────────────────────────────────────
+
+  const completeRewardIfNeeded = useCallback(() => {
+    if (!gameState || !gameState.sessionOver || sessionMode !== "reward") {
+      return;
+    }
+
+    if (!rewardSubmitted) {
+      submitScore({ score: Math.max(gameState.playerChips, 0) });
+      setRewardSubmitted(true);
+    }
+
+    if (!gameState.sessionWon || rewardGranted) {
+      return;
+    }
+
+    if (moveLogRef.current.hands.length === 0) {
+      console.error("[blackjack] no hands in replay log");
+      return;
+    }
+
+    const totalActions = moveLogRef.current.hands.reduce(
+      (sum, h) => sum + h.actions.length,
+      0,
+    );
+    if (totalActions > MAX_BLACKJACK_ACTIONS) {
+      console.error("[blackjack] action log exceeded the replay ceiling");
+      return;
+    }
+
+    const verify: VerifiedRun = {
+      cabinet: "blackjack",
+      score: gameState.playerChips,
+      checkpoints: [],
+      elapsedMs: Date.now() - runStartedAtRef.current,
+      replay: {
+        seed: runSeedRef.current ?? 0,
+        difficulty: moveLogRef.current.difficultyIdx,
+        actions: encodeBlackjackLog(
+          encodeBlackjackActionLog(
+            moveLogRef.current.difficultyIdx,
+            moveLogRef.current.hands,
+          ),
+        ),
+      },
+    };
+
+    portalService.send({
+      type: "arcadeMinigame.ravenCoinWon",
+      amount: BLACKJACK_RAVEN_COIN_REWARD,
+      verify,
+    });
+    setRewardGranted(true);
+  }, [
+    gameState,
+    sessionMode,
+    rewardSubmitted,
+    rewardGranted,
+    portalService,
+  ]);
+
+  // Render-time settlement (Solitaire/Go Fish pattern)
+  if (gameState?.sessionOver) {
+    completeRewardIfNeeded();
+  }
+
+  // ─── UI Helpers ────────────────────────────────────────────────────────────
 
   const isResultsStage =
-    gameState.status === "gameover" || gameState.status === "dealer_turn";
+    handStatus === "gameover" || handStatus === "dealer_turn";
   const cardSizeClass = isResultsStage ? "w-12 h-[4.5rem]" : "w-16 h-24";
   const centerRankClass = isResultsStage ? "text-lg" : "text-2xl";
   const iconWidth = isResultsStage ? 8 : 10;
@@ -524,15 +389,40 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     );
   };
 
+  const resultLabel = (): string => {
+    if (sessionWon) {
+      return sessionMode === "reward" ? "🎉 JACKPOT!" : "🎯 PRACTICE CLEAR";
+    }
+    switch (currentHand?.lastResult) {
+      case "blackjack":
+        return "🃏 BLACKJACK!";
+      case "player":
+        return "🎉 YOU WIN";
+      case "dealer":
+        return sessionLost ? "💥 RUN OVER" : "💥 DEALER WINS";
+      case "push":
+        return "🤝 PUSH";
+      default:
+        return "";
+    }
+  };
+
+  const resultColor = (): string => {
+    if (
+      sessionWon ||
+      currentHand?.lastResult === "player" ||
+      currentHand?.lastResult === "blackjack"
+    ) {
+      return "bg-green-100 border-2 border-green-500";
+    }
+    if (currentHand?.lastResult === "push") {
+      return "bg-yellow-100 border-2 border-yellow-500";
+    }
+    return "bg-red-100 border-2 border-red-500";
+  };
+
   // ─── Rules popover ────────────────────────────────────────────────────────
 
-  // The button is 44x44 so a thumb can find it; the *circle* stays 28px.
-  //
-  // `h-7 w-7` measured 28px at a 358px viewport, which was the only sub-44px
-  // control Blackjack had, and growing the circle itself to 44px would put it
-  // over the HUD's "Bet" cell. So the circle becomes an inner span pinned to
-  // the button's own top-right corner — `items-start justify-end` — which
-  // leaves it at exactly the pixel it was already at, inside a 44x44 target.
   const renderRulesButton = () => (
     <div className="absolute right-4 top-4 z-20">
       <button
@@ -582,43 +472,26 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     </div>
   );
 
-  // ─── Result label helpers ─────────────────────────────────────────────────
+  // ─── Confirm exit dialog ──────────────────────────────────────────────────
 
-  const resultLabel = (): string => {
-    if (sessionWon) {
-      return sessionMode === "reward" ? "🎉 JACKPOT!" : "🎯 PRACTICE CLEAR";
-    }
-    switch (gameState.lastResult) {
-      case "blackjack":
-        return "🃏 BLACKJACK!";
-      case "player":
-        return "🎉 YOU WIN";
-      case "dealer":
-        return sessionLost ? "💥 RUN OVER" : "💥 DEALER WINS";
-      case "push":
-        return "🤝 PUSH";
-      default:
-        return "";
-    }
-  };
+  const sessionExitConfirm = confirmExit ? (
+    <ConfirmPanel
+      title="EXIT BLACKJACK?"
+      body="Your current hand and chips in this session will be lost. This cannot be undone."
+      confirmLabel="CONFIRM — EXIT"
+      onCancel={() => setConfirmExit(false)}
+      onConfirm={() => {
+        setConfirmExit(false);
+        setShowRules(false);
+        onClose?.();
+      }}
+    />
+  ) : null;
 
-  const resultColor = (): string => {
-    if (
-      sessionWon ||
-      gameState.lastResult === "player" ||
-      gameState.lastResult === "blackjack"
-    ) {
-      return "bg-green-100 border-2 border-green-500";
-    }
-    if (gameState.lastResult === "push") {
-      return "bg-yellow-100 border-2 border-yellow-500";
-    }
-    return "bg-red-100 border-2 border-red-500";
-  };
+  // ─── Render screens ────────────────────────────────────────────────────────
 
-  // ─── Idle screen ──────────────────────────────────────────────────────────
-
-  if (gameState.status === "idle" && gameState.handsPlayed === 0) {
+  // Idle / menu screen
+  if (!gameState || (handStatus === "idle" && gameState.handsPlayed === 0)) {
     return (
       <OuterPanel className={bjPanelClassName}>
         <div className="relative flex h-full flex-col gap-6 overflow-y-auto p-6">
@@ -634,44 +507,29 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           <InnerPanel className="bg-yellow-100 p-4">
             <div className="grid grid-cols-4 gap-4 text-center">
               <div>
-                <div className="text-sm text-gray-700 font-semibold">
-                  REWARD
-                </div>
+                <div className="text-sm text-gray-700 font-semibold">REWARD</div>
                 <div className="flex items-center justify-center gap-1 text-2xl font-bold text-yellow-700">
                   {BLACKJACK_RAVEN_COIN_REWARD}
-                  <img
-                    src={ravenCoinIcon}
-                    alt="RavenCoin"
-                    className="w-6 h-6"
-                  />
+                  <img src={ravenCoinIcon} alt="RavenCoin" className="w-6 h-6" />
                 </div>
               </div>
               <div>
                 <div className="text-sm text-gray-700 font-semibold">CHIPS</div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {realChips}
-                </div>
+                <div className="text-2xl font-bold text-yellow-700">{realChips}</div>
               </div>
               <div>
                 <div className="text-sm text-gray-700 font-semibold">GOAL</div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {targetChips}
-                </div>
+                <div className="text-2xl font-bold text-yellow-700">{targetChips}</div>
               </div>
               <div>
                 <div className="text-sm text-gray-700 font-semibold">HANDS</div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {maxHands}
-                </div>
+                <div className="text-2xl font-bold text-yellow-700">{maxHands}</div>
               </div>
             </div>
           </InnerPanel>
 
-          {/* Bet selector */}
           <div>
-            <div className="text-center font-bold mb-3 text-gray-800">
-              SELECT YOUR OPENING BET
-            </div>
+            <div className="text-center font-bold mb-3 text-gray-800">SELECT YOUR OPENING BET</div>
             <div className="grid grid-cols-5 gap-2">
               {BLACKJACK_BET_AMOUNTS.map((amount) => (
                 <button
@@ -693,7 +551,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           </div>
 
           <button
-            onClick={rewardRun.start}
+            onClick={() => startSession("reward")}
             disabled={!hasRewardRun || realChips < selectedBet}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun && realChips >= selectedBet
@@ -714,7 +572,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           </button>
 
           <button
-            onClick={() => startHand("practice")}
+            onClick={() => startSession("practice")}
             disabled={realChips < selectedBet}
             className="w-full px-6 py-4 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg text-lg"
           >
@@ -727,14 +585,9 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           {rewardRun.dialog}
 
           {rewardRun.error && (
-            <p className="text-center text-xs font-semibold text-red-600">
-              {rewardRun.error}
-            </p>
+            <p className="text-center text-xs font-semibold text-red-600">{rewardRun.error}</p>
           )}
 
-          {/* The menu is before any run exists — nothing has been spent, so it
-              leaves straight away, the way every other cabinet's menu does.
-              Only a run already in progress asks first. */}
           {onClose && (
             <button
               onClick={onClose}
@@ -750,9 +603,8 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     );
   }
 
-  // ─── Mid-session bet screen (between hands) ───────────────────────────────
-
-  if (gameState.status === "idle" && gameState.handsPlayed > 0) {
+  // Between hands bet screen
+  if (handStatus === "idle" && gameState.handsPlayed > 0) {
     return (
       <OuterPanel className={bjPanelClassName}>
         <div className="relative flex h-full flex-col gap-6 overflow-y-auto p-6">
@@ -769,33 +621,21 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
             <div className="grid grid-cols-3 gap-4 text-center">
               <div>
                 <div className="text-sm text-gray-700 font-semibold">CHIPS</div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {gameState.playerChips}
-                </div>
+                <div className="text-2xl font-bold text-yellow-700">{gameState.playerChips}</div>
               </div>
               <div>
-                <div className="text-sm text-gray-700 font-semibold">
-                  NEEDED
-                </div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {chipsToGoal}
-                </div>
+                <div className="text-sm text-gray-700 font-semibold">NEEDED</div>
+                <div className="text-2xl font-bold text-yellow-700">{chipsToGoal}</div>
               </div>
               <div>
-                <div className="text-sm text-gray-700 font-semibold">
-                  HANDS LEFT
-                </div>
-                <div className="text-2xl font-bold text-yellow-700">
-                  {handsRemaining}
-                </div>
+                <div className="text-sm text-gray-700 font-semibold">HANDS LEFT</div>
+                <div className="text-2xl font-bold text-yellow-700">{handsRemaining}</div>
               </div>
             </div>
           </InnerPanel>
 
           <div>
-            <div className="text-center font-bold mb-3 text-gray-800">
-              SELECT BET AMOUNT
-            </div>
+            <div className="text-center font-bold mb-3 text-gray-800">SELECT BET AMOUNT</div>
             <div className="grid grid-cols-5 gap-2">
               {BLACKJACK_BET_AMOUNTS.map((amount) => (
                 <button
@@ -818,21 +658,17 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
 
           <InnerPanel className="bg-blue-100 p-4 text-center border-2 border-blue-400">
             <div className="text-sm text-blue-700 font-semibold">YOUR BET</div>
-            <div className="text-3xl font-bold text-blue-800">
-              {selectedBet}
-            </div>
+            <div className="text-3xl font-bold text-blue-800">{selectedBet}</div>
           </InnerPanel>
 
           <button
-            onClick={() => startHand(sessionMode ?? "practice")}
+            onClick={() => startNewHand(selectedBet)}
             disabled={gameState.playerChips < selectedBet}
             className="w-full px-6 py-3 bg-green-500 text-white font-bold rounded-lg hover:bg-green-600 active:scale-95 transition-all shadow-lg text-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             ✓ DEAL
           </button>
 
-          {/* Between hands a run is open, so this asks before it goes — the
-              same gate as the table screen's BACK TO ARCADE. */}
           {onClose && (
             <button
               onClick={handleSessionExit}
@@ -848,14 +684,11 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     );
   }
 
-  // ─── Main game table ──────────────────────────────────────────────────────
-
+  // Main game table
   const dealerDisplayValue =
-    gameState.status === "player_turn"
-      ? calculateHandValue([gameState.dealerHand[0]]).soft // show only first card
+    handStatus === "player_turn"
+      ? calculateHandValue([currentHand?.dealerHand[0] ?? { suit: "Kale", rank: "A" }]).soft
       : dealerValue.soft;
-
-  const playerDisplayValue = playerValue.soft;
 
   return (
     <OuterPanel className={bjPanelClassName}>
@@ -867,35 +700,21 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
         {/* HUD */}
         <div className="grid grid-cols-3 gap-2 px-2 text-center">
           <div>
-            <div className="text-xs uppercase tracking-wide text-gray-500">
-              Chips
-            </div>
-            <span className="text-3xl font-bold text-green-700">
-              {gameState.playerChips}
-            </span>
+            <div className="text-xs uppercase tracking-wide text-gray-500">Chips</div>
+            <span className="text-3xl font-bold text-green-700">{gameState.playerChips}</span>
           </div>
           <div>
-            <div className="text-xs uppercase tracking-wide text-gray-500">
-              Hand
-            </div>
-            <span className="text-2xl font-bold text-blue-700">
-              {gameState.handsPlayed}/{maxHands}
-            </span>
+            <div className="text-xs uppercase tracking-wide text-gray-500">Hand</div>
+            <span className="text-2xl font-bold text-blue-700">{gameState.handsPlayed}/{maxHands}</span>
           </div>
           <div>
-            <div className="text-xs uppercase tracking-wide text-gray-500">
-              Bet
-            </div>
-            <span className="text-2xl font-bold text-purple-700">
-              {gameState.currentBet}
-            </span>
+            <div className="text-xs uppercase tracking-wide text-gray-500">Bet</div>
+            <span className="text-2xl font-bold text-purple-700">{currentHand?.currentBet ?? 0}</span>
           </div>
         </div>
 
         {/* Progress bar */}
-        <InnerPanel
-          className={`bg-yellow-50 text-center border border-yellow-300 ${isResultsStage ? "p-2" : "p-3"}`}
-        >
+        <InnerPanel className={`bg-yellow-50 text-center border border-yellow-300 ${isResultsStage ? "p-2" : "p-3"}`}>
           <div className="text-sm font-semibold text-gray-800">
             {chipsToGoal > 0
               ? `${chipsToGoal} chips to go to clear the table.`
@@ -909,74 +728,58 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
         </InnerPanel>
 
         {/* Dealer hand */}
-        <InnerPanel
-          className={`bg-gray-700 text-white ${isResultsStage ? "p-2" : "p-4"}`}
-        >
-          <div
-            className={`text-center font-bold ${isResultsStage ? "mb-1 text-sm" : "mb-2"}`}
-          >
+        <InnerPanel className={`bg-gray-700 text-white ${isResultsStage ? "p-2" : "p-4"}`}>
+          <div className={`text-center font-bold ${isResultsStage ? "mb-1 text-sm" : "mb-2"}`}>
             🏠 DEALER — {dealerDisplayValue}
-            {gameState.status === "player_turn" ? " + ?" : ""}
-            {dealerValue.isBust && gameState.status !== "player_turn"
-              ? " (BUST)"
-              : ""}
+            {handStatus === "player_turn" ? " + ?" : ""}
+            {dealerValue.isBust && handStatus !== "player_turn" ? " (BUST)" : ""}
           </div>
-          <div
-            className={`flex justify-center ${isResultsStage ? "gap-1" : "gap-2"}`}
-          >
-            {gameState.dealerHand.map((card, i) => (
+          <div className={`flex justify-center ${isResultsStage ? "gap-1" : "gap-2"}`}>
+            {currentHand?.dealerHand.map((card, i) => (
               <CardDisplay
                 key={i}
                 card={card}
-                hidden={i === 1 && gameState.status === "player_turn"}
+                hidden={i === 1 && handStatus === "player_turn"}
               />
             ))}
           </div>
         </InnerPanel>
 
         {/* Player hand */}
-        <InnerPanel
-          className={`bg-blue-700 text-white border-4 border-yellow-400 ${isResultsStage ? "p-2" : "p-4"}`}
-        >
-          <div
-            className={`text-center font-bold ${isResultsStage ? "mb-1 text-sm" : "mb-2"}`}
-          >
-            👤 YOUR HAND — {playerDisplayValue}
+        <InnerPanel className={`bg-blue-700 text-white border-4 border-yellow-400 ${isResultsStage ? "p-2" : "p-4"}`}>
+          <div className={`text-center font-bold ${isResultsStage ? "mb-1 text-sm" : "mb-2"}`}>
+            👤 YOUR HAND — {playerValue.soft}
             {playerValue.isBust ? " (BUST)" : ""}
             {playerValue.isBlackjack ? " ✨ BLACKJACK!" : ""}
           </div>
-          <div
-            className={`flex justify-center flex-wrap ${isResultsStage ? "gap-1" : "gap-2"}`}
-          >
-            {gameState.playerHand.map((card, i) => (
+          <div className={`flex justify-center flex-wrap ${isResultsStage ? "gap-1" : "gap-2"}`}>
+            {currentHand?.playerHand.map((card, i) => (
               <CardDisplay key={i} card={card} />
             ))}
           </div>
         </InnerPanel>
 
         {/* Action area */}
-        <div
-          className={`flex flex-col ${isResultsStage ? "gap-1.5" : "gap-2"}`}
-        >
+        <div className={`flex flex-col ${isResultsStage ? "gap-1.5" : "gap-2"}`}>
           {/* Player actions */}
-          {gameState.status === "player_turn" && (
+          {handStatus === "player_turn" && (
             <div className="flex gap-2">
               <button
-                onClick={handleHit}
+                onClick={() => handleAction(0)} // HIT
                 className="flex-1 px-4 py-3 bg-yellow-500 text-white font-bold rounded-lg hover:bg-yellow-600 active:scale-95 transition-all shadow-lg"
               >
                 👆 HIT
               </button>
               <button
-                onClick={handleStand}
+                onClick={() => handleAction(1)} // STAND
                 className="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg"
               >
                 ✋ STAND
               </button>
-              {gameState.playerHand.length === 2 &&
-                gameState.playerChips >= gameState.currentBet && (
+              {currentHand?.playerHand.length === 2 &&
+                gameState.playerChips >= currentHand.currentBet && (
                   <button
-                    onClick={handleDouble}
+                    onClick={() => handleAction(2)} // DOUBLE
                     className="flex-1 px-4 py-3 bg-purple-500 text-white font-bold rounded-lg hover:bg-purple-600 active:scale-95 transition-all shadow-lg"
                   >
                     💎 DOUBLE
@@ -986,16 +789,14 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           )}
 
           {/* Dealer playing indicator */}
-          {gameState.status === "dealer_turn" && (
+          {handStatus === "dealer_turn" && (
             <InnerPanel className="bg-gray-100 p-3 text-center border-2 border-gray-400">
-              <div className="text-base font-bold text-gray-700">
-                Dealer is playing...
-              </div>
+              <div className="text-base font-bold text-gray-700">Dealer is playing...</div>
             </InnerPanel>
           )}
 
           {/* Result */}
-          {gameState.status === "gameover" && (
+          {handStatus === "gameover" && (
             <div className="flex flex-col gap-2">
               <InnerPanel className={`p-3 text-center ${resultColor()}`}>
                 <div className="text-xl font-bold">{resultLabel()}</div>
@@ -1006,11 +807,11 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
                       : `You reached ${gameState.playerChips} chips in practice mode. No RavenCoin in practice.`
                     : sessionLost
                       ? `You finished with ${gameState.playerChips} chips after ${gameState.handsPlayed} hand${gameState.handsPlayed === 1 ? "" : "s"}.`
-                      : gameState.lastResult === "push"
+                      : currentHand?.lastResult === "push"
                         ? `Push — bet returned. Stack: ${gameState.playerChips} chips.`
-                        : gameState.lastNetChips > 0
-                          ? `+${gameState.lastNetChips} chips! Stack: ${gameState.playerChips}.`
-                          : `${gameState.lastNetChips} chips. Stack: ${gameState.playerChips}.`}
+                        : currentHand && currentHand.lastNetChips > 0
+                          ? `+${currentHand.lastNetChips} chips! Stack: ${gameState.playerChips}.`
+                          : `${currentHand?.lastNetChips ?? 0} chips. Stack: ${gameState.playerChips}.`}
                 </div>
               </InnerPanel>
 
@@ -1018,9 +819,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
               <InnerPanel className="bg-purple-100 p-3 border-2 border-purple-400">
                 <div className="grid grid-cols-2 gap-2 text-center">
                   <div>
-                    <div className="text-xs font-semibold text-gray-600">
-                      YOUR HAND
-                    </div>
+                    <div className="text-xs font-semibold text-gray-600">YOUR HAND</div>
                     <div className="text-base font-bold text-purple-800">
                       {playerValue.soft}
                       {playerValue.isBust
@@ -1031,9 +830,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
                     </div>
                   </div>
                   <div>
-                    <div className="text-xs font-semibold text-gray-600">
-                      DEALER HAND
-                    </div>
+                    <div className="text-xs font-semibold text-gray-600">DEALER HAND</div>
                     <div className="text-base font-bold text-purple-800">
                       {dealerValue.soft}
                       {dealerValue.isBust ? " — BUST" : ""}

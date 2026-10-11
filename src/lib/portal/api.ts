@@ -476,6 +476,11 @@ export type VerifiedRun = {
          * ends in a player win with the same book count.
          */
         actions: string;
+      }
+    | {
+        seed: number;
+        difficulty: number;
+        actions: string;
       };
 };
 

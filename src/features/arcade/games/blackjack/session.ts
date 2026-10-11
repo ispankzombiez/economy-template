@@ -117,7 +117,9 @@ const RANK_VALUES: Record<CardRank, number> = {
   A: 11, // treated as 11; we reduce to 1 when busting
 };
 
-export const calculateHandValue = (hand: Card[]): HandValue => {
+// Calculate hand value — pure function, no side effects.
+// Identical to engine.ts's calculateHandValue; must not diverge.
+const calculateHandValue = (hand: Card[]): HandValue => {
   let total = 0;
   let aces = 0;
 

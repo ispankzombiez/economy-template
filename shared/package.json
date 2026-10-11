@@ -28,6 +28,10 @@
     "./goFishLog": {
       "types": "./anticheat/goFishLog.d.ts",
       "default": "./anticheat/goFishLog.js"
+    },
+    "./blackjackLog": {
+      "types": "./anticheat/blackjackLog.d.ts",
+      "default": "./anticheat/blackjackLog.js"
     }
   }
 }
