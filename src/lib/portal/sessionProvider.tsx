@@ -191,7 +191,12 @@ export function MinigameSessionProvider({
           // fire-and-forget: in Stage B the replay only records whether it
           // agreed, so nothing the player is owed waits on it, and a failure
           // here costs one row of telemetry rather than a broken claim.
-          if (verifiedReplay) {
+          //
+          // Only a tick-log replay (`inputs`) can ever have parked — Solitaire's
+          // move log replays whole inside the claim request, so there is nothing
+          // for a continuation to pick up and the first call would just be
+          // refused.
+          if (verifiedReplay && "inputs" in verifiedReplay) {
             void continueRunVerification({ token: bootstrap.jwt as string });
           }
         },

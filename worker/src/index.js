@@ -80,6 +80,17 @@ import {
   stepReplay,
   validateReplay,
 } from "./replay.js";
+// Solitaire's verifier. It shares nothing with `replay.js` beyond its job,
+// because the two games' proofs are structurally different: a brawler run is
+// re-simulated tick by tick and may span requests; a Solitaire game's move log
+// replays whole in microseconds, so there is nothing here to park, chunk or
+// resume — see the header of solitaireReplay.js.
+import {
+  SolitaireReplayInputError,
+  runSolitaireReplay,
+  solitaireReplayOutcome,
+  validateSolitaireReplay,
+} from "./solitaireReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2253,6 +2264,9 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
 
     return {
       matched,
+      // The response reports the re-simulated score beside the claim's, so a
+      // successful verification shows what was actually replayed.
+      replayScore: outcome.score,
       reason: matched
         ? null
         : `the re-simulated run scored ${outcome.score}, not ${claimScore}`,
@@ -2262,6 +2276,72 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
     // it as "could not complete" keeps it out of the mismatch column — counting
     // our own crashes as suspected cheating would corrupt every rate derived
     // from this table.
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: null,
+      claimScore,
+      reason: `the replay threw: ${String(error?.message ?? error).slice(0, 200)}`,
+    });
+    return { matched: null, reason: "the replay could not be completed" };
+  }
+}
+
+/**
+ * Verify a Solitaire claim — validate, replay, and record the verdict.
+ *
+ * The Solitaire twin of `runReplayVerification`, and deliberately much
+ * shorter: one request holds the whole replay (see solitaireReplay.js for why
+ * turn-based games need none of the parking machinery), so this is validate →
+ * replay → verdict with nothing in between.
+ *
+ * The three outcomes mirror the brawler's, for the same reasons:
+ *
+ *  - **Input error** (`SolitaireReplayInputError`) records `matched: null` and
+ *    returns its reason. A submission that cannot even be decoded says the
+ *    protocols disagree or someone is probing — counting it as a mismatch
+ *    would drown the signal the verdict rows exist to measure.
+ *  - **A throw mid-replay** records `matched: null` too: a crash is a defect in
+ *    the worker, not evidence against the player, and logging our own bugs as
+ *    suspected cheating would corrupt every rate derived from the table.
+ *  - **A completed replay** records the real verdict through
+ *    `solitaireReplayOutcome` — the only path that may refuse the coin.
+ *
+ * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
+ */
+async function runSolitaireVerification({ env, farmId, payload, cabinet, claimScore }) {
+  let validated;
+  try {
+    validated = validateSolitaireReplay(payload?.replay);
+  } catch (error) {
+    const reason =
+      error instanceof SolitaireReplayInputError
+        ? error.message
+        : "the replay could not be started";
+    await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
+    return { matched: null, reason };
+  }
+
+  try {
+    const replayed = runSolitaireReplay(validated);
+    const outcome = solitaireReplayOutcome(replayed, claimScore);
+
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      claimScore,
+      reason: outcome.reason,
+    });
+
+    return {
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      reason: outcome.reason,
+    };
+  } catch (error) {
     await recordReplayVerdict(env, {
       farmId,
       cabinet,
@@ -2312,14 +2392,28 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
 
   // Replay is the gate. If it didn't complete, or it completed and disagreed,
   // the coin is refused. No shadow mode — this is Stage C.
-  const replayVerdict = await runReplayVerification({
-    env,
-    farmId,
-    payload,
-    cabinet: cabinetId,
-    claimScore: claimedScore,
-    runKey: openedOn.runKey,
-  });
+  //
+  // The branch is on the run-open's cabinet binding, never on the replay's own
+  // shape: a caller who sent a brawler-shaped `replay` on a solitaire run (or
+  // the reverse) is refused by whichever verifier does not recognise it,
+  // rather than being silently processed by the more lenient of the two.
+  const replayVerdict =
+    cabinetId === "solitaire"
+      ? await runSolitaireVerification({
+          env,
+          farmId,
+          payload,
+          cabinet: cabinetId,
+          claimScore: claimedScore,
+        })
+      : await runReplayVerification({
+          env,
+          farmId,
+          payload,
+          cabinet: cabinetId,
+          claimScore: claimedScore,
+          runKey: openedOn.runKey,
+        });
 
   if (replayVerdict.matched !== true) {
     const reason = replayVerdict.reason ?? "replay did not match the claimed run";
@@ -2338,7 +2432,7 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     verification: {
       replay: true,
       replayScore: replayVerdict.replayScore,
-      claimScore,
+      claimScore: claimedScore,
       ...(replayVerdict.reason ? { replayReason: replayVerdict.reason } : {}),
     },
     async run() {
@@ -2774,8 +2868,15 @@ function intentSubmitScore({ score, session, env }) {
  * requires the `claim-verified` route (replay gate); all others use the
  * trusting `claim-result` route. Add a cabinet here when its engine has
  * been ported to the deterministic replay path.
+ *
+ * Adding an entry is a **deploy-time lock**: from this worker's first request
+ * onward, a claim on that cabinet without a replay is refused, so the client
+ * that sends the replay must already be live when this rolls out. Solitaire's
+ * client (action log + `verify`) and worker shipped together for exactly that
+ * reason — an old client would see its reward runs refused, loudly, rather
+ * than silently paid unverified.
  */
-const VERIFIED_CABINETS = new Set(["sunflower-brawler"]);
+const VERIFIED_CABINETS = new Set(["sunflower-brawler", "solitaire"]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,

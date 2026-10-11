@@ -20,6 +20,10 @@
     "./replayBudget": {
       "types": "./anticheat/replayBudget.d.ts",
       "default": "./anticheat/replayBudget.js"
+    },
+    "./solitaireLog": {
+      "types": "./anticheat/solitaireLog.d.ts",
+      "default": "./anticheat/solitaireLog.js"
     }
   }
 }

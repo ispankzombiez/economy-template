@@ -397,34 +397,64 @@ export type VerifiedRun = {
    * cheater who shops for a favourable seed simply produces a mismatch nobody
    * acts on), but it must become server-issued at run-open before Stage C makes
    * a mismatch refuse payout.
+   *
+   * Two shapes, by cabinet. The worker never guesses which one arrived: it
+   * branches on the run-open's cabinet binding, so a brawler-shaped replay on
+   * a solitaire run is a refusal, not a puzzle. The split is by *what the
+   * game is* — brawler is tick-simulated, so its proof is per-tick inputs the
+   * worker re-simulates; Solitaire is turn-based, so its proof is the list of
+   * moves the worker re-applies, which replays in microseconds and needs no
+   * chunking at all.
    */
-  replay?: {
-    /** The simulation RNG seed the run was created with. */
-    seed: number;
-    /**
-     * Which champion the run was played as.
-     *
-     * Not cosmetic for replay: fighters differ in health and reach, so the
-     * worker cannot reproduce the run without it. Checked against the engine's
-     * own roster, so an unrecognised id fails the replay rather than silently
-     * simulating the wrong fighter.
-     */
-    playerId: string;
-    /**
-     * Which difficulty the run was played on, by registry name.
-     *
-     * The single largest influence on the outcome — it sets enemy reaction
-     * time, aggression, speed and health. Without it a replay would pit the
-     * inputs against a differently-tuned game and disagree with nearly every
-     * honest run, which would make the match rate useless. Read from the same
-     * table the client played on.
-     */
-    difficulty: string;
-    /** Number of simulated ticks in the log — must equal `inputs` length. */
-    ticks: number;
-    /** Per-tick input bitmask, base64. One byte per tick; see `encodeInputLog`. */
-    inputs: string;
-  };
+  replay?:
+    | {
+        /** The simulation RNG seed the run was created with. */
+        seed: number;
+        /**
+         * Which champion the run was played as.
+         *
+         * Not cosmetic for replay: fighters differ in health and reach, so the
+         * worker cannot reproduce the run without it. Checked against the
+         * engine's own roster, so an unrecognised id fails the replay rather
+         * than silently simulating the wrong fighter.
+         */
+        playerId: string;
+        /**
+         * Which difficulty the run was played on, by registry name.
+         *
+         * The single largest influence on the outcome — it sets enemy reaction
+         * time, aggression, speed and health. Without it a replay would pit
+         * the inputs against a differently-tuned game and disagree with
+         * nearly every honest run, which would make the match rate useless.
+         * Read from the same table the client played on.
+         */
+        difficulty: string;
+        /** Number of simulated ticks in the log — must equal `inputs` length. */
+        ticks: number;
+        /** Per-tick input bitmask, base64. One byte per tick; see `encodeInputLog`. */
+        inputs: string;
+      }
+    | {
+        /** The seed the deck was actually dealt from — see `createSolvableDeal`. */
+        seed: number;
+        /**
+         * Today's reward difficulty, by registry name.
+         *
+         * The worker re-derives it from the date rather than believing it —
+         * difficulty decides stock passes and draw count, so "always the easy
+         * one" would be free money — and accepts today's or yesterday's name to
+         * straddle the UTC midnight a run can start before and finish after.
+         */
+        difficulty: string;
+        /**
+         * Every action that changed the game, in order, two bytes each, base64.
+         *
+         * See `encodeActionLog`. The worker rebuilds the deal from `seed` and
+         * re-applies the whole list; the coin mints only if its own board
+         * reaches all fifty-two cards.
+         */
+        actions: string;
+      };
 };
 
 /**

@@ -17,7 +17,7 @@ import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
-import { Card, CardRank, CardSuit } from "../poker/types";
+import { Card, CardSuit } from "../poker/types";
 import {
   getSolitaireDifficulty,
   isSolitaireRewardRunAvailable,
@@ -28,49 +28,33 @@ import {
   SolitaireMode,
 } from "./session";
 import {
-  FoundationPiles,
   SelectedCard,
   SolitaireState,
-  TableauPile,
 } from "./types";
+import {
+  applyAutoFoundation,
+  applyDraw,
+  applyMoveToFoundation,
+  applyMoveToTableau,
+  applySmartMove,
+  createSolvableDeal,
+  getFoundationsCount,
+  MAX_UNDOS_PER_GAME,
+  SUITS,
+} from "./engine";
+import {
+  encodeActionLog,
+  encodeSolitaireLog,
+  MAX_SOLITAIRE_ACTIONS,
+  SOLITAIRE_OPS,
+} from "@nightshade/shared/anticheat/solitaireLog";
+import type { SolitaireAction } from "@nightshade/shared/anticheat/solitaireLog";
+import type { VerifiedRun } from "lib/portal/api";
 
 const solitairePanelClassName =
   "mx-auto w-full max-w-[1200px] h-[min(95vh,900px)] overflow-hidden";
 
 const _portalState = (state: PortalMachineState) => state.context.state;
-
-const SUITS: CardSuit[] = ["Kale", "Barley", "Wheat", "Radish"];
-const RANKS: CardRank[] = [
-  "A",
-  "2",
-  "3",
-  "4",
-  "5",
-  "6",
-  "7",
-  "8",
-  "9",
-  "10",
-  "J",
-  "Q",
-  "K",
-];
-
-const RANK_VALUE: Record<CardRank, number> = {
-  A: 1,
-  "2": 2,
-  "3": 3,
-  "4": 4,
-  "5": 5,
-  "6": 6,
-  "7": 7,
-  "8": 8,
-  "9": 9,
-  "10": 10,
-  J: 11,
-  Q: 12,
-  K: 13,
-};
 
 const colorText: Record<CardSuit, string> = {
   Kale: "text-slate-900",
@@ -133,7 +117,6 @@ const FACE_DOWN_OVERLAP_CLASS = "-mt-[50px] md:-mt-[52px]";
 const FACE_UP_AFTER_FACE_DOWN_OVERLAP_CLASS = "-mt-[50px] md:-mt-[68px]";
 const FACE_UP_STACK_OVERLAP_CLASS = "-mt-[50px] md:-mt-[60px]";
 const FACE_UP_TOP_CARD_OVERLAP_CLASS = "-mt-8 md:-mt-[28px]";
-const MAX_UNDOS_PER_GAME = 3;
 
 const suitImages: Record<CardSuit, string> = {
   Kale: ITEM_DETAILS.Kale.image,
@@ -141,287 +124,6 @@ const suitImages: Record<CardSuit, string> = {
   Wheat: ITEM_DETAILS.Wheat.image,
   Radish: ITEM_DETAILS.Radish.image,
 };
-
-const isDarkSuit = (suit: CardSuit) => suit === "Kale" || suit === "Radish";
-
-const mulberry32 = (seed: number) => {
-  let t = seed >>> 0;
-
-  return () => {
-    t += 0x6d2b79f5;
-    let x = Math.imul(t ^ (t >>> 15), 1 | t);
-    x ^= x + Math.imul(x ^ (x >>> 7), 61 | x);
-
-    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
-  };
-};
-
-const createOrderedDeck = (): Card[] => {
-  const deck: Card[] = [];
-
-  for (const suit of SUITS) {
-    for (const rank of RANKS) {
-      deck.push({ suit, rank });
-    }
-  }
-
-  return deck;
-};
-
-const createShuffledDeck = (seed: number): Card[] => {
-  const deck = createOrderedDeck();
-  const random = mulberry32(seed);
-
-  for (let i = deck.length - 1; i > 0; i--) {
-    const j = Math.floor(random() * (i + 1));
-    [deck[i], deck[j]] = [deck[j], deck[i]];
-  }
-
-  return deck;
-};
-
-const drawTop = (stack: Card[]) => {
-  const card = stack.pop();
-  if (!card) {
-    throw new Error("Cannot draw from an empty stack");
-  }
-
-  return card;
-};
-
-const createInitialState = (
-  seed: number,
-  maxPasses: number,
-): SolitaireState => {
-  const deck = createShuffledDeck(seed);
-  const tableau: TableauPile[] = [];
-
-  for (let pile = 0; pile < 7; pile++) {
-    const faceDown: Card[] = [];
-    for (let i = 0; i < pile; i++) {
-      faceDown.push(drawTop(deck));
-    }
-
-    const faceUp = [drawTop(deck)];
-    tableau.push({ faceDown, faceUp });
-  }
-
-  const foundations: FoundationPiles = {
-    Kale: [],
-    Barley: [],
-    Wheat: [],
-    Radish: [],
-  };
-
-  return {
-    tableau,
-    foundations,
-    stock: deck,
-    waste: [],
-    passesRemaining: maxPasses,
-    moves: 0,
-    selected: null,
-  };
-};
-
-/**
- * Greedy forward solver with deterministic move priority.
- * Returns true only if it finds a complete winning path within the iteration
- * limit, giving a guaranteed-solvable certificate for that deal.
- *
- * Move order:
- *  1. Tableau top → foundation
- *  2. Waste top → foundation
- *  3. Full stack moves that reveal a face-down card (prefer most fd)
- *  4. Waste top → tableau (prefer piles with most fd cards)
- *  5. Draw from stock / reset waste
- *  6. Any partial-stack tableau → tableau (excludes trivial king cycling)
- */
-const greedySolve = (initial: SolitaireState, drawCount: number): boolean => {
-  const tab = initial.tableau.map((p) => ({
-    fd: [...p.faceDown],
-    fu: [...p.faceUp],
-  }));
-  const fnd: Record<CardSuit, number> = {
-    Kale: 0,
-    Barley: 0,
-    Wheat: 0,
-    Radish: 0,
-  };
-  let stock = [...initial.stock];
-  let waste: Card[] = [];
-  let passes = initial.passesRemaining;
-
-  const rv = (c: Card) => RANK_VALUE[c.rank];
-  const dk = (s: CardSuit) => s === "Kale" || s === "Radish";
-  const flip = (i: number) => {
-    if (!tab[i].fu.length && tab[i].fd.length) tab[i].fu.push(tab[i].fd.pop()!);
-  };
-  const toFnd = (c: Card) =>
-    fnd[c.suit] === 0 ? c.rank === "A" : rv(c) === fnd[c.suit] + 1;
-  const onPile = (c: Card, i: number) => {
-    const fu = tab[i].fu;
-    if (!fu.length) return c.rank === "K";
-    const top = fu[fu.length - 1];
-    return dk(c.suit) !== dk(top.suit) && rv(c) === rv(top) - 1;
-  };
-
-  for (let it = 0; it < 3000; it++) {
-    if (SUITS.every((s) => fnd[s] === 13)) return true;
-
-    let moved = false;
-
-    // 1. Tableau top → foundation
-    for (let i = 0; i < 7 && !moved; i++) {
-      const fu = tab[i].fu;
-      if (!fu.length) continue;
-      const top = fu[fu.length - 1];
-      if (toFnd(top)) {
-        fu.pop();
-        fnd[top.suit]++;
-        flip(i);
-        moved = true;
-      }
-    }
-    if (moved) continue;
-
-    // 2. Waste top → foundation
-    if (waste.length) {
-      const top = waste[waste.length - 1];
-      if (toFnd(top)) {
-        waste.pop();
-        fnd[top.suit]++;
-        moved = true;
-      }
-    }
-    if (moved) continue;
-
-    // 3. Full-stack tableau move that reveals a face-down card
-    {
-      let bestFd = 0,
-        bSrc = -1,
-        bDst = -1;
-      for (let src = 0; src < 7; src++) {
-        const fu = tab[src].fu;
-        if (!fu.length || !tab[src].fd.length) continue;
-        for (let dst = 0; dst < 7; dst++) {
-          if (src === dst || !onPile(fu[0], dst)) continue;
-          if (tab[src].fd.length > bestFd) {
-            bestFd = tab[src].fd.length;
-            bSrc = src;
-            bDst = dst;
-          }
-        }
-      }
-      if (bSrc >= 0) {
-        tab[bDst].fu.push(...tab[bSrc].fu.splice(0));
-        flip(bSrc);
-        moved = true;
-      }
-    }
-    if (moved) continue;
-
-    // 4. Waste top → tableau (prefer piles with most fd)
-    if (waste.length) {
-      const top = waste[waste.length - 1];
-      let best = -1;
-      for (let i = 0; i < 7; i++) {
-        if (!onPile(top, i)) continue;
-        if (best === -1 || tab[i].fd.length > tab[best].fd.length) best = i;
-      }
-      if (best >= 0) {
-        waste.pop();
-        tab[best].fu.push(top);
-        moved = true;
-      }
-    }
-    if (moved) continue;
-
-    // 5. Draw from stock / reset waste
-    if (stock.length) {
-      const n = Math.min(drawCount, stock.length);
-      waste.push(...stock.splice(stock.length - n, n));
-      moved = true;
-    } else if (passes > 0 && waste.length) {
-      stock = [...waste].reverse();
-      waste = [];
-      passes--;
-      moved = true;
-    }
-    if (moved) continue;
-
-    // 6. Any partial-stack tableau → tableau (skip trivial king-to-empty cycling)
-    {
-      let found = false;
-      for (let src = 0; src < 7 && !found; src++) {
-        const fu = tab[src].fu;
-        for (let start = 0; start < fu.length && !found; start++) {
-          for (let dst = 0; dst < 7 && !found; dst++) {
-            if (src === dst || !onPile(fu[start], dst)) continue;
-            if (start === 0 && !tab[src].fd.length && !tab[dst].fu.length)
-              continue;
-            tab[dst].fu.push(...tab[src].fu.splice(start));
-            flip(src);
-            found = true;
-          }
-        }
-      }
-      if (found) moved = true;
-    }
-    if (moved) continue;
-
-    break;
-  }
-
-  return SUITS.every((s) => fnd[s] === 13);
-};
-
-/**
- * Tries up to 100 consecutive seeds until greedySolve confirms solvability.
- * With ~82% of random Klondike deals being solvable the chance of all 100
- * failing is astronomically small. Falls back to the original seed as a safety
- * net so the game always starts.
- */
-const createSolvableDeal = (
-  seed: number,
-  maxPasses: number,
-  drawCount: number,
-): SolitaireState => {
-  for (let i = 0; i < 100; i++) {
-    const trySeed = (seed + i) >>> 0;
-    const state = createInitialState(trySeed, maxPasses);
-    if (greedySolve(state, drawCount)) return state;
-  }
-  return createInitialState(seed, maxPasses);
-};
-
-const canPlaceOnTableau = (movingCard: Card, targetTop?: Card) => {
-  if (!targetTop) {
-    return movingCard.rank === "K";
-  }
-
-  const targetValue = RANK_VALUE[targetTop.rank];
-  const movingValue = RANK_VALUE[movingCard.rank];
-
-  return (
-    isDarkSuit(movingCard.suit) !== isDarkSuit(targetTop.suit) &&
-    movingValue === targetValue - 1
-  );
-};
-
-const canPlaceOnFoundation = (card: Card, foundation: Card[]) => {
-  if (foundation.length === 0) {
-    return card.rank === "A";
-  }
-
-  const top = foundation[foundation.length - 1];
-  return (
-    card.suit === top.suit && RANK_VALUE[card.rank] === RANK_VALUE[top.rank] + 1
-  );
-};
-
-const getFoundationsCount = (state: SolitaireState) =>
-  SUITS.reduce((total, suit) => total + state.foundations[suit].length, 0);
 
 export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
   onClose,
@@ -450,6 +152,29 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
   const undoHistoryRef = useRef<SolitaireState[]>([]);
   const [undoCount, setUndoCount] = useState(0);
   const [undosRemaining, setUndosRemaining] = useState(MAX_UNDOS_PER_GAME);
+  /**
+   * Every action that changed this game, in play order — the run's proof.
+   *
+   * Appended by `setGameStateWithUndo` only when the applier returned a new
+   * state, so the log holds exactly the moves that happened: a tap that
+   * changed nothing leaves no trace, which is what lets the worker treat a
+   * logged action that changes nothing during replay as tampering rather than
+   * as a routine no-op. Frozen into the claim when the last card lands; the
+   * worker re-applies the whole list to the same deal and pays only if its own
+   * board reaches fifty-two.
+   */
+  const moveLogRef = useRef<SolitaireAction[]>([]);
+  /**
+   * The seed the deck was actually dealt from.
+   *
+   * `createSolvableDeal` walks up to 100 seeds forward before finding a
+   * solvable one, and the claim must name the seed that produced *this* board:
+   * naming the base seed instead would have the worker rebuild a different
+   * deal and refuse an honest game.
+   */
+  const runSeedRef = useRef<number | null>(null);
+  /** When the session began, for the claim's `elapsedMs` — informational only. */
+  const runStartedAtRef = useRef<number>(0);
 
   const returnToMenu = useCallback(() => {
     setShowExitConfirm(false);
@@ -457,17 +182,47 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
     setSessionMode(null);
     setGameState(null);
     undoHistoryRef.current = [];
+    moveLogRef.current = [];
+    runSeedRef.current = null;
     setUndoCount(0);
     setUndosRemaining(MAX_UNDOS_PER_GAME);
   }, []);
 
+  /**
+   * The one door every state-changing move goes through.
+   *
+   * Three jobs, in the order they matter:
+   *
+   *  1. Apply the applier. An applier that returns its input unchanged is an
+   *     illegal or empty move — the update stops here, and *nothing else runs*,
+   *     which is why `makeAction` is only consulted on a real change. The log
+   *     therefore contains exactly the actions that happened, never the taps
+   *     that did not.
+   *  2. Record the action (`makeAction`), which is built from the *previous*
+   *     state — a move's source (the selected card) exists only before the
+   *     move lands on it.
+   *  3. Push one undo snapshot, same as before.
+   *
+   * `makeAction` runs inside the state updater, matching the pattern this
+   * component already relied on for `undoHistoryRef`: updaters run once per
+   * `setGameState` here (no `StrictMode` in this tree), and React dispatches
+   * click handlers one at a time, so a rapid second tap sees the first tap's
+   * state.
+   */
   const setGameStateWithUndo = useCallback(
-    (updater: (previous: SolitaireState) => SolitaireState) => {
+    (
+      updater: (previous: SolitaireState) => SolitaireState,
+      makeAction?: (previous: SolitaireState) => SolitaireAction,
+    ) => {
       setGameState((previous) => {
         if (!previous) return previous;
 
         const next = updater(previous);
         if (next === previous) return previous;
+
+        if (makeAction) {
+          moveLogRef.current.push(makeAction(previous));
+        }
 
         const nextHistory = [...undoHistoryRef.current, previous];
         undoHistoryRef.current = nextHistory;
@@ -507,15 +262,22 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
       setShowExitConfirm(false);
       setShowPracticeDifficultyPrompt(false);
       undoHistoryRef.current = [];
+      moveLogRef.current = [];
       setUndoCount(0);
       setUndosRemaining(MAX_UNDOS_PER_GAME);
-      setGameState(
-        createSolvableDeal(
-          seed,
-          runDifficulty.maxPasses,
-          runDifficulty.drawCount,
-        ),
+
+      const deal = createSolvableDeal(
+        seed,
+        runDifficulty.maxPasses,
+        runDifficulty.drawCount,
       );
+      // The *resolved* seed, not the base one: `createSolvableDeal` may have
+      // walked forward before finding a solvable deal, and the claim names
+      // this so the worker rebuilds this exact board with one
+      // `createInitialState` instead of re-running the solver search.
+      runSeedRef.current = deal.seed;
+      runStartedAtRef.current = Date.now();
+      setGameState(deal.state);
 
       if (mode === "reward") {
         portalService.send({
@@ -546,39 +308,10 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
   });
 
   const drawFromStock = useCallback(() => {
-    setGameStateWithUndo((previous) => {
-      if (!previous) return previous;
-
-      if (previous.stock.length > 0) {
-        const drawCount = Math.min(
-          activeDifficulty.drawCount,
-          previous.stock.length,
-        );
-        const stock = [...previous.stock];
-        const drawn = stock.splice(stock.length - drawCount, drawCount);
-
-        return {
-          ...previous,
-          stock,
-          waste: [...previous.waste, ...drawn],
-          selected: null,
-          moves: previous.moves + 1,
-        };
-      }
-
-      if (previous.waste.length > 0 && previous.passesRemaining > 0) {
-        return {
-          ...previous,
-          stock: [...previous.waste].reverse(),
-          waste: [],
-          selected: null,
-          passesRemaining: previous.passesRemaining - 1,
-          moves: previous.moves + 1,
-        };
-      }
-
-      return previous;
-    });
+    setGameStateWithUndo(
+      (previous) => applyDraw(previous, activeDifficulty.drawCount),
+      () => ({ op: SOLITAIRE_OPS.DRAW }),
+    );
   }, [setGameStateWithUndo, activeDifficulty.drawCount]);
 
   const selectWaste = useCallback(() => {
@@ -623,197 +356,48 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
 
   const moveSelectedToTableau = useCallback(
     (targetIndex: number) => {
-      setGameStateWithUndo((previous) => {
-        if (!previous || !previous.selected) return previous;
-
-        const tableau = previous.tableau.map((pile) => ({
-          faceDown: [...pile.faceDown],
-          faceUp: [...pile.faceUp],
-        }));
-
-        let movingCards: Card[] = [];
-
-        if (previous.selected.source === "waste") {
-          const wasteTop = previous.waste[previous.waste.length - 1];
-          if (!wasteTop) return previous;
-          movingCards = [wasteTop];
-        } else {
-          const sourcePile = tableau[previous.selected.pileIndex];
-          movingCards = sourcePile.faceUp.slice(previous.selected.cardIndex);
-        }
-
-        if (movingCards.length === 0) return previous;
-
-        const targetPile = tableau[targetIndex];
-        const targetTop = targetPile.faceUp[targetPile.faceUp.length - 1];
-
-        if (!canPlaceOnTableau(movingCards[0], targetTop)) return previous;
-
-        let waste = [...previous.waste];
-
-        if (previous.selected.source === "waste") {
-          waste = waste.slice(0, -1);
-        } else {
-          const sourcePile = tableau[previous.selected.pileIndex];
-          sourcePile.faceUp = sourcePile.faceUp.slice(
-            0,
-            previous.selected.cardIndex,
-          );
-
-          if (
-            sourcePile.faceUp.length === 0 &&
-            sourcePile.faceDown.length > 0
-          ) {
-            const flipped = sourcePile.faceDown.pop();
-            if (flipped) {
-              sourcePile.faceUp.push(flipped);
-            }
-          }
-        }
-
-        targetPile.faceUp = [...targetPile.faceUp, ...movingCards];
-
-        return {
-          ...previous,
-          tableau,
-          waste,
-          selected: null,
-          moves: previous.moves + 1,
-        };
-      });
+      setGameStateWithUndo(
+        (previous) =>
+          applyMoveToTableau(previous, previous.selected, targetIndex),
+        // Built from the state *before* the move — `previous.selected` is the
+        // source the player actually picked, which the post-move state has
+        // already cleared to `null`.
+        (previous) => ({
+          op: SOLITAIRE_OPS.MOVE_TO_TABLEAU,
+          source: previous.selected as NonNullable<SelectedCard>,
+          target: targetIndex,
+        }),
+      );
     },
     [setGameStateWithUndo],
   );
 
   const moveSelectedToFoundation = useCallback(
     (targetSuit: CardSuit) => {
-      setGameStateWithUndo((previous) => {
-        if (!previous || !previous.selected) return previous;
-
-        let movingCard: Card | undefined;
-        let waste = [...previous.waste];
-        const tableau = previous.tableau.map((pile) => ({
-          faceDown: [...pile.faceDown],
-          faceUp: [...pile.faceUp],
-        }));
-
-        if (previous.selected.source === "waste") {
-          movingCard = waste[waste.length - 1];
-        } else {
-          const sourcePile = tableau[previous.selected.pileIndex];
-          const isTopCard =
-            previous.selected.cardIndex === sourcePile.faceUp.length - 1;
-          if (!isTopCard) return previous;
-
-          movingCard = sourcePile.faceUp[sourcePile.faceUp.length - 1];
-        }
-
-        if (!movingCard || movingCard.suit !== targetSuit) return previous;
-
-        const foundation = previous.foundations[targetSuit];
-        if (!canPlaceOnFoundation(movingCard, foundation)) return previous;
-
-        if (previous.selected.source === "waste") {
-          waste = waste.slice(0, -1);
-        } else {
-          const sourcePile = tableau[previous.selected.pileIndex];
-          sourcePile.faceUp = sourcePile.faceUp.slice(0, -1);
-
-          if (
-            sourcePile.faceUp.length === 0 &&
-            sourcePile.faceDown.length > 0
-          ) {
-            const flipped = sourcePile.faceDown.pop();
-            if (flipped) {
-              sourcePile.faceUp.push(flipped);
-            }
-          }
-        }
-
-        return {
-          ...previous,
-          tableau,
-          waste,
-          foundations: {
-            ...previous.foundations,
-            [targetSuit]: [...foundation, movingCard],
-          },
-          selected: null,
-          moves: previous.moves + 1,
-        };
-      });
+      setGameStateWithUndo(
+        (previous) =>
+          applyMoveToFoundation(previous, previous.selected, targetSuit),
+        (previous) => ({
+          op: SOLITAIRE_OPS.MOVE_TO_FOUNDATION,
+          source: previous.selected as NonNullable<SelectedCard>,
+          // The suit index of the foundation that was clicked. The engine
+          // re-checks the card actually sits on that suit, so a log that names
+          // a mismatched suit changes nothing and is refused as tampering.
+          suit: SUITS.indexOf(targetSuit),
+        }),
+      );
     },
     [setGameStateWithUndo],
   );
 
   const autoMoveToFoundation = useCallback(() => {
-    setGameStateWithUndo((previous) => {
-      if (!previous) return previous;
-
-      const next: SolitaireState = {
-        ...previous,
-        tableau: previous.tableau.map((pile) => ({
-          faceDown: [...pile.faceDown],
-          faceUp: [...pile.faceUp],
-        })),
-        foundations: {
-          Kale: [...previous.foundations.Kale],
-          Barley: [...previous.foundations.Barley],
-          Wheat: [...previous.foundations.Wheat],
-          Radish: [...previous.foundations.Radish],
-        },
-        waste: [...previous.waste],
-        selected: null,
-      };
-
-      let movedCards = 0;
-      let movedThisPass = true;
-
-      while (movedThisPass) {
-        movedThisPass = false;
-
-        const wasteTop = next.waste[next.waste.length - 1];
-        if (wasteTop) {
-          const wasteFoundation = next.foundations[wasteTop.suit];
-          if (canPlaceOnFoundation(wasteTop, wasteFoundation)) {
-            next.waste.pop();
-            wasteFoundation.push(wasteTop);
-            movedCards += 1;
-            movedThisPass = true;
-            continue;
-          }
-        }
-
-        for (const pile of next.tableau) {
-          const top = pile.faceUp[pile.faceUp.length - 1];
-          if (!top) continue;
-
-          const foundation = next.foundations[top.suit];
-          if (!canPlaceOnFoundation(top, foundation)) continue;
-
-          pile.faceUp.pop();
-          foundation.push(top);
-
-          if (pile.faceUp.length === 0 && pile.faceDown.length > 0) {
-            const flipped = pile.faceDown.pop();
-            if (flipped) {
-              pile.faceUp.push(flipped);
-            }
-          }
-
-          movedCards += 1;
-          movedThisPass = true;
-          break;
-        }
-      }
-
-      if (movedCards === 0) return previous;
-
-      return {
-        ...next,
-        moves: previous.moves + movedCards,
-      };
-    });
+    setGameStateWithUndo(
+      (previous) => applyAutoFoundation(previous),
+      // One action however many cards the sweep moves — the sweep is a
+      // deterministic function of the state, so it replays as the same sweep
+      // and one undo reverts it whole, exactly as the UI does.
+      () => ({ op: SOLITAIRE_OPS.AUTO_FOUNDATION }),
+    );
   }, [setGameStateWithUndo]);
 
   const undoMove = useCallback(() => {
@@ -828,111 +412,36 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
     undoHistoryRef.current = nextHistory;
     setUndoCount(nextHistory.length);
     setUndosRemaining((previous) => previous - 1);
+    // Logged beside the moves it rewinds, so the worker's replay pops its own
+    // history stack in lockstep and lands on this same board. The allowance
+    // (`undosRemaining`) needs no encoding: a log with more than
+    // `MAX_UNDOS_PER_GAME` undos could not have come from this button, and the
+    // worker refuses it on the count.
+    moveLogRef.current.push({ op: SOLITAIRE_OPS.UNDO });
     setGameState(previousSnapshot);
   }, [undosRemaining]);
 
   const smartMove = useCallback(
     (source: "waste" | { pileIndex: number; cardIndex: number }) => {
-      setGameStateWithUndo((previous) => {
-        if (!previous) return previous;
-
-        const tableau = previous.tableau.map((pile) => ({
-          faceDown: [...pile.faceDown],
-          faceUp: [...pile.faceUp],
-        }));
-        let waste = [...previous.waste];
-
-        let movingCard: Card | undefined;
-        let isTopCard: boolean;
-
-        if (source === "waste") {
-          movingCard = waste[waste.length - 1];
-          isTopCard = true;
-        } else {
-          const pile = tableau[source.pileIndex];
-          movingCard = pile.faceUp[source.cardIndex];
-          isTopCard = source.cardIndex === pile.faceUp.length - 1;
-        }
-
-        if (!movingCard) return previous;
-
-        // 1. Foundation first (top card only)
-        if (isTopCard) {
-          const foundation = previous.foundations[movingCard.suit];
-          if (canPlaceOnFoundation(movingCard, foundation)) {
-            if (source === "waste") {
-              waste = waste.slice(0, -1);
-            } else {
-              const sp = tableau[source.pileIndex];
-              sp.faceUp = sp.faceUp.slice(0, -1);
-              if (sp.faceUp.length === 0 && sp.faceDown.length > 0) {
-                const flipped = sp.faceDown.pop();
-                if (flipped) sp.faceUp.push(flipped);
-              }
-            }
-            return {
-              ...previous,
-              tableau,
-              waste,
-              foundations: {
-                ...previous.foundations,
-                [movingCard.suit]: [...foundation, movingCard],
-              },
-              selected: null,
-              moves: previous.moves + 1,
+      // The UI's loose source shape (its callers predate `SelectedCard`) maps
+      // onto the same shape the applier and the log codec share, so there is
+      // one conversion here rather than a reinterpretation on every path.
+      const selected: SelectedCard =
+        source === "waste"
+          ? { source: "waste" }
+          : {
+              source: "tableau",
+              pileIndex: source.pileIndex,
+              cardIndex: source.cardIndex,
             };
-          }
-        }
 
-        // 2. Tableau pile
-        const movingCards: Card[] =
-          source === "waste"
-            ? [movingCard]
-            : tableau[
-                (source as { pileIndex: number; cardIndex: number }).pileIndex
-              ].faceUp.slice(
-                (source as { pileIndex: number; cardIndex: number }).cardIndex,
-              );
-
-        for (let i = 0; i < tableau.length; i++) {
-          if (
-            source !== "waste" &&
-            (source as { pileIndex: number }).pileIndex === i
-          )
-            continue;
-          const targetPile = tableau[i];
-          const targetTop = targetPile.faceUp[targetPile.faceUp.length - 1];
-          if (!canPlaceOnTableau(movingCards[0], targetTop)) continue;
-
-          if (source === "waste") {
-            waste = waste.slice(0, -1);
-          } else {
-            const sp =
-              tableau[
-                (source as { pileIndex: number; cardIndex: number }).pileIndex
-              ];
-            sp.faceUp = sp.faceUp.slice(
-              0,
-              (source as { pileIndex: number; cardIndex: number }).cardIndex,
-            );
-            if (sp.faceUp.length === 0 && sp.faceDown.length > 0) {
-              const flipped = sp.faceDown.pop();
-              if (flipped) sp.faceUp.push(flipped);
-            }
-          }
-
-          targetPile.faceUp = [...targetPile.faceUp, ...movingCards];
-          return {
-            ...previous,
-            tableau,
-            waste,
-            selected: null,
-            moves: previous.moves + 1,
-          };
-        }
-
-        return previous;
-      });
+      setGameStateWithUndo(
+        (previous) => applySmartMove(previous, selected),
+        () => ({
+          op: SOLITAIRE_OPS.SMART,
+          source: selected,
+        }),
+      );
     },
     [setGameStateWithUndo],
   );
@@ -975,10 +484,45 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
     if (!gameState || !solved || sessionMode !== "reward" || rewardGranted)
       return;
 
+    // A log past the codec's ceiling could not be encoded, hence not
+    // verified, hence not paid — sending it would burn the reward run for a
+    // claim the worker must refuse. Reaching it also means something is
+    // appending moves after the win, so the run's proof would no longer be
+    // the winning game either. Unreachable in honest play (a win is a couple
+    // hundred moves; the ceiling is 4096); guarded because the failure mode
+    // is a silently-unpayable reward run, not a crash.
+    if (moveLogRef.current.length > MAX_SOLITAIRE_ACTIONS) {
+      console.error("[solitaire] action log exceeded the replay ceiling");
+      return;
+    }
+
+    // The coin is paid on proof, not on assertion. The claim carries the deal
+    // seed the board was actually built from and every action that changed
+    // it; the worker rebuilds the deal, re-applies the actions, and mints only
+    // if its own board reaches all fifty-two cards. Built here — in the same
+    // tick the last card lands — so later moves cannot pad the log that gets
+    // verified.
+    const verify: VerifiedRun = {
+      cabinet: "solitaire",
+      score: progressCount,
+      // No milestones and no pace floor: Solitaire is turn-based, so the
+      // brawler's wave checkpoints and duration checks have nothing to check
+      // here. The action log below *is* the verification — full coverage of
+      // the game rather than sampled moments of it.
+      checkpoints: [],
+      elapsedMs: Date.now() - runStartedAtRef.current,
+      replay: {
+        seed: runSeedRef.current ?? 0,
+        difficulty: activeDifficulty.name,
+        actions: encodeSolitaireLog(encodeActionLog(moveLogRef.current)),
+      },
+    };
+
     submitScore({ score: progressCount });
     portalService.send({
       type: "arcadeMinigame.ravenCoinWon",
       amount: SOLITAIRE_RAVEN_COIN_REWARD,
+      verify,
     });
     setRewardGranted(true);
   }, [
@@ -987,6 +531,7 @@ export const SolitaireGame: React.FC<{ onClose?: () => void }> = ({
     sessionMode,
     rewardGranted,
     progressCount,
+    activeDifficulty,
     portalService,
   ]);
 
