@@ -24,6 +24,10 @@
     "./solitaireLog": {
       "types": "./anticheat/solitaireLog.d.ts",
       "default": "./anticheat/solitaireLog.js"
+    },
+    "./goFishLog": {
+      "types": "./anticheat/goFishLog.d.ts",
+      "default": "./anticheat/goFishLog.js"
     }
   }
 }

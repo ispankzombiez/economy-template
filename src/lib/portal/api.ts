@@ -398,13 +398,16 @@ export type VerifiedRun = {
    * acts on), but it must become server-issued at run-open before Stage C makes
    * a mismatch refuse payout.
    *
-   * Two shapes, by cabinet. The worker never guesses which one arrived: it
+   * Three shapes, by cabinet. The worker never guesses which one arrived: it
    * branches on the run-open's cabinet binding, so a brawler-shaped replay on
    * a solitaire run is a refusal, not a puzzle. The split is by *what the
    * game is* — brawler is tick-simulated, so its proof is per-tick inputs the
-   * worker re-simulates; Solitaire is turn-based, so its proof is the list of
-   * moves the worker re-applies, which replays in microseconds and needs no
-   * chunking at all.
+   * worker re-simulates; the turn-based cabinets (Solitaire, Go Fish) are
+   * turn-based, so their proof is the list of moves the worker re-applies,
+   * which replays in microseconds and needs no chunking at all. Go Fish
+   * differs from Solitaire in one field only: it has no daily difficulty
+   * (its lobby "Daily" label is decorative), so its replay names a seed and
+   * the asks and nothing else.
    */
   replay?:
     | {
@@ -452,6 +455,25 @@ export type VerifiedRun = {
          * See `encodeActionLog`. The worker rebuilds the deal from `seed` and
          * re-applies the whole list; the coin mints only if its own board
          * reaches all fifty-two cards.
+         */
+        actions: string;
+      }
+    | {
+        /**
+         * The seed the deck was shuffled from — Go Fish's `createInitialState`.
+         *
+         * The seed carries the whole game here, not just the deal: the dealer's
+         * rank choice each turn draws from the same generator stream, so
+         * `(seed, asks)` fixes the entire outcome. Client-chosen, like the
+         * other two shapes, pending the server-issued seed of Stage C.
+         */
+        seed: number;
+        /**
+         * Every rank the player asked for, in order, one byte each, base64.
+         *
+         * See `encodeGoFishActionLog`. The worker rebuilds the deal from
+         * `seed` and re-applies the asks; the coin mints only if its own game
+         * ends in a player win with the same book count.
          */
         actions: string;
       };

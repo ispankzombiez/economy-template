@@ -24,8 +24,20 @@ const RANKS: CardRank[] = [
 
 export class PokerDeck {
   private cards: Card[] = [];
+  /**
+   * The shuffle's entropy source.
+   *
+   * Injectable so a *verified* cabinet can deal from a seed the worker can
+   * reproduce (see gofish/engine.ts): the same constructor argument on both
+   * sides shuffles the same 51 swaps in the same order, which is the whole
+   * guarantee a replayed deal rests on. Defaults to `Math.random` so the
+   * cabinets that are not verified yet (poker, blackjack) keep dealing
+   * exactly as they always have — no behavior change until a game opts in.
+   */
+  private readonly rng: () => number;
 
-  constructor() {
+  constructor(rng: () => number = Math.random) {
+    this.rng = rng;
     this.reset();
   }
 
@@ -47,7 +59,7 @@ export class PokerDeck {
    */
   shuffle(): void {
     for (let i = this.cards.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
+      const j = Math.floor(this.rng() * (i + 1));
       [this.cards[i], this.cards[j]] = [this.cards[j], this.cards[i]];
     }
   }

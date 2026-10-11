@@ -1,5 +1,11 @@
 /* eslint-disable react/jsx-no-literals, react/no-unescaped-entities */
-import React, { useCallback, useContext, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useSelector } from "../adapters/useSelector";
 import { Button } from "components/ui/Button";
 import { InnerPanel, OuterPanel } from "components/ui/Panel";
@@ -12,194 +18,35 @@ import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import { Card, CardRank } from "../poker/types";
-import { PokerDeck } from "../poker/deck";
 import {
   GO_FISH_RAVEN_COIN_REWARD,
   GoFishMode,
   isGoFishRewardRunAvailable,
 } from "./session";
+// The rules live in engine.ts — the same module the worker's replay imports —
+// so this component is a view over one implementation, never a second one.
+import {
+  askForRank as applyAskForRank,
+  createInitialState,
+  groupCardsByRank,
+  RANK_ORDER,
+  type GoFishState,
+} from "./engine";
+import {
+  encodeGoFishActionLog,
+  encodeGoFishLog,
+  MAX_GO_FISH_ACTIONS,
+} from "@nightshade/shared/anticheat/goFishLog";
+import type { VerifiedRun } from "lib/portal/api";
 
 const goFishPanelClassName =
   "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
-
-const RANK_ORDER: CardRank[] = [
-  "2",
-  "3",
-  "4",
-  "5",
-  "6",
-  "7",
-  "8",
-  "9",
-  "10",
-  "J",
-  "Q",
-  "K",
-  "A",
-];
 
 const suitImages: Record<string, string> = {
   Kale: ITEM_DETAILS.Kale.image,
   Barley: ITEM_DETAILS.Barley.image,
   Wheat: ITEM_DETAILS.Wheat.image,
   Radish: ITEM_DETAILS.Radish.image,
-};
-
-type Turn = "player" | "dealer";
-type Winner = "player" | "dealer" | "tie";
-
-type GoFishState = {
-  deck: PokerDeck;
-  playerHand: Card[];
-  dealerHand: Card[];
-  playerBooks: CardRank[];
-  dealerBooks: CardRank[];
-  turn: Turn;
-  selectedRank: CardRank | null;
-  log: string[];
-  gameOver: boolean;
-  winner: Winner | null;
-};
-
-const sortHand = (hand: Card[]): Card[] => {
-  return [...hand].sort(
-    (a, b) => RANK_ORDER.indexOf(a.rank) - RANK_ORDER.indexOf(b.rank),
-  );
-};
-
-const getRanksInHand = (hand: Card[]): CardRank[] => {
-  const seen = new Set<CardRank>();
-  const ranks: CardRank[] = [];
-
-  hand.forEach((card) => {
-    if (!seen.has(card.rank)) {
-      seen.add(card.rank);
-      ranks.push(card.rank);
-    }
-  });
-
-  return ranks.sort((a, b) => RANK_ORDER.indexOf(a) - RANK_ORDER.indexOf(b));
-};
-
-const drawCard = (deck: PokerDeck): Card | null => {
-  if (deck.getRemaining() <= 0) {
-    return null;
-  }
-
-  return deck.deal();
-};
-
-const extractBooks = (hand: Card[]): { books: CardRank[]; hand: Card[] } => {
-  const counts = new Map<CardRank, number>();
-
-  hand.forEach((card) => {
-    counts.set(card.rank, (counts.get(card.rank) ?? 0) + 1);
-  });
-
-  const completed = Array.from(counts.entries())
-    .filter(([, count]) => count === 4)
-    .map(([rank]) => rank)
-    .sort((a, b) => RANK_ORDER.indexOf(a) - RANK_ORDER.indexOf(b));
-
-  if (completed.length === 0) {
-    return { books: [], hand };
-  }
-
-  const completedSet = new Set(completed);
-
-  return {
-    books: completed,
-    hand: hand.filter((card) => !completedSet.has(card.rank)),
-  };
-};
-
-const removeRankCards = (
-  hand: Card[],
-  rank: CardRank,
-): { removed: Card[]; remaining: Card[] } => {
-  const removed = hand.filter((card) => card.rank === rank);
-  const remaining = hand.filter((card) => card.rank !== rank);
-
-  return { removed, remaining };
-};
-
-const groupCardsByRank = (hand: Card[]): Card[][] => {
-  const grouped = new Map<CardRank, Card[]>();
-
-  hand.forEach((card) => {
-    const cards = grouped.get(card.rank) ?? [];
-    cards.push(card);
-    grouped.set(card.rank, cards);
-  });
-
-  return Array.from(grouped.entries())
-    .sort((a, b) => RANK_ORDER.indexOf(a[0]) - RANK_ORDER.indexOf(b[0]))
-    .map(([, cards]) => cards);
-};
-
-const maybeFinalizeGame = (state: GoFishState): GoFishState => {
-  const totalBooks = state.playerBooks.length + state.dealerBooks.length;
-
-  if (totalBooks < 13) {
-    const noCardsLeft =
-      state.deck.getRemaining() === 0 &&
-      state.playerHand.length === 0 &&
-      state.dealerHand.length === 0;
-
-    if (!noCardsLeft) {
-      return state;
-    }
-  }
-
-  const winner: Winner =
-    state.playerBooks.length > state.dealerBooks.length
-      ? "player"
-      : state.playerBooks.length < state.dealerBooks.length
-        ? "dealer"
-        : "tie";
-
-  return {
-    ...state,
-    gameOver: true,
-    winner,
-    log: [
-      `Game over. ${
-        winner === "tie"
-          ? "It is a tie"
-          : winner === "player"
-            ? "You win"
-            : "Dealer wins"
-      } (${state.playerBooks.length}-${state.dealerBooks.length} books).`,
-      ...state.log,
-    ],
-  };
-};
-
-const createInitialState = (): GoFishState => {
-  const deck = new PokerDeck();
-  let playerHand = deck.dealMultiple(7);
-  let dealerHand = deck.dealMultiple(7);
-
-  const playerBookResult = extractBooks(playerHand);
-  playerHand = playerBookResult.hand;
-
-  const dealerBookResult = extractBooks(dealerHand);
-  dealerHand = dealerBookResult.hand;
-
-  const state: GoFishState = {
-    deck,
-    playerHand: sortHand(playerHand),
-    dealerHand: sortHand(dealerHand),
-    playerBooks: playerBookResult.books,
-    dealerBooks: dealerBookResult.books,
-    turn: "player",
-    selectedRank: null,
-    log: ["New game started. Ask the dealer for a rank you hold."],
-    gameOver: false,
-    winner: null,
-  };
-
-  return maybeFinalizeGame(state);
 };
 
 const _portalState = (state: PortalMachineState) => state.context.state;
@@ -220,13 +67,78 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
   const [rewardGranted, setRewardGranted] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
 
+  /**
+   * The run's proof, captured as it happens rather than reconstructed after.
+   *
+   * `moveLogRef` holds every ask the engine actually applied (an ask the
+   * engine refuses logs nothing — the component only appends when the state
+   * changed), `runSeedRef` the seed the deck was shuffled from, and
+   * `runStartedAtRef` when the session opened. The claim is built from these
+   * at the moment the game ends; see `completeRewardIfNeeded`.
+   */
+  const moveLogRef = useRef<number[]>([]);
+  const runSeedRef = useRef<number | null>(null);
+  const runStartedAtRef = useRef<number>(0);
+
+  const getRunSeed = useCallback(() => {
+    return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+  }, []);
+
   const returnToMenu = useCallback(() => {
     setShowQuitConfirm(false);
     setSessionMode(null);
     setGameState(null);
+    moveLogRef.current = [];
+    runSeedRef.current = null;
   }, []);
 
-  const settleRewardRun = useCallback(() => {
+  const hasRewardRun = useMemo(
+    () => isGoFishRewardRunAvailable({ game: portalGameState, isVip }),
+    [portalGameState, isVip],
+  );
+
+  const startSession = useCallback(
+    (mode: GoFishMode) => {
+      const seed = getRunSeed();
+
+      setSessionMode(mode);
+      setRewardSubmitted(false);
+      setRewardGranted(false);
+      moveLogRef.current = [];
+      // The seed the deck is actually dealt from: Go Fish has no difficulty
+      // walk (no solver search to walk forward from a base seed like
+      // Solitaire's), so this seed *is* the run's — chosen here when the run
+      // opens, exactly like the other two verified cabinets, and
+      // server-issued for all of them together in Stage C.
+      runSeedRef.current = seed;
+      runStartedAtRef.current = Date.now();
+      setGameState(createInitialState(seed));
+
+      if (mode === "reward" && !rewardRunStarted) {
+        portalService.send({ type: "arcadeMinigame.started", name: "gofish" });
+        startAttempt();
+        setRewardRunStarted(true);
+      }
+    },
+    [getRunSeed, portalService, rewardRunStarted],
+  );
+
+  /**
+   * Settle the reward run the moment the game ends — win or loss.
+   *
+   * This used to run from the EXIT button, which meant a player who won and
+   * then closed the cabinet through the arcade chrome never claimed at all,
+   * and the claim's log was built at an arbitrary moment after the proof was
+   * complete. Now it fires in the same render the game reached `gameOver`,
+   * following Solitaire's `completeRewardIfNeeded`: the log cannot grow past
+   * the end of the game (the engine refuses every ask once it is over), so
+   * the proof carried here is the whole game and nothing after it.
+   *
+   * The claim carries the seed and the full ask log; the worker rebuilds the
+   * deal, re-applies the asks and mints only if *its* game ends in a player
+   * win with the same book count. The coin is paid on proof, not assertion.
+   */
+  const completeRewardIfNeeded = useCallback(() => {
     if (!gameState || !gameState.gameOver || sessionMode !== "reward") {
       return;
     }
@@ -236,35 +148,53 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
       setRewardSubmitted(true);
     }
 
-    if (gameState.winner === "player" && !rewardGranted) {
-      portalService.send({
-        type: "arcadeMinigame.ravenCoinWon",
-        amount: GO_FISH_RAVEN_COIN_REWARD,
-      });
-      setRewardGranted(true);
+    if (gameState.winner !== "player" || rewardGranted) {
+      return;
     }
-  }, [gameState, sessionMode, rewardSubmitted, rewardGranted, portalService]);
 
-  const hasRewardRun = useMemo(
-    () => isGoFishRewardRunAvailable({ game: portalGameState, isVip }),
-    [portalGameState, isVip],
-  );
+    // A log past the codec's ceiling could not be encoded, hence not
+    // verified, hence not paid — sending it would burn the reward run for a
+    // claim the worker must refuse. Unreachable in honest play (a game is a
+    // few dozen asks; the ceiling is 512); guarded because the failure mode
+    // is a silently-unpayable reward run, not a crash.
+    if (moveLogRef.current.length > MAX_GO_FISH_ACTIONS) {
+      console.error("[gofish] action log exceeded the replay ceiling");
+      return;
+    }
 
-  const startSession = useCallback(
-    (mode: GoFishMode) => {
-      setSessionMode(mode);
-      setGameState(createInitialState());
-      setRewardSubmitted(false);
-      setRewardGranted(false);
+    const verify: VerifiedRun = {
+      cabinet: "gofish",
+      score: gameState.playerBooks.length,
+      // No milestones and no pace floor: Go Fish is turn-based, so the
+      // brawler's wave checkpoints and duration checks have nothing to check
+      // here. The action log below *is* the verification — full coverage of
+      // the game rather than sampled moments of it. No difficulty either:
+      // this cabinet has no daily difficulty to re-derive (its lobby "Daily"
+      // label is decorative — see session.ts), so the replay names only the
+      // seed and the asks.
+      checkpoints: [],
+      elapsedMs: Date.now() - runStartedAtRef.current,
+      replay: {
+        seed: runSeedRef.current ?? 0,
+        actions: encodeGoFishLog(
+          encodeGoFishActionLog(moveLogRef.current),
+        ),
+      },
+    };
 
-      if (mode === "reward" && !rewardRunStarted) {
-        portalService.send({ type: "arcadeMinigame.started", name: "gofish" });
-        startAttempt();
-        setRewardRunStarted(true);
-      }
-    },
-    [portalService, rewardRunStarted],
-  );
+    portalService.send({
+      type: "arcadeMinigame.ravenCoinWon",
+      amount: GO_FISH_RAVEN_COIN_REWARD,
+      verify,
+    });
+    setRewardGranted(true);
+  }, [
+    gameState,
+    sessionMode,
+    rewardSubmitted,
+    rewardGranted,
+    portalService,
+  ]);
 
   // Free run first, then 1 burned Play Ticket per attempt — with the "are you
   // sure?" box in between. `isGoFishRewardRunAvailable` is kept as the
@@ -277,286 +207,56 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
     startRewardRun: () => startSession("reward"),
   });
 
-  const playerDrawIfNeeded = useCallback(
-    (nextState: GoFishState): GoFishState => {
-      if (
-        nextState.playerHand.length > 0 ||
-        nextState.deck.getRemaining() <= 0
-      ) {
-        return nextState;
-      }
-
-      const drawn = drawCard(nextState.deck);
-
-      if (!drawn) {
-        return nextState;
-      }
-
-      return {
-        ...nextState,
-        playerHand: sortHand([...nextState.playerHand, drawn]),
-        log: ["Your hand was empty, so you drew a card.", ...nextState.log],
-      };
-    },
-    [],
-  );
-
-  const dealerDrawIfNeeded = useCallback(
-    (nextState: GoFishState): GoFishState => {
-      if (
-        nextState.dealerHand.length > 0 ||
-        nextState.deck.getRemaining() <= 0
-      ) {
-        return nextState;
-      }
-
-      const drawn = drawCard(nextState.deck);
-
-      if (!drawn) {
-        return nextState;
-      }
-
-      return {
-        ...nextState,
-        dealerHand: sortHand([...nextState.dealerHand, drawn]),
-        log: [
-          "Dealer drew a card because their hand was empty.",
-          ...nextState.log,
-        ],
-      };
-    },
-    [],
-  );
-
-  const dealerTurn = useCallback(
-    (current: GoFishState): GoFishState => {
-      let next: GoFishState = {
-        ...current,
-        turn: "dealer",
-        selectedRank: null,
-      };
-
-      let dealerContinuesTurn = true;
-
-      while (dealerContinuesTurn) {
-        if (next.gameOver) {
-          return next;
-        }
-
-        next = dealerDrawIfNeeded(next);
-
-        if (next.dealerHand.length === 0) {
-          return maybeFinalizeGame(next);
-        }
-
-        const rankOptions = getRanksInHand(next.dealerHand);
-        const requestedRank =
-          rankOptions[Math.floor(Math.random() * rankOptions.length)];
-
-        const fromPlayer = removeRankCards(next.playerHand, requestedRank);
-
-        if (fromPlayer.removed.length > 0) {
-          let dealerHand = sortHand([
-            ...next.dealerHand,
-            ...fromPlayer.removed,
-          ]);
-          let playerHand = sortHand(fromPlayer.remaining);
-
-          const dealerBookResult = extractBooks(dealerHand);
-          dealerHand = dealerBookResult.hand;
-
-          const playerBookResult = extractBooks(playerHand);
-          playerHand = playerBookResult.hand;
-
-          next = {
-            ...next,
-            playerHand,
-            dealerHand,
-            dealerBooks: [...next.dealerBooks, ...dealerBookResult.books],
-            playerBooks: [...next.playerBooks, ...playerBookResult.books],
-            log: [
-              `Dealer asked for ${requestedRank} and took ${fromPlayer.removed.length} card(s).`,
-              ...next.log,
-            ],
-          };
-
-          next = maybeFinalizeGame(next);
-
-          if (next.gameOver) {
-            return next;
-          }
-
-          // Dealer asks again after a successful take.
-          continue;
-        }
-
-        const drawn = drawCard(next.deck);
-
-        if (!drawn) {
-          return maybeFinalizeGame({
-            ...next,
-            turn: "player",
-            log: [
-              `Dealer asked for ${requestedRank}. Deck is empty.`,
-              ...next.log,
-            ],
-          });
-        }
-
-        let dealerHand = sortHand([...next.dealerHand, drawn]);
-        const dealerBookResult = extractBooks(dealerHand);
-        dealerHand = dealerBookResult.hand;
-
-        next = {
-          ...next,
-          dealerHand,
-          dealerBooks: [...next.dealerBooks, ...dealerBookResult.books],
-          log: [
-            `Dealer asked for ${requestedRank}. Go Fish. Dealer drew a card.`,
-            ...next.log,
-          ],
-        };
-
-        next = maybeFinalizeGame(next);
-
-        if (next.gameOver) {
-          return next;
-        }
-
-        if (drawn.rank === requestedRank) {
-          // Dealer drew the asked rank, so dealer continues.
-          continue;
-        }
-
-        dealerContinuesTurn = false;
-
-        return {
-          ...next,
-          turn: "player",
-        };
-      }
-
-      return next;
-    },
-    [dealerDrawIfNeeded],
-  );
-
+  /**
+   * The one door every ask goes through.
+   *
+   * Two jobs, in the order they matter:
+   *
+   *  1. Ask the engine. An engine that returns its input unchanged is an
+   *     illegal ask — not the player's turn, game over, or a rank the player
+   *     does not hold — and the update stops there, so *nothing else runs*.
+   *  2. Record the ask, but only when the state changed. An honest log
+   *     therefore contains exactly the asks that happened; the worker
+   *     re-applies it and treats a state-changed-nothing ask as a dead
+   *     action at its index — see `replayGoFishActions`.
+   */
   const askForRank = useCallback(
     (rank: CardRank) => {
       if (!gameState || gameState.turn !== "player" || gameState.gameOver) {
         return;
       }
 
-      let next: GoFishState = {
-        ...gameState,
-        turn: "player",
-        selectedRank: rank,
-      };
-
-      const fromDealer = removeRankCards(next.dealerHand, rank);
-
-      if (fromDealer.removed.length > 0) {
-        let playerHand = sortHand([...next.playerHand, ...fromDealer.removed]);
-        let dealerHand = sortHand(fromDealer.remaining);
-
-        const playerBookResult = extractBooks(playerHand);
-        playerHand = playerBookResult.hand;
-
-        const dealerBookResult = extractBooks(dealerHand);
-        dealerHand = dealerBookResult.hand;
-
-        next = {
-          ...next,
-          playerHand,
-          dealerHand,
-          playerBooks: [...next.playerBooks, ...playerBookResult.books],
-          dealerBooks: [...next.dealerBooks, ...dealerBookResult.books],
-          log: [
-            `You asked for ${rank} and got ${fromDealer.removed.length} card(s). Ask again.`,
-            ...next.log,
-          ],
-        };
-
-        next = maybeFinalizeGame(next);
-
-        if (!next.gameOver) {
-          next = playerDrawIfNeeded(next);
-        }
-
-        setGameState(maybeFinalizeGame(next));
+      const next = applyAskForRank(gameState, rank);
+      if (next === gameState) {
         return;
       }
 
-      const drawn = drawCard(next.deck);
-
-      if (!drawn) {
-        next = {
-          ...next,
-          turn: "dealer",
-          log: [`You asked for ${rank}. Deck is empty.`, ...next.log],
-        };
-
-        next = maybeFinalizeGame(next);
-
-        if (!next.gameOver) {
-          next = dealerTurn(next);
-        }
-
-        setGameState(maybeFinalizeGame(next));
-        return;
-      }
-
-      let playerHand = sortHand([...next.playerHand, drawn]);
-      const playerBookResult = extractBooks(playerHand);
-      playerHand = playerBookResult.hand;
-
-      next = {
-        ...next,
-        playerHand,
-        playerBooks: [...next.playerBooks, ...playerBookResult.books],
-        log: [
-          `You asked for ${rank}. Go Fish. You drew ${drawn.rank}.`,
-          ...next.log,
-        ],
-      };
-
-      next = maybeFinalizeGame(next);
-
-      if (next.gameOver) {
-        setGameState(next);
-        return;
-      }
-
-      if (drawn.rank === rank) {
-        next = playerDrawIfNeeded(next);
-        setGameState(maybeFinalizeGame(next));
-        return;
-      }
-
-      next = {
-        ...next,
-        turn: "dealer",
-      };
-
-      next = dealerTurn(next);
-      setGameState(maybeFinalizeGame(next));
+      moveLogRef.current.push(RANK_ORDER.indexOf(rank));
+      setGameState(next);
     },
-    [dealerTurn, gameState, playerDrawIfNeeded],
+    [gameState],
   );
 
   const handleExitAfterGame = useCallback(() => {
-    settleRewardRun();
+    // The claim was already built and sent the moment the game ended — see
+    // `completeRewardIfNeeded`. Exiting is navigation now, not settlement,
+    // so winning and closing the cabinet through the arcade chrome claims
+    // the same as pressing this button.
     returnToMenu();
-  }, [returnToMenu, settleRewardRun]);
+  }, [returnToMenu]);
 
   const handlePlayAgainPractice = useCallback(() => {
     if (sessionMode !== "practice") {
       return;
     }
 
-    setGameState(createInitialState());
+    const seed = getRunSeed();
+    runSeedRef.current = seed;
+    runStartedAtRef.current = Date.now();
+    moveLogRef.current = [];
+    setGameState(createInitialState(seed));
     setShowQuitConfirm(false);
-  }, [sessionMode]);
+  }, [getRunSeed, sessionMode]);
 
   if (!gameState || !sessionMode) {
     return (
@@ -642,6 +342,14 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
         </div>
       </OuterPanel>
     );
+  }
+
+  // Settle in the same render the game ends — Solitaire's
+  // `completeRewardIfNeeded` pattern. The log cannot grow past this point
+  // (the engine refuses every ask once the game is over), so the proof this
+  // builds is the complete game, nothing before or after it.
+  if (gameState.gameOver) {
+    completeRewardIfNeeded();
   }
 
   const playerCardGroups = groupCardsByRank(gameState.playerHand);

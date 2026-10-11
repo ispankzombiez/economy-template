@@ -14,6 +14,7 @@
     "anticheat:continuation": "node scripts/replayContinuationTest.mjs",
     "anticheat:longrun": "node scripts/replayLongRunTest.mjs",
     "anticheat:solitaire": "node scripts/solitaireReplayTest.mjs",
+    "anticheat:gofish": "node scripts/goFishReplayTest.mjs",
     "freerun:audit": "node scripts/auditFreeRuns.mjs",
     "freerun:add": "node scripts/addCabinetEconomyIds.mjs",
     "preview": "vite preview"

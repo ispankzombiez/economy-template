@@ -101,6 +101,15 @@ import {
   solitaireReplayOutcome,
   validateSolitaireReplay,
 } from "./solitaireReplay.js";
+// Go Fish's verifier — the Solitaire twin again, because Go Fish is the same
+// kind of proof: a turn-based ask log that replays whole in microseconds. The
+// two share no code with `replay.js` beyond their job.
+import {
+  GoFishReplayInputError,
+  goFishReplayOutcome,
+  runGoFishReplay,
+  validateGoFishReplay,
+} from "./gofishReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2364,6 +2373,82 @@ async function runSolitaireVerification({ env, farmId, payload, cabinet, claimSc
 }
 
 /**
+ * Verify a Go Fish claim — validate, replay, and record the verdict.
+ *
+ * The Go Fish twin of `runSolitaireVerification`, for the same structural
+ * reason as Solitaire's: a turn-based ask log replays whole in one request,
+ * so this is validate → replay → verdict with nothing in between. The three
+ * outcomes mirror the others' exactly — an input error (`GoFishReplayInputError`)
+ * records `matched: null` as protocol noise rather than a mismatch, a throw
+ * mid-replay records `matched: null` because a crash is our defect and not
+ * evidence against the player, and only a completed replay records a real
+ * verdict through `goFishReplayOutcome` — the only path that may refuse the
+ * coin.
+ *
+ * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
+ */
+async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore }) {
+  let validated;
+  try {
+    validated = validateGoFishReplay(payload?.replay);
+  } catch (error) {
+    const reason =
+      error instanceof GoFishReplayInputError
+        ? error.message
+        : "the replay could not be started";
+    await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
+    return { matched: null, reason };
+  }
+
+  try {
+    const replayed = runGoFishReplay(validated);
+    const outcome = goFishReplayOutcome(replayed, claimScore);
+
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      claimScore,
+      reason: outcome.reason,
+    });
+
+    return {
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      reason: outcome.reason,
+    };
+  } catch (error) {
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: null,
+      claimScore,
+      reason: `the replay threw: ${String(error?.message ?? error).slice(0, 200)}`,
+    });
+    return { matched: null, reason: "the replay could not be completed" };
+  }
+}
+
+/**
+ * Turn-based cabinets' whole-log verifiers, keyed by cabinet.
+ *
+ * These games replay their entire ask/move list inside the claim's own
+ * request — no parking, no chunks, no continuation (see the headers of
+ * `solitaireReplay.js` and `gofishReplay.js` for why). A table rather than
+ * another nested branch, so the next turn-based cabinet joins with a row:
+ * the brawler's chunked verifier stays the default, and an unknown verified
+ * cabinet falling through to it fails closed — its validator rejects any
+ * replay shape that is not the brawler's, so nothing is ever processed by
+ * the more lenient of the two by accident.
+ */
+const WHOLE_LOG_VERIFIERS = {
+  solitaire: runSolitaireVerification,
+  gofish: runGoFishVerification,
+};
+
+/**
  * Claim a reward for a run on a verified cabinet.
  *
  * The replay IS the gate — no checkpoints, no separate verifier. The worker
@@ -2407,23 +2492,15 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
   // shape: a caller who sent a brawler-shaped `replay` on a solitaire run (or
   // the reverse) is refused by whichever verifier does not recognise it,
   // rather than being silently processed by the more lenient of the two.
-  const replayVerdict =
-    cabinetId === "solitaire"
-      ? await runSolitaireVerification({
-          env,
-          farmId,
-          payload,
-          cabinet: cabinetId,
-          claimScore: claimedScore,
-        })
-      : await runReplayVerification({
-          env,
-          farmId,
-          payload,
-          cabinet: cabinetId,
-          claimScore: claimedScore,
-          runKey: openedOn.runKey,
-        });
+  const wholeLogVerifier = WHOLE_LOG_VERIFIERS[cabinetId] ?? null;
+  const replayVerdict = await (wholeLogVerifier ?? runReplayVerification)({
+    env,
+    farmId,
+    payload,
+    cabinet: cabinetId,
+    claimScore: claimedScore,
+    runKey: openedOn.runKey,
+  });
 
   if (replayVerdict.matched !== true) {
     const reason = replayVerdict.reason ?? "replay did not match the claimed run";
@@ -2494,9 +2571,16 @@ async function intentVerifyChunk({ env, farmId, payload }) {
   // which no single 10 ms request can finish. The run that is *open* is the
   // run its chunks belong to, and it binds cabinet and identity in one read —
   // taken the same way, on both sides of the run.
+  // Chunk streaming is the *brawler's* machinery, not every verified
+  // cabinet's: the turn-based verifiers (Solitaire, Go Fish) replay whole in
+  // the claim's own request and never park anything, so accepting chunks for
+  // them would let a run on those cabinets open a brawler-style replay park
+  // that nothing would ever drain. The gate is therefore membership in
+  // `STREAMED_CABINETS`, not in `VERIFIED_CABINETS` — the turn-based
+  // cabinets are in the latter, for the claim route, and must not reach here.
   const openedOn = await readActiveRun(env, farmId);
-  if (openedOn === null || !VERIFIED_CABINETS.has(openedOn.cabinet)) {
-    throw new HttpError(400, "No verified run is open on that cabinet.");
+  if (openedOn === null || !STREAMED_CABINETS.has(openedOn.cabinet)) {
+    throw new HttpError(400, "No streamed run is open on that cabinet.");
   }
   const { runKey, cabinet } = openedOn;
 
@@ -2911,7 +2995,25 @@ function intentSubmitScore({ score, session, env }) {
  * reason — an old client would see its reward runs refused, loudly, rather
  * than silently paid unverified.
  */
-const VERIFIED_CABINETS = new Set(["sunflower-brawler", "solitaire"]);
+const VERIFIED_CABINETS = new Set([
+  "sunflower-brawler",
+  "solitaire",
+  "gofish",
+]);
+
+/**
+ * Cabinets whose replays are *streamed* — the tick-simulated games that post
+ * `verify-chunk` windows during play and park between requests (see
+ * `openChunkReplay`).
+ *
+ * Membership in `VERIFIED_CABINETS` is about which *claim* route a cabinet
+ * takes; this set is about the *chunk* route, and a cabinet can be verified
+ * without being streamed: the turn-based games (Solitaire, Go Fish) replay
+ * whole in the claim's own request and never park. The chunk intent checks
+ * this set so a run on a turn-based cabinet cannot open a brawler-style park
+ * that nothing would ever drain.
+ */
+const STREAMED_CABINETS = new Set(["sunflower-brawler"]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,
