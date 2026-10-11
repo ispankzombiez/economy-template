@@ -2162,10 +2162,6 @@ export const stepMatch = (match: MatchState, dtMs: number): void => {
   stepSparks(match, clamped);
   stepFloaters(match, clamped);
 
-  const input = match.playerInput;
-  input.attackBuf = Math.max(0, input.attackBuf - clamped);
-  input.magicBuf = Math.max(0, input.magicBuf - clamped);
-
   if (match.hitstop > 0) {
     match.hitstop -= clamped;
     return;
@@ -2197,6 +2193,32 @@ export const stepMatch = (match: MatchState, dtMs: number): void => {
     match.phase === "waveClear";
 
   if (accepting) stepPlayer(match, dt);
+
+  // The input buffers decay **after** the player has consumed them, and that
+  // order is part of the replay contract, not an implementation detail. The
+  // log samples the input before this step (`inputMask` is pushed, then
+  // `stepMatch` runs), and the replay restores a press as a full buffer — so
+  // the two ends can only agree if "a press was live this tick" is exactly
+  // "the drain fires this tick".
+  //
+  // Decaying first broke that, invisibly. A buffer down to its last sliver of
+  // a tick — anything in `(0, clamped]` — was zeroed before `stepPlayer` saw
+  // it, so the client's press died unthrown while the replay's restored full
+  // buffer survived the decay and fired: one extra attack the run was never
+  // played with. In short scripted runs the window is rarely hit, and the
+  // harness's own scripts zero the buffer explicitly, so it stayed green; over
+  // a six-minute run to the finale it is hit constantly, and every such tick
+  // cascades — the replayed player fights a different game from there on.
+  //
+  // Consuming before decaying makes the mask's `> 0` bit the exact predicate
+  // the drain uses, and the press lives the full `INPUT_BUFFER_MS` it was
+  // promised — which is also what input buffering was always supposed to be:
+  // a press during recovery comes out on the first legal frame, not on the
+  // frames it happened to survive.
+  const input = match.playerInput;
+  input.attackBuf = Math.max(0, input.attackBuf - clamped);
+  input.magicBuf = Math.max(0, input.magicBuf - clamped);
+
   if (hostile) for (const enemy of match.enemies) stepEnemy(match, enemy, clamped);
 
   stepActorTimers(match, clamped);

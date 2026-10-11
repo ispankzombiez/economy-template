@@ -12,6 +12,7 @@
     "anticheat:verify": "node shared/anticheat/verify.test.mjs",
     "anticheat:replay": "node scripts/replayHarness.mjs",
     "anticheat:continuation": "node scripts/replayContinuationTest.mjs",
+    "anticheat:longrun": "node scripts/replayLongRunTest.mjs",
     "anticheat:solitaire": "node scripts/solitaireReplayTest.mjs",
     "freerun:audit": "node scripts/auditFreeRuns.mjs",
     "freerun:add": "node scripts/addCabinetEconomyIds.mjs",
