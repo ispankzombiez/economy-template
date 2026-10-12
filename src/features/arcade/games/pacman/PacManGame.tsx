@@ -934,8 +934,8 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                 The lobby dialog (rewardRun.dialog) is not visible when the game
                 is over, so we render a copy here using the same confirming state. */}
             {runtime.gameOver && mode === "reward" && rewardRun.confirming && (
-              <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4">
-                <div className="w-full max-w-md rounded border border-white/30 bg-slate-900 p-5 text-white space-y-4">
+              <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+                <div className="w-full max-w-sm bg-slate-900 rounded border border-white/30 p-5 text-white space-y-4">
                   <div className="font-bold text-lg">ARE YOU SURE?</div>
                   <p className="text-sm text-slate-300">
                     Today&apos;s free reward run is already used. Starting another one burns
@@ -945,7 +945,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                     Play Tickets: <b>{rewardRun.tickets}</b>
                   </p>
                   <div className="flex flex-col gap-2">
-                    <Button onClick={rewardRun.confirm} className="w-full">
+                    <Button onClick={rewardRun.confirm} variant="primary" className="w-full">
                       CONFIRM — USE 1 PLAY TICKET
                     </Button>
                     <Button onClick={rewardRun.cancel} variant="secondary" className="w-full">
