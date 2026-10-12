@@ -58,17 +58,9 @@
  * disables the button under exactly that condition, so an honest log never
  * contains one).
  *
- * ## Two shipped behaviours this file preserves on purpose
+ * ## The shipped behaviour this file preserves on purpose
  *
- *  1. **The showdown scores only the first five of seven cards.** Each side is
- *     evaluated on `[own two hole cards, board]` `.slice(0, 5)` — the hole
- *     cards plus the *flop* — so the turn and river are dealt, shown, and then
- *     not consulted (`getBestHand`, the best-of-seven helper, exists in
- *     `evaluateHand.ts` but the cabinet never calls it). Verification
- *     certifies the game as it plays, not as it was meant to; a worker that
- *     "fixed" the evaluation would refuse every honest win. See the header of
- *     `resolveShowdown`.
- *  2. **A tie pays the player the whole pot** (`winnings = winner === "house"
+ *  1. **A tie pays the player the whole pot** (`winnings = winner === "house"
  *     ? 0 : winAmount`), so a split pot lands as a win for the player. That is
  *     the reducer's own arithmetic and it is reproduced exactly.
  *
@@ -82,7 +74,7 @@
 import type { EvaluatedHand, PokerGameState } from "./types";
 import { PokerDeck } from "./deck";
 import { HouseAI } from "./houseAI";
-import { evaluateHand, compareHands } from "./evaluateHand";
+import { evaluateHand, compareHands, getBestHand } from "./evaluateHand";
 import {
   advanceRng,
   makeRngState,
@@ -420,14 +412,23 @@ export function advanceStreet(state: PokerState): PokerState {
 /**
  * Score the showdown and end the hand.
  *
- * **The evaluation is the cabinet's, quirk included.** Each side is scored on
- * the first five of `own hole cards + board`, which is the two hole cards plus
- * the flop: the turn and river are dealt and displayed but never consulted.
- * The best-of-seven helper (`getBestHand`) sits unused in `evaluateHand.ts`,
- * which is almost certainly how the cabinet came to ship this — but a worker
- * that "corrected" it here would compute a different winner than the screen
- * showed and refuse every honest win. The game is verified as played; the fix,
- * if wanted, belongs in one commit that changes both ends at once.
+ * **The best five of all seven.** Each side scores its own two hole cards
+ * against the full board — flop, turn and river — through `getBestHand`, which
+ * enumerates every five-card combination and keeps the one that wins. This is
+ * the one place the shipped cabinet was *wrong* rather than merely odd, and it
+ * was wrong visibly: it scored `own hole cards + board` `.slice(0, 5)`, i.e.
+ * the hole cards plus the flop, so the turn and river were dealt, displayed,
+ * and then never consulted — a player could watch a straight complete on
+ * screen and be told they lost. (The correct helper, `getBestHand`, sat
+ * unused in `evaluateHand.ts`; it is wired up here now, and itself fixed to
+ * compare whole hands rather than rank classes.)
+ *
+ * The fix ships in one commit across both ends deliberately: this function is
+ * the worker's as much as the cabinet's, and a worker scoring seven cards
+ * while the deployed app still scored the flop — or the reverse — would refuse
+ * every honest win the turn or river decided. Client and worker both import
+ * this file, so deploying them together is what keeps the screen and the
+ * replay agreeing on who won.
  *
  * The winner takes the pot as it stands (the house has already matched by
  * this point); a tie pays the player the same full pot, because that is what
@@ -438,8 +439,8 @@ export function resolveShowdown(state: PokerState): PokerState {
 
   const allPlayerCards = state.playerHand.concat(state.communityCards);
   const allHouseCards = state.houseHand.concat(state.communityCards);
-  const playerCards = allPlayerCards.slice(0, 5);
-  const houseCards = allHouseCards.slice(0, 5);
+  const playerCards = getBestHand(allPlayerCards);
+  const houseCards = getBestHand(allHouseCards);
 
   const playerEval = evaluateHand(playerCards);
   const houseEval = evaluateHand(houseCards);

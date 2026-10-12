@@ -52,7 +52,14 @@ const HAND_RANKING_NAMES: Record<HandRanking, string> = {
 };
 
 /**
- * Get the best 5-card hand from 7 cards (5 community + 2 hole cards)
+ * Get the best 5-card hand from up to 7 cards (2 hole + 5 community).
+ *
+ * Every five-card combination is compared against the current best with
+ * `compareHands`, which resolves ties *within* a hand type by kickers —
+ * comparing `ranking` alone would freeze on the first combination of the best
+ * type found and could return a pair of twos beside a pair of aces that the
+ * same seven cards also contain. This is the helper the cabinet shipped
+ * without; `resolveShowdown` is where it now gets called.
  */
 export function getBestHand(cards: Card[]): Card[] {
   if (cards.length < 5) {
@@ -63,13 +70,9 @@ export function getBestHand(cards: Card[]): Card[] {
   const combinations = generateCombinations(cards, 5);
 
   let bestHand = combinations[0];
-  let bestRanking = evaluateHand(bestHand).ranking;
-
   for (let i = 1; i < combinations.length; i++) {
-    const ranking = evaluateHand(combinations[i]).ranking;
-    if (ranking > bestRanking) {
+    if (compareHands(combinations[i], bestHand) > 0) {
       bestHand = combinations[i];
-      bestRanking = ranking;
     }
   }
 

@@ -45,6 +45,11 @@
  *   - **A real win pays** — a greedily played session replays choice-for-choice
  *     to a byte-identical state, and its verdict matches at the final chip
  *     count. A fold replays to the same forfeit.
+ *   - **The showdown counts all seven cards** — a straight completing on the
+ *     turn and river beats the house's flop-era pair, and the five-of-seven
+ *     picker keeps the strongest kickers rather than the first combination it
+ *     enumerated. (The shipped cabinet scored hole+flop only; both ends share
+ *     this engine, so the fix ships as one unit.)
  *   - **Forgery is refused** — the same log on a different deal, a hand
  *     spliced in after the session was already decided (caught at its exact
  *     position), a truncated log, a session that replays perfectly but ends in
@@ -71,6 +76,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENGINE = path.join(ROOT, "src/features/arcade/games/poker/engine.ts");
 const SESSION = path.join(ROOT, "src/features/arcade/games/poker/session.ts");
 const TYPES = path.join(ROOT, "src/features/arcade/games/poker/types.ts");
+const EVALUATE = path.join(ROOT, "src/features/arcade/games/poker/evaluateHand.ts");
 const WORKER_REPLAY = path.join(ROOT, "worker/src/pokerReplay.js");
 const SHARED = path.join(ROOT, "shared/anticheat");
 const CODEC = path.join(SHARED, "pokerLog.js");
@@ -95,6 +101,7 @@ writeFileSync(
     `export * from ${JSON.stringify(toUrl(ENGINE))};`,
     `export * from ${JSON.stringify(toUrl(SESSION))};`,
     `export * from ${JSON.stringify(toUrl(TYPES))};`,
+    `export * from ${JSON.stringify(toUrl(EVALUATE))};`,
     `export * from ${JSON.stringify(toUrl(WORKER_REPLAY))};`,
     `export * from ${JSON.stringify(toUrl(CODEC))};`,
   ].join("\n"),
@@ -142,6 +149,8 @@ const {
   sessionOver,
   sessionWon,
   startHand,
+  // The showdown's five-of-seven picker (evaluateHand.ts)
+  getBestHand,
   // Session (difficulty derivation, shared with the worker)
   POKER_DIFFICULTIES,
   POKER_MAX_HANDS,
@@ -484,7 +493,7 @@ const todayIdxOf = () => {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// C. Engine step parity: a fold, and the bet that opens a hand
+// C. Engine step parity: deal, fold, check, and the seven-card showdown
 // ─────────────────────────────────────────────────────────────────────────────
 
 {
@@ -535,6 +544,56 @@ const todayIdxOf = () => {
     checkMove.applied === true && checkMove.state === checked,
     "a check is reported applied even though it returns the same state",
     `applied=${checkMove.applied}`,
+  );
+
+  // The showdown scores the best five of all seven cards — the fix for the
+  // shipped cabinet's most visible bug. The hand is built so the two
+  // evaluations disagree: on the hole cards + flop alone the house's pair of
+  // kings beats the player's high card, but the turn and river complete
+  // 5-6-7-8-9 for the player — what the screen shows, and what must win.
+  const card = (rank, suit) => ({ rank, suit });
+  const resolved = resolveShowdown({
+    ...createPokerState(seed, today),
+    status: "showdown",
+    playerHand: [card("9", "Kale"), card("8", "Wheat")],
+    houseHand: [card("K", "Kale"), card("K", "Wheat")],
+    communityCards: [
+      card("7", "Barley"),
+      card("5", "Radish"),
+      card("2", "Kale"),
+      card("6", "Wheat"),
+      card("4", "Barley"),
+    ],
+    potAmount: 10,
+  });
+  check(
+    resolved.lastWinner === "player",
+    "the turn and river count: a straight completing on the board beats the house's flop-era pair",
+    `winner=${resolved.lastWinner}`,
+  );
+  check(
+    resolved.playerEvalHand?.rankingName === "Straight",
+    "the player's shown evaluation is the straight the board completed",
+    String(resolved.playerEvalHand?.rankingName),
+  );
+
+  // The picker must keep the strongest combination *within* a hand type, not
+  // the first one it enumerated: these seven cards contain both a pair with
+  // junk kickers (first in combination order) and a pair with face kickers.
+  const best = getBestHand([
+    card("A", "Kale"),
+    card("A", "Wheat"),
+    card("2", "Barley"),
+    card("3", "Radish"),
+    card("5", "Kale"),
+    card("9", "Wheat"),
+    card("J", "Barley"),
+  ]);
+  const bestRanks = best.map((c) => c.rank);
+  check(
+    bestRanks.includes("J") && bestRanks.includes("9") && bestRanks.includes("5"),
+    "getBestHand keeps the strongest kickers, not the first combination of its rank class",
+    bestRanks.join(","),
   );
 }
 
