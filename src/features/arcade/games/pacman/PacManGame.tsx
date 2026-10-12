@@ -928,7 +928,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
               </Button>
             )}
             {runtime.gameOver && mode === "reward" && hasRewardRun && (
-              <Button onClick={() => startSession("reward")}>Play Again</Button>
+              <Button onClick={rewardRun.start}>Play Again</Button>
             )}
             {onClose && (
               <Button
