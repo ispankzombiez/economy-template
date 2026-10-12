@@ -948,7 +948,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                     <Button onClick={rewardRun.confirm} variant="primary" className="w-full">
                       CONFIRM — USE 1 PLAY TICKET
                     </Button>
-                    <Button onClick={rewardRun.cancel} variant="secondary" className="w-full">
+                    <Button onClick={rewardRun.cancel} variant="primary" className="w-full">
                       CLOSE
                     </Button>
                   </div>
