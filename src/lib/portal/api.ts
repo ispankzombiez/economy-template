@@ -402,13 +402,17 @@ export type VerifiedRun = {
    * branches on the run-open's cabinet binding, so a brawler-shaped replay on
    * a solitaire run is a refusal, not a puzzle. The split is by *what the
    * game is* — brawler is tick-simulated, so its proof is per-tick inputs the
-   * worker re-simulates; the turn-based cabinets (Solitaire, Go Fish, Uno)
-   * are turn-based, so their proof is the list of moves the worker re-applies,
-   * which replays in microseconds and needs no chunking at all. Go Fish and
-   * Uno differ from Solitaire in one field only: neither has a daily
-   * difficulty (their lobby "Daily" labels are decorative), so their replay
-   * names a seed and the choices and nothing else — the same two-field shape,
-   * decoded by whichever codec the cabinet binding names.
+   * worker re-simulates; the turn-based cabinets (Solitaire, Go Fish, Uno,
+   * Blackjack, Poker) are turn-based, so their proof is the list of moves the
+   * worker re-applies, which replays in microseconds and needs no chunking at
+   * all. Go Fish and Uno differ from Solitaire in one field only: neither has
+   * a daily difficulty (their lobby "Daily" labels are decorative), so their
+   * replay names a seed and the choices and nothing else — the same two-field
+   * shape, decoded by whichever codec the cabinet binding names. Blackjack and
+   * Poker, by contrast, *do* have a daily difficulty, so their replay is the
+   * three-field shape at the end of this union — `difficulty` is an index into
+   * the shared table, which the worker re-derives from the UTC date and
+   * accepts only as today's or yesterday's.
    */
   replay?:
     | {
@@ -479,8 +483,32 @@ export type VerifiedRun = {
         actions: string;
       }
     | {
+        /**
+         * The seed every shuffle in the session was drawn from —
+         * `createPokerState`. The deck does not reshuffle per hand from a new
+         * source: each hand's Fisher-Yates draw continues the one stream the
+         * session opened with, so this seed carries all five hands, not just
+         * the first deal. Client-chosen like the rest, pending Stage C.
+         */
         seed: number;
+        /**
+         * Index into the shared difficulty table (0–3), not its name.
+         *
+         * The worker re-derives the day's table position from the UTC date and
+         * accepts only today's or yesterday's — "always claim Expert" buys
+         * nothing, and neither does claiming Easy on a target the replay
+         * cannot reach. Blackjack and Poker share this shape exactly; the
+         * cabinet binding is what tells them apart.
+         */
         difficulty: number;
+        /**
+         * Every hand's bet index and the player's street choices, in play
+         * order, base64. Three bytes per hand: `[difficulty, handCount]`
+         * followed by `[betIdx, actionCount, action…]`. The house's calls and
+         * the showdown are not logged — `HouseAI` reads only its own cards and
+         * the board, so the replay re-runs it from the same deal. See
+         * `encodePokerLog`.
+         */
         actions: string;
       };
 };

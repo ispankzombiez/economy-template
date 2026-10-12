@@ -33,6 +33,10 @@
       "types": "./anticheat/blackjackLog.d.ts",
       "default": "./anticheat/blackjackLog.js"
     },
+    "./pokerLog": {
+      "types": "./anticheat/pokerLog.d.ts",
+      "default": "./anticheat/pokerLog.js"
+    },
     "./unoLog": {
       "types": "./anticheat/unoLog.d.ts",
       "default": "./anticheat/unoLog.js"

@@ -1,16 +1,22 @@
 /* eslint-disable react/jsx-no-literals, react/no-unescaped-entities */
-import React, { useContext, useMemo, useReducer, useState } from "react";
+import React, { useContext, useMemo, useRef, useState } from "react";
 import { useSelector } from "../adapters/useSelector";
+import { Card, BetAmount, BET_AMOUNTS } from "./types";
+// The rules live in engine.ts — the same module the worker's replay imports —
+// so the cabinet and the verifier deal from one implementation. The component
+// only stages it: every click applies an engine step and records the choice.
 import {
-  Card,
-  PokerGameState,
-  BetAmount,
-  BET_AMOUNTS,
-  EvaluatedHand,
-} from "./types";
-import { HouseAI } from "./houseAI";
-import { evaluateHand, compareHands } from "./evaluateHand";
-import { PokerDeck } from "./deck";
+  advanceStreet,
+  applyPlayerChoice,
+  createPokerState,
+  placeBet,
+  PLAYER_CHOICE_CODES,
+  type PlayerChoice,
+  type PokerState,
+  resolveHouse,
+  resolveShowdown,
+  startHand,
+} from "./engine";
 import { OuterPanel, InnerPanel } from "components/ui/Panel";
 import { Label } from "components/ui/Label";
 import { SquareIcon } from "components/ui/SquareIcon";
@@ -22,8 +28,16 @@ import { PortalMachineState } from "../adapters/portal";
 import { useRewardRun } from "../adapters/rewardRun";
 import { ConfirmPanel } from "../adapters/ConfirmPanel";
 import { useVipAccess } from "../adapters/useVipAccess";
+import type { VerifiedRun } from "lib/portal/api";
+import {
+  encodePokerActionLog,
+  encodePokerLog,
+  MAX_POKER_ACTIONS,
+  POKER_BET_AMOUNTS,
+} from "@nightshade/shared/anticheat/pokerLog";
 import {
   getPokerDifficulty,
+  POKER_DIFFICULTIES,
   POKER_MAX_HANDS,
   POKER_RAVEN_COIN_REWARD,
   POKER_STARTING_CHIPS,
@@ -31,213 +45,24 @@ import {
   isRewardRunAvailable,
 } from "./session";
 
-// Reducer for game state
-const initialGameState: PokerGameState = {
-  status: "idle",
-  playerHand: [],
-  playerChips: 0,
-  houseHand: [],
-  communityCards: [],
-  initialBetAmount: 0,
-  currentBet: 0,
-  potAmount: 0,
-  playerBetAmount: 0,
-  houseBetAmount: 0,
-  totalPlayerBetAcrossGame: 0,
-  totalHouseBetAcrossGame: 0,
-  playerEvalHand: null,
-  houseEvalHand: null,
-  lastWinner: null,
-  lastWinAmount: 0,
-  gameNumber: 0,
-  totalWinnings: 0,
-  totalLosses: 0,
-};
+/**
+ * The cabinet's staged beats, in milliseconds.
+ *
+ * They are the timings the showdown has always had: the house answers half a
+ * second after the click, a street lands eight tenths of a second later, and
+ * the river's results come 2.3 s after the board is complete (800 ms while the
+ * hands are scored off-screen, then the 1.5 s beat the cabinet has always
+ * given the player to read the board). The replay calls the same engine steps
+ * with no clock at all — these numbers decide only when the screen changes.
+ */
+const HOUSE_MS = 500;
+const STREET_MS = 800;
+const SHOWDOWN_MS = 2300;
 
 const _portalState = (state: PortalMachineState) => state.context.state;
 
-const createInitialGameState = (startingChips: number): PokerGameState => ({
-  ...initialGameState,
-  playerChips: startingChips,
-});
-
 const pokerPanelClassName =
   "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
-
-type GameAction =
-  | { type: "START_GAME"; startingChips: number }
-  | { type: "PLACE_BET"; amount: BetAmount }
-  | { type: "DEAL_HOLE_CARDS"; playerHand: Card[]; houseHand: Card[] }
-  | { type: "PLAYER_ACTION"; action: "bet" | "check" | "fold" }
-  | { type: "HOUSE_ACTION"; action: "call" | "check" | "fold"; amount?: number }
-  | { type: "RESET_STREET_BETS" }
-  | { type: "DEAL_FLOP"; cards: Card[] }
-  | { type: "DEAL_RIVER"; cards: Card[] }
-  | { type: "SHOW_CARDS" }
-  | {
-      type: "GAME_OVER";
-      winner: "player" | "house" | "tie";
-      winAmount: number;
-      playerEvalHand?: EvaluatedHand;
-      houseEvalHand?: EvaluatedHand;
-    }
-  | { type: "PLAY_AGAIN"; startingChips: number };
-
-function gameReducer(
-  state: PokerGameState,
-  action: GameAction,
-): PokerGameState {
-  switch (action.type) {
-    case "START_GAME":
-      return {
-        ...state,
-        status: "betting",
-        gameNumber: state.gameNumber + 1,
-        playerHand: [],
-        houseHand: [],
-        communityCards: [],
-        potAmount: 0,
-        playerBetAmount: 0,
-        houseBetAmount: 0,
-        totalPlayerBetAcrossGame: 0,
-        totalHouseBetAcrossGame: 0,
-        currentBet: 0,
-        playerChips: action.startingChips,
-        playerEvalHand: null,
-        houseEvalHand: null,
-        lastWinner: null,
-        lastWinAmount: 0,
-      };
-
-    case "PLACE_BET":
-      return {
-        ...state,
-        playerChips: state.playerChips - action.amount,
-        potAmount: state.potAmount + action.amount,
-        playerBetAmount: action.amount,
-        totalPlayerBetAcrossGame:
-          state.totalPlayerBetAcrossGame + action.amount,
-        initialBetAmount: action.amount,
-        currentBet: action.amount,
-      };
-
-    case "DEAL_HOLE_CARDS":
-      return {
-        ...state,
-        playerHand: action.playerHand,
-        houseHand: action.houseHand,
-        status: "preflop_betting",
-      };
-
-    case "PLAYER_ACTION":
-      if (action.action === "fold") {
-        return { ...state, status: "gameover" };
-      }
-
-      if (action.action === "bet") {
-        // Player bets - must bet their total accumulated so far
-        const betAmount = state.totalPlayerBetAcrossGame;
-        return {
-          ...state,
-          playerChips: state.playerChips - betAmount,
-          potAmount: state.potAmount + betAmount,
-          playerBetAmount: betAmount,
-          totalPlayerBetAcrossGame: state.totalPlayerBetAcrossGame + betAmount,
-        };
-      }
-
-      if (action.action === "check") {
-        // Player checks - stays in without additional bet
-        return state;
-      }
-
-      return state;
-
-    case "HOUSE_ACTION":
-      if (action.action === "fold") {
-        return { ...state, status: "gameover" };
-      }
-
-      if (action.action === "check" || action.action === "call") {
-        // House calls with specified amount, or checks (amount = 0)
-        const amount = action.amount ?? 0;
-        if (amount > 0) {
-          return {
-            ...state,
-            potAmount: state.potAmount + amount,
-            houseBetAmount: amount,
-            totalHouseBetAcrossGame: state.totalHouseBetAcrossGame + amount,
-          };
-        }
-        return state;
-      }
-
-      return state;
-
-    case "RESET_STREET_BETS":
-      return {
-        ...state,
-        currentBet: 0,
-        playerBetAmount: 0,
-        houseBetAmount: 0,
-      };
-
-    case "DEAL_FLOP":
-      return {
-        ...state,
-        communityCards: action.cards,
-        status: "postflop_betting",
-        currentBet: 0,
-        playerBetAmount: 0,
-        houseBetAmount: 0,
-      };
-
-    case "DEAL_RIVER":
-      return {
-        ...state,
-        communityCards: [...state.communityCards, ...action.cards],
-        status: "showdown",
-        currentBet: 0,
-        playerBetAmount: 0,
-        houseBetAmount: 0,
-      };
-
-    case "SHOW_CARDS":
-      return { ...state, status: "showdown" };
-
-    case "GAME_OVER": {
-      const winnings = action.winner === "house" ? 0 : action.winAmount;
-      return {
-        ...state,
-        status: "gameover",
-        playerChips: state.playerChips + winnings,
-        playerEvalHand: action.playerEvalHand ?? null,
-        houseEvalHand: action.houseEvalHand ?? null,
-        lastWinner: action.winner,
-        lastWinAmount: action.winAmount,
-        totalWinnings:
-          state.totalWinnings +
-          (action.winner === "player" ? action.winAmount : 0),
-        totalLosses:
-          state.totalLosses +
-          (action.winner === "house" ? action.winAmount : 0),
-      };
-    }
-
-    case "PLAY_AGAIN":
-      return {
-        ...initialGameState,
-        totalWinnings: state.totalWinnings,
-        totalLosses: state.totalLosses,
-        playerChips: action.startingChips,
-        lastWinner: null,
-        lastWinAmount: 0,
-      };
-
-    default:
-      return state;
-  }
-}
 
 interface PokerGameProps {
   initialChips?: number;
@@ -251,26 +76,65 @@ export const PokerGame: React.FC<PokerGameProps> = ({
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState, type: "full" });
-  const [gameState, dispatch] = useReducer(
-    gameReducer,
-    initialChips,
-    createInitialGameState,
-  );
-  const [deck, setDeck] = useState<PokerDeck | null>(null);
-  const [selectedBet, setSelectedBet] = useState<BetAmount>(10);
-  const houseAI = useMemo(() => new HouseAI(), []);
-  const [rewardRunStarted, setRewardRunStarted] = useState(false);
-  const [rewardGranted, setRewardGranted] = useState(false);
-  const [sessionMode, setSessionMode] = useState<PokerMode | null>(null);
-  const [showRules, setShowRules] = useState(false);
-  const [confirmExit, setConfirmExit] = useState(false);
   const pokerDifficulty = useMemo(() => getPokerDifficulty(), []);
   const targetChips = pokerDifficulty.targetChips;
 
+  // Display only: the stack the engine opens with is the engine's own
+  // POKER_STARTING_CHIPS, because that is the number the worker rebuilds a
+  // claim from — a starting stack taken from anywhere else would be one the
+  // replay could not reproduce. (Exactly Blackjack's bargain, and no caller
+  // passes a different value today.)
   const realChips = useMemo(
     () => initialChips || POKER_STARTING_CHIPS,
     [initialChips],
   );
+
+  /**
+   * The session, and the mirror that keeps every staged callback honest.
+   *
+   * `stateRef` is written in the same instant as the state (see `commit`), so
+   * the half-second beats below always read the *current* hand rather than the
+   * one that was on screen when the click scheduled them. The `useReducer` this
+   * replaces read everything from a closure captured at click time — which is
+   * how the showdown came to score a stack that predated the final bet.
+   */
+  const [gameState, setGameState] = useState<PokerState>(() =>
+    createPokerState(0, pokerDifficulty),
+  );
+  const stateRef = useRef(gameState);
+  const commit = (next: PokerState) => {
+    stateRef.current = next;
+    setGameState(next);
+  };
+
+  /**
+   * The run's proof, captured as it happens rather than reconstructed after.
+   *
+   * `moveLogRef` holds every hand's bet and the street choices the engine
+   * actually accepted, `handLogRef` the current hand's choices (mirrored into
+   * the log as they happen), `runSeedRef` the seed every shuffle came from, and
+   * `runStartedAtRef` when the session opened. The claim is built from these at
+   * the moment the session ends; see `completeRewardIfNeeded`.
+   */
+  const moveLogRef = useRef<{
+    difficultyIdx: number;
+    hands: { betIdx: number; actions: number[] }[];
+  }>({ difficultyIdx: 0, hands: [] });
+  const handLogRef = useRef<number[]>([]);
+  const runSeedRef = useRef<number | null>(null);
+  const runStartedAtRef = useRef(0);
+
+  /** One street in flight at a time — see the guard in `handlePlayerAction`. */
+  const resolvingRef = useRef(false);
+  const [resolving, setResolving] = useState(false);
+
+  const [selectedBet, setSelectedBet] = useState<BetAmount>(10);
+  const [rewardRunStarted, setRewardRunStarted] = useState(false);
+  const [rewardGranted, setRewardGranted] = useState(false);
+  const [rewardSubmitted, setRewardSubmitted] = useState(false);
+  const [sessionMode, setSessionMode] = useState<PokerMode | null>(null);
+  const [showRules, setShowRules] = useState(false);
+  const [confirmExit, setConfirmExit] = useState(false);
 
   const handsPlayed = gameState.gameNumber;
   const handsRemaining = Math.max(POKER_MAX_HANDS - handsPlayed, 0);
@@ -285,6 +149,71 @@ export const PokerGame: React.FC<PokerGameProps> = ({
   const sessionComplete = sessionWon || sessionLost;
   const canAdvanceToNextHand =
     gameState.status === "gameover" && !sessionComplete;
+
+  /**
+   * Settle the run on the render where it actually ends.
+   *
+   * **This is the fix for the cabinet's score bug.** The showdown used to
+   * settle inside its final `setTimeout` from a closure captured *before* the
+   * street's last bet — so `submitScore` (and the win check) read a stack
+   * inflated by exactly that street's wager whenever the player bet the last
+   * street, and a won session could be scored above what the screen showed.
+   * The worker replays the engine's own arithmetic, so a score the closure
+   * inflated would never match: honest wins would be refused. The reducer's
+   * state at this instant is the only number both ends agree on.
+   */
+  const completeRewardIfNeeded = () => {
+    if (sessionMode !== "reward") return;
+    if (gameState.status !== "gameover" || !sessionComplete) return;
+
+    if (!rewardSubmitted) {
+      submitScore({ score: Math.max(gameState.playerChips, 0) });
+      setRewardSubmitted(true);
+    }
+
+    if (!sessionWon || rewardGranted) return;
+
+    const { difficultyIdx, hands } = moveLogRef.current;
+    if (hands.length === 0) {
+      console.error("[poker] session ended with no hands in the replay log");
+      return;
+    }
+    const totalActions = hands.reduce((sum, hand) => sum + hand.actions.length, 0);
+    if (totalActions > MAX_POKER_ACTIONS) {
+      console.error("[poker] action log exceeded the replay ceiling");
+      return;
+    }
+
+    // The claim carries the seed the decks were shuffled from, today's table,
+    // and every hand's bet and street choices — the whole session as replay.
+    const verify: VerifiedRun = {
+      cabinet: "poker",
+      score: gameState.playerChips,
+      checkpoints: [],
+      elapsedMs: Date.now() - runStartedAtRef.current,
+      replay: {
+        seed: runSeedRef.current ?? 0,
+        difficulty: difficultyIdx,
+        actions: encodePokerLog(
+          encodePokerActionLog(difficultyIdx, hands),
+        ),
+      },
+    };
+
+    portalService.send({
+      type: "arcadeMinigame.ravenCoinWon",
+      amount: POKER_RAVEN_COIN_REWARD,
+      verify,
+    });
+    setRewardGranted(true);
+  };
+
+  // Render-time settlement (the Solitaire / Go Fish / Blackjack pattern): the
+  // run's score and coin are decided from the state the engine just produced,
+  // never from a stale copy of it.
+  if (gameState.status === "gameover" && sessionComplete) {
+    completeRewardIfNeeded();
+  }
 
   const handleSessionExit = () => {
     // Finished: leave the arcade outright. A half-finished run asks first —
@@ -322,15 +251,44 @@ export const PokerGame: React.FC<PokerGameProps> = ({
     />
   ) : null;
 
-  const startHand = (startingChips: number) => {
-    const newDeck = new PokerDeck();
-    setDeck(newDeck);
-    dispatch({ type: "START_GAME", startingChips });
+  /**
+   * A fresh run seed: every shuffle in the session is drawn from it, and the
+   * worker rebuilds each of them from it during verification — so the run's
+   * proof is fixed the moment the session opens. (The idle menu's state carries
+   * a placeholder seed no deck is ever dealt from.)
+   */
+  const newRunSeed = () =>
+    (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
+
+  /** Reset the run's proof for a new session, remembering today's table. */
+  const openLog = (seed: number) => {
+    moveLogRef.current = {
+      difficultyIdx: POKER_DIFFICULTIES.findIndex(
+        (difficulty) => difficulty.name === pokerDifficulty.name,
+      ),
+      hands: [],
+    };
+    handLogRef.current = [];
+    runSeedRef.current = seed;
+    runStartedAtRef.current = Date.now();
   };
 
   const startGame = (mode: PokerMode) => {
+    const seed = newRunSeed();
     setSessionMode(mode);
-    startHand(realChips);
+    setRewardRunStarted(false);
+    setRewardGranted(false);
+    setRewardSubmitted(false);
+    resolvingRef.current = false;
+    setResolving(false);
+    openLog(seed);
+    commit(startHand(createPokerState(seed, pokerDifficulty)));
+  };
+
+  /** Between hands: a fresh deck from the same stream, chips carried over. */
+  const handleNextHand = () => {
+    if (resolvingRef.current) return;
+    commit(startHand(stateRef.current));
   };
 
   // Free run first, then 1 burned Play Ticket per attempt — with the "are you
@@ -349,10 +307,23 @@ export const PokerGame: React.FC<PokerGameProps> = ({
   });
 
   const startPracticeSession = () => {
+    const seed = newRunSeed();
     setRewardRunStarted(false);
     setRewardGranted(false);
-    dispatch({ type: "PLAY_AGAIN", startingChips: realChips });
-    startHand(realChips);
+    setRewardSubmitted(false);
+    resolvingRef.current = false;
+    setResolving(false);
+    openLog(seed);
+    // PLAY_AGAIN as the reducer wrote it: a fresh session at the starting
+    // stack, with the previous session's winnings and losses carried forward.
+    const previous = stateRef.current;
+    commit(
+      startHand({
+        ...createPokerState(seed, pokerDifficulty),
+        totalWinnings: previous.totalWinnings,
+        totalLosses: previous.totalLosses,
+      }),
+    );
   };
 
   // The button is 44x44 so a thumb can find it; the *circle* stays 28px.
@@ -412,170 +383,90 @@ export const PokerGame: React.FC<PokerGameProps> = ({
     </div>
   );
 
-  const placeBet = () => {
-    dispatch({ type: "PLACE_BET", amount: selectedBet });
+  const handleDealIn = () => {
+    const next = placeBet(stateRef.current, selectedBet);
+
+    // Refused — the stack cannot cover it, or a second click landed between
+    // the screen and React's re-render. Deal nothing, log nothing: the hand's
+    // bet in the log is always one the engine took. The house's matching call
+    // is part of the engine's step too, which is why no 500 ms beat follows
+    // the deal any more (it was cosmetic, and the replay has no clock).
+    if (next === stateRef.current) return;
+    commit(next);
+
+    // Open the hand's entry in the log: its bet, then every street choice the
+    // engine accepts (mirrored as they happen in `handlePlayerAction`).
+    handLogRef.current = [];
+    moveLogRef.current.hands.push({
+      betIdx: POKER_BET_AMOUNTS.findIndex((amount) => amount === selectedBet),
+      actions: [],
+    });
 
     if (sessionMode === "reward" && !rewardRunStarted) {
       portalService.send({ type: "arcadeMinigame.started", name: "poker" });
       startAttempt();
       setRewardRunStarted(true);
     }
-
-    // Deal hole cards
-    if (deck) {
-      const playerHand = [deck.deal(), deck.deal()];
-      const houseHand = [deck.deal(), deck.deal()];
-      dispatch({
-        type: "DEAL_HOLE_CARDS",
-        playerHand,
-        houseHand,
-      });
-
-      // House automatically matches the initial bet
-      setTimeout(() => {
-        dispatch({ type: "HOUSE_ACTION", action: "call", amount: selectedBet });
-      }, 500);
-    }
   };
 
-  const handlePlayerAction = (action: "bet" | "check" | "fold") => {
-    if (action === "fold") {
-      dispatch({ type: "PLAYER_ACTION", action });
+    const handlePlayerAction = (choice: PlayerChoice) => {
+    // One street in flight at a time. The buttons stay live for the half
+    // second the house "thinks", and a second click in that window would log a
+    // second choice that the replay applies to a street it has already
+    // advanced past — an honest double-tap would then look forged.
+    if (resolvingRef.current) return;
 
-      // Fold: Player loses all chips they've bet so far
-      dispatch({
-        type: "GAME_OVER",
-        winner: "house",
-        winAmount: gameState.potAmount,
-      });
-      return;
+    const before = stateRef.current;
+    const move = applyPlayerChoice(before, choice);
+    if (!move.applied) return;
+
+    // The log carries a choice only when the engine took it — the exact rule
+    // the replay's dead-action check depends on.
+    handLogRef.current.push(PLAYER_CHOICE_CODES[choice]);
+    const hands = moveLogRef.current.hands;
+    if (hands.length > 0) {
+      hands[hands.length - 1].actions = [...handLogRef.current];
     }
 
-    // Pre-calculate how much the player will bet (before dispatch)
-    // In cumulative system: player bets their total accumulated so far
-    const amountPlayerWillBet =
-      action === "bet" ? gameState.totalPlayerBetAcrossGame : 0;
+    commit(move.state);
 
-    // Calculate the new pot amount based on the action
-    const potAfterPlayerAction = gameState.potAmount + amountPlayerWillBet;
+    // A fold ends the hand at once; nothing follows it.
+    if (move.handEnded) return;
 
-    dispatch({ type: "PLAYER_ACTION", action });
+    resolvingRef.current = true;
+    setResolving(true);
 
-    // No inventory deduction needed for portal version - tracking handled by parent
-
-    // After player checks/bets, house responds
+    // The house answers...
     setTimeout(() => {
-      const streetIndex =
-        gameState.status === "preflop_betting"
-          ? 0
-          : gameState.status === "postflop_betting"
-            ? 1
-            : 2;
-
-      const houseDecision = houseAI.decideBetAction(
-        gameState.houseHand,
-        gameState.communityCards,
-        potAfterPlayerAction, // Use calculated pot, not stale gameState
-        gameState.currentBet,
-        realChips,
-        streetIndex,
-      );
-
-      if (houseDecision === "fold") {
-        dispatch({
-          type: "GAME_OVER",
-          winner: "player",
-          winAmount: potAfterPlayerAction,
-        });
+      const answer = resolveHouse(stateRef.current, choice);
+      commit(answer.state);
+      if (answer.handEnded) {
+        resolvingRef.current = false;
+        setResolving(false);
         return;
       }
 
-      // House responds - call if player bet, check if player checked
-      const houseAction = action === "bet" ? "call" : "check";
-      const houseAmount = action === "bet" ? amountPlayerWillBet : 0;
-      dispatch({
-        type: "HOUSE_ACTION",
-        action: houseAction,
-        amount: houseAmount,
-      });
-
-      // After house acts, move to next street or showdown
+      // ...the street advances...
       setTimeout(() => {
-        if (gameState.status === "preflop_betting") {
-          // Deal flop
-          if (deck) {
-            const flopCards = [deck.deal(), deck.deal(), deck.deal()];
-            dispatch({ type: "DEAL_FLOP", cards: flopCards });
-          }
-        } else if (gameState.status === "postflop_betting") {
-          // Deal turn and river, then evaluate (no more betting)
-          if (deck) {
-            const riverCards = [deck.deal(), deck.deal()];
-            dispatch({ type: "DEAL_RIVER", cards: riverCards });
+        const advanced = advanceStreet(stateRef.current);
+        commit(advanced);
 
-            // After river is dealt, evaluate hands
-            setTimeout(() => {
-              // Combine flop (in gameState.communityCards) + river (riverCards we just dealt)
-              const allCommunityCards =
-                gameState.communityCards.concat(riverCards);
-              const allPlayerCards =
-                gameState.playerHand.concat(allCommunityCards);
-              const allHouseCards =
-                gameState.houseHand.concat(allCommunityCards);
-
-              const playerEval = evaluateHand(allPlayerCards.slice(0, 5));
-              const houseEval = evaluateHand(allHouseCards.slice(0, 5));
-
-              let winner: "player" | "house" | "tie" = "tie";
-              const comparison = compareHands(
-                allPlayerCards.slice(0, 5),
-                allHouseCards.slice(0, 5),
-              );
-              if (comparison > 0) {
-                winner = "player";
-              } else if (comparison < 0) {
-                winner = "house";
-              }
-
-              // Calculate final pot amount (after house matches)
-              const potAfterHouseAction =
-                potAfterPlayerAction +
-                (action === "bet" ? amountPlayerWillBet : 0);
-              const nextPlayerChips =
-                gameState.playerChips +
-                (winner === "house" ? 0 : potAfterHouseAction);
-              const wonSession = nextPlayerChips >= targetChips;
-              const endedSession =
-                wonSession ||
-                nextPlayerChips <= 0 ||
-                gameState.gameNumber >= POKER_MAX_HANDS;
-
-              setTimeout(() => {
-                if (sessionMode === "reward" && endedSession) {
-                  submitScore({ score: Math.max(nextPlayerChips, 0) });
-
-                  if (wonSession && !rewardGranted) {
-                    portalService.send({
-                      type: "arcadeMinigame.ravenCoinWon",
-                      amount: POKER_RAVEN_COIN_REWARD,
-                    });
-                    setRewardGranted(true);
-                  }
-                }
-
-                dispatch({
-                  type: "GAME_OVER",
-                  winner,
-                  winAmount: potAfterHouseAction,
-                  playerEvalHand: playerEval,
-                  houseEvalHand: houseEval,
-                });
-              }, 1500);
-            }, 800);
-          }
+        if (advanced.status !== "showdown") {
+          // The flop's street is open — release the buttons for the next
+          // choice.
+          resolvingRef.current = false;
+          setResolving(false);
+          return;
         }
-      }, 800);
-    }, 500);
+
+        // ...and the river's showdown resolves once the board has been shown.
+        setTimeout(() => {
+          commit(resolveShowdown(stateRef.current));
+          resolvingRef.current = false;
+          setResolving(false);
+        }, SHOWDOWN_MS);
+      }, STREET_MS);
+    }, HOUSE_MS);
   };
 
   if (gameState.status === "idle") {
@@ -757,7 +648,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
 
           <div className="flex gap-3 h-14">
             <button
-              onClick={placeBet}
+              onClick={handleDealIn}
               disabled={gameState.playerChips < selectedBet}
               className="flex-1 px-6 py-3 bg-green-500 text-white font-bold rounded-lg hover:bg-green-600 active:scale-95 transition-all shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed text-lg"
             >
@@ -981,6 +872,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
               <button
                 onClick={() => handlePlayerAction("bet")}
                 disabled={
+                  resolving ||
                   gameState.playerChips < gameState.totalPlayerBetAcrossGame
                 }
                 className="flex-1 px-4 py-3 bg-yellow-500 text-white font-bold rounded-lg hover:bg-yellow-600 active:scale-95 transition-all shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
@@ -989,13 +881,15 @@ export const PokerGame: React.FC<PokerGameProps> = ({
               </button>
               <button
                 onClick={() => handlePlayerAction("check")}
-                className="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg"
+                disabled={resolving}
+                className="flex-1 px-4 py-3 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
               >
                 ✓ CHECK
               </button>
               <button
                 onClick={() => handlePlayerAction("fold")}
-                className="flex-1 px-4 py-3 bg-red-500 text-white font-bold rounded-lg hover:bg-red-600 active:scale-95 transition-all shadow-lg"
+                disabled={resolving}
+                className="flex-1 px-4 py-3 bg-red-500 text-white font-bold rounded-lg hover:bg-red-600 active:scale-95 transition-all shadow-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
               >
                 ✕ FOLD
               </button>
@@ -1070,7 +964,7 @@ export const PokerGame: React.FC<PokerGameProps> = ({
 
               {canAdvanceToNextHand && (
                 <button
-                  onClick={() => startHand(gameState.playerChips)}
+                  onClick={handleNextHand}
                   className="w-full px-4 py-2.5 bg-green-500 text-white font-bold rounded-lg hover:bg-green-600 active:scale-95 transition-all shadow-lg"
                 >
                   🔄 NEXT HAND
