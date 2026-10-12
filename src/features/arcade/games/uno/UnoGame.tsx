@@ -18,13 +18,32 @@ import { useVipAccess } from "../adapters/useVipAccess";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
-import { UnoCard, UnoColor, UnoFace, UnoGameState, UnoWinner } from "./types";
-import { UnoDeck } from "./deck";
+import { UnoCard, UnoColor, UnoFace, UnoWinner } from "./types";
 import {
   UNO_RAVEN_COIN_REWARD,
   UnoMode,
   isUnoRewardRunAvailable,
 } from "./session";
+// The rules live in engine.ts — the same module the worker's replay imports —
+// so this file holds the cabinet and the proof and nothing about how Uno is
+// played. Deal, bot policy, card effects and legality all come from there.
+import {
+  NON_WILD_COLORS,
+  PLAYER_NAMES,
+  canPlay,
+  createInitialState,
+  playerDraw,
+  playerPlayCard,
+  runBotTurn,
+  type UnoState,
+} from "./engine";
+import {
+  MAX_UNO_ACTIONS,
+  encodeUnoActionLog,
+  encodeUnoLog,
+  type UnoAction,
+} from "@nightshade/shared/anticheat/unoLog";
+import type { VerifiedRun } from "lib/portal/api";
 
 // ─── Panel size ──────────────────────────────────────────────────────────────
 
@@ -122,16 +141,7 @@ const SkipSymbol: React.FC<{ className?: string }> = ({ className }) => (
   </svg>
 );
 
-const PLAYER_NAMES = ["You", "Bot 1", "Bot 2", "Bot 3"];
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-const NON_WILD_COLORS: Exclude<UnoColor, "Wild">[] = [
-  "Kale",
-  "Barley",
-  "Wheat",
-  "Radish",
-];
 
 const UNO_COLOR_ORDER: Record<UnoColor, number> = {
   Kale: 0,
@@ -159,109 +169,6 @@ const UNO_FACE_ORDER: Record<UnoFace, number> = {
   WildDrawFour: 14,
 };
 
-const botPickColor = (): Exclude<UnoColor, "Wild"> =>
-  NON_WILD_COLORS[Math.floor(Math.random() * NON_WILD_COLORS.length)];
-
-const canPlay = (
-  card: UnoCard,
-  topCard: UnoCard,
-  currentColor: UnoColor,
-): boolean => {
-  if (card.color === "Wild") return true;
-  if (card.color === currentColor) return true;
-  if (card.face === topCard.face) return true;
-  return false;
-};
-
-// ─── Game initialisation ─────────────────────────────────────────────────────
-
-const createInitialState = (): { state: UnoGameState; deck: UnoDeck } => {
-  const deck = new UnoDeck();
-
-  const hands: [UnoCard[], UnoCard[], UnoCard[], UnoCard[]] = [
-    deck.dealMultiple(7),
-    deck.dealMultiple(7),
-    deck.dealMultiple(7),
-    deck.dealMultiple(7),
-  ];
-
-  // First discard — re-draw if it starts with a Wild
-  let firstCard = deck.deal()!;
-
-  while (firstCard.color === "Wild") {
-    // Put back and re-draw
-    deck["cards"].unshift(firstCard); // internal access to refill
-    firstCard = deck.deal()!;
-  }
-
-  const state: UnoGameState = {
-    deck: [], // we hold the deck instance separately
-    discard: [firstCard],
-    hands,
-    currentPlayer: 0,
-    direction: 1,
-    currentColor: firstCard.color as UnoColor,
-    winner: null,
-    gameOver: false,
-    log: [`Game started. Top card: ${firstCard.color} ${firstCard.face}.`],
-    pendingDrawCount: 0,
-  };
-
-  return { state, deck };
-};
-
-// ─── Bot AI ───────────────────────────────────────────────────────────────────
-
-const botChooseCard = (
-  hand: UnoCard[],
-  topCard: UnoCard,
-  currentColor: UnoColor,
-  pendingDrawCount: number,
-): UnoCard | null => {
-  // If there's a pending draw, bots must play a matching draw card or take the penalty
-  if (pendingDrawCount > 0) {
-    const counter = hand.find(
-      (c) =>
-        (topCard.face === "DrawTwo" && c.face === "DrawTwo") ||
-        (topCard.face === "WildDrawFour" && c.face === "WildDrawFour"),
-    );
-    return counter ?? null;
-  }
-
-  // Prefer action cards, then number cards
-  const playable = hand.filter((c) => canPlay(c, topCard, currentColor));
-
-  if (playable.length === 0) return null;
-
-  // Prefer DrawTwo/WildDrawFour → Skip/Reverse → Wild → numbers
-  const priority: UnoFace[] = [
-    "DrawTwo",
-    "WildDrawFour",
-    "Skip",
-    "Reverse",
-    "Wild",
-  ];
-
-  for (const face of priority) {
-    const match = playable.find((c) => c.face === face);
-
-    if (match) return match;
-  }
-
-  return playable[0];
-};
-
-// ─── State machine helpers ────────────────────────────────────────────────────
-
-const nextPlayerIndex = (
-  current: number,
-  direction: 1 | -1,
-  skip = false,
-): number => {
-  const step = skip ? 2 : 1;
-  return (((current + direction * step) % 4) + 4) % 4;
-};
-
 // ─── Selector ────────────────────────────────────────────────────────────────
 
 const _portalState = (state: PortalMachineState) => state.context.state;
@@ -280,8 +187,7 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   const isVip = useVipAccess({ game: portalGameState, type: "full" });
 
   const [sessionMode, setSessionMode] = useState<UnoMode | null>(null);
-  const [gameState, setGameState] = useState<UnoGameState | null>(null);
-  const deckRef = useRef<UnoDeck | null>(null);
+  const [gameState, setGameState] = useState<UnoState | null>(null);
   const [rewardRunStarted, setRewardRunStarted] = useState(false);
   const [rewardSubmitted, setRewardSubmitted] = useState(false);
   const [rewardGranted, setRewardGranted] = useState(false);
@@ -291,10 +197,27 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   // Bot turn loop running flag
   const botTurnActiveRef = useRef(false);
 
+  /**
+   * The run's proof, captured as it happens rather than reconstructed after.
+   *
+   * `moveLogRef` holds every choice the engine actually applied (a play or
+   * draw the engine refuses logs nothing — the component only appends when
+   * the state changed), `runSeedRef` the seed the deck was shuffled from, and
+   * `runStartedAtRef` when the session opened. The claim is built from these
+   * the moment the game ends.
+   */
+  const moveLogRef = useRef<UnoAction[]>([]);
+  const runSeedRef = useRef<number | null>(null);
+  const runStartedAtRef = useRef(0);
+
   const hasRewardRun = useMemo(
     () => isUnoRewardRunAvailable({ game: portalGameState, isVip }),
     [portalGameState, isVip],
   );
+
+  const getRunSeed = useCallback(() => {
+    return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+  }, []);
 
   const returnToMenu = useCallback(() => {
     setShowQuitConfirm(false);
@@ -302,38 +225,27 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     setGameState(null);
     setPendingWildCard(null);
     botTurnActiveRef.current = false;
+    moveLogRef.current = [];
+    runSeedRef.current = null;
   }, []);
-
-  // ─── Reward settlement ────────────────────────────────────────────────────
-
-  const settleRewardRun = useCallback(
-    (finalState: UnoGameState) => {
-      if (!finalState.gameOver || sessionMode !== "reward") return;
-
-      if (!rewardSubmitted) {
-        submitScore({ score: finalState.winner === "player" ? 1 : 0 });
-        setRewardSubmitted(true);
-      }
-
-      if (finalState.winner === "player" && !rewardGranted) {
-        portalService.send({
-          type: "arcadeMinigame.ravenCoinWon",
-          amount: UNO_RAVEN_COIN_REWARD,
-        });
-        setRewardGranted(true);
-      }
-    },
-    [sessionMode, rewardSubmitted, rewardGranted, portalService],
-  );
 
   // ─── Session start ────────────────────────────────────────────────────────
 
   const startSession = useCallback(
     (mode: UnoMode) => {
+      const seed = getRunSeed();
+
       setSessionMode(mode);
-      const { state, deck } = createInitialState();
-      deckRef.current = deck;
-      setGameState(state);
+      // The seed the deck is actually dealt from. Uno has no difficulty walk,
+      // so this seed *is* the run's — chosen here when the run opens, exactly
+      // like the other verified cabinets, and server-issued for all of them
+      // together in Stage C. Everything after the shuffle (bot colour picks,
+      // refills) draws from the same stream, so the worker rebuilds this
+      // exact game from the seed plus the player's choices.
+      runSeedRef.current = seed;
+      runStartedAtRef.current = Date.now();
+      moveLogRef.current = [];
+      setGameState(createInitialState(seed));
       setRewardSubmitted(false);
       setRewardGranted(false);
       setPendingWildCard(null);
@@ -345,8 +257,71 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
         setRewardRunStarted(true);
       }
     },
-    [portalService, rewardRunStarted],
+    [getRunSeed, portalService, rewardRunStarted],
   );
+
+  /**
+   * Settle the reward run the moment the game ends — win or loss.
+   *
+   * This fires in the same render the game reached `gameOver`, following Go
+   * Fish's `completeRewardIfNeeded`: the log cannot grow past the end of the
+   * game (the engine refuses every play and draw once it is over), so the
+   * proof carried here is the whole game and nothing after it. Calling
+   * settlement from the EXIT button instead left a player who won and then
+   * closed the cabinet through the arcade chrome unclaimed entirely.
+   *
+   * The claim carries the seed and the full choice log; the worker rebuilds
+   * the deal, re-applies the choices — re-simulating the three bots in
+   * between from the same seed — and mints only if *its* game ends with the
+   * player's hand empty. The coin is paid on proof, not assertion.
+   */
+  const completeRewardIfNeeded = useCallback(() => {
+    if (!gameState || !gameState.gameOver || sessionMode !== "reward") {
+      return;
+    }
+
+    if (!rewardSubmitted) {
+      submitScore({ score: gameState.winner === "player" ? 1 : 0 });
+      setRewardSubmitted(true);
+    }
+
+    if (gameState.winner !== "player" || rewardGranted) {
+      return;
+    }
+
+    // A log past the codec's ceiling could not be encoded, hence not
+    // verified, hence not paid — sending it would burn the reward run for a
+    // claim the worker must refuse. Unreachable in honest play (a game is a
+    // few dozen choices; the ceiling is 600); guarded because the failure
+    // mode is a silently-unpayable reward run, not a crash.
+    if (moveLogRef.current.length > MAX_UNO_ACTIONS) {
+      console.error("[uno] action log exceeded the replay ceiling");
+      return;
+    }
+
+    const verify: VerifiedRun = {
+      cabinet: "uno",
+      score: 1,
+      // Turn-based, so there are no wave checkpoints or pace floor to sample:
+      // the choice log below is the verification — full coverage of the game
+      // rather than sampled moments of it. No difficulty either: this cabinet
+      // has no daily difficulty to re-derive, so the replay names only the
+      // seed and the choices.
+      checkpoints: [],
+      elapsedMs: Date.now() - runStartedAtRef.current,
+      replay: {
+        seed: runSeedRef.current ?? 0,
+        actions: encodeUnoLog(encodeUnoActionLog(moveLogRef.current)),
+      },
+    };
+
+    portalService.send({
+      type: "arcadeMinigame.ravenCoinWon",
+      amount: UNO_RAVEN_COIN_REWARD,
+      verify,
+    });
+    setRewardGranted(true);
+  }, [gameState, sessionMode, rewardSubmitted, rewardGranted, portalService]);
 
   // Free run first, then 1 burned Play Ticket per attempt — with the "are you
   // sure?" box in between. `isUnoRewardRunAvailable` is kept as the availability
@@ -359,238 +334,7 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     startRewardRun: () => startSession("reward"),
   });
 
-  // ─── Draw card helper (auto-refill deck) ─────────────────────────────────
-
-  const drawFromDeck = useCallback(
-    (
-      currentDiscard: UnoCard[],
-    ): { card: UnoCard | null; newDiscard: UnoCard[] } => {
-      const deck = deckRef.current!;
-
-      if (deck.remaining() === 0) {
-        const newDiscard = deck.refill(currentDiscard);
-        return { card: deck.deal(), newDiscard };
-      }
-
-      return { card: deck.deal(), newDiscard: currentDiscard };
-    },
-    [],
-  );
-
-  // ─── Apply a played card and produce the next state ───────────────────────
-
-  const applyCardPlayed = useCallback(
-    (
-      state: UnoGameState,
-      playerIndex: number,
-      card: UnoCard,
-      chosenColor?: Exclude<UnoColor, "Wild">,
-    ): UnoGameState => {
-      const newHand = state.hands[playerIndex].filter((c) => c.id !== card.id);
-      const newHands = [...state.hands] as UnoGameState["hands"];
-      newHands[playerIndex] = newHand;
-
-      const newDiscard = [...state.discard, card];
-      const newColor: UnoColor =
-        card.color === "Wild" ? (chosenColor ?? "Kale") : card.color;
-      let newDirection = state.direction;
-      let newPending = state.pendingDrawCount;
-      const logEntry: string[] = [];
-
-      // Check win
-      if (newHand.length === 0) {
-        const winner: UnoWinner =
-          playerIndex === 0
-            ? "player"
-            : playerIndex === 1
-              ? "bot1"
-              : playerIndex === 2
-                ? "bot2"
-                : "bot3";
-
-        logEntry.push(
-          `${PLAYER_NAMES[playerIndex]} played ${card.color} ${card.face} and wins!`,
-        );
-
-        return {
-          ...state,
-          hands: newHands,
-          discard: newDiscard,
-          currentColor: newColor,
-          gameOver: true,
-          winner,
-          log: [...logEntry, ...state.log],
-          pendingDrawCount: 0,
-        };
-      }
-
-      let skip = false;
-
-      switch (card.face) {
-        case "Reverse":
-          newDirection = (state.direction * -1) as 1 | -1;
-          logEntry.push(
-            `${PLAYER_NAMES[playerIndex]} played Reverse. Direction flipped.`,
-          );
-          break;
-        case "Skip":
-          skip = true;
-          logEntry.push(`${PLAYER_NAMES[playerIndex]} played Skip.`);
-          break;
-        case "DrawTwo":
-          newPending = state.pendingDrawCount + 2;
-          logEntry.push(
-            `${PLAYER_NAMES[playerIndex]} played Draw Two (+${newPending} pending).`,
-          );
-          break;
-        case "Wild":
-          logEntry.push(
-            `${PLAYER_NAMES[playerIndex]} played Wild → picked ${newColor}.`,
-          );
-          break;
-        case "WildDrawFour":
-          newPending = state.pendingDrawCount + 4;
-          logEntry.push(
-            `${PLAYER_NAMES[playerIndex]} played Wild Draw Four (+${newPending} pending) → picked ${newColor}.`,
-          );
-          break;
-        default:
-          logEntry.push(
-            `${PLAYER_NAMES[playerIndex]} played ${card.color} ${card.face}.`,
-          );
-      }
-
-      const nextPlayer = nextPlayerIndex(playerIndex, newDirection, skip);
-
-      return {
-        ...state,
-        hands: newHands,
-        discard: newDiscard,
-        currentColor: newColor,
-        direction: newDirection,
-        currentPlayer: nextPlayer,
-        pendingDrawCount: newPending,
-        log: [...logEntry, ...state.log],
-      };
-    },
-    [],
-  );
-
-  // ─── Bot draw penalty ─────────────────────────────────────────────────────
-
-  const applyDrawPenalty = useCallback(
-    (state: UnoGameState, playerIndex: number): UnoGameState => {
-      const drawCount = state.pendingDrawCount;
-      const drawnCards: UnoCard[] = [];
-      let currentDiscard = [...state.discard];
-
-      for (let i = 0; i < drawCount; i++) {
-        const { card, newDiscard } = drawFromDeck(currentDiscard);
-        currentDiscard = newDiscard;
-
-        if (card) drawnCards.push(card);
-      }
-
-      const newHands = [...state.hands] as UnoGameState["hands"];
-      newHands[playerIndex] = [...newHands[playerIndex], ...drawnCards];
-
-      const nextPlayer = nextPlayerIndex(playerIndex, state.direction);
-      const logEntry = `${PLAYER_NAMES[playerIndex]} drew ${drawnCards.length} card(s) as penalty.`;
-
-      return {
-        ...state,
-        hands: newHands,
-        discard: currentDiscard,
-        pendingDrawCount: 0,
-        currentPlayer: nextPlayer,
-        log: [logEntry, ...state.log],
-      };
-    },
-    [drawFromDeck],
-  );
-
-  // ─── Bot turn (single bot step) ───────────────────────────────────────────
-
-  const runBotTurn = useCallback(
-    (state: UnoGameState): UnoGameState => {
-      const playerIndex = state.currentPlayer;
-      const hand = state.hands[playerIndex];
-      const topCard = state.discard[state.discard.length - 1];
-
-      // Must take penalty draw?
-      if (state.pendingDrawCount > 0) {
-        const counter = hand.find(
-          (c) =>
-            (topCard.face === "DrawTwo" && c.face === "DrawTwo") ||
-            (topCard.face === "WildDrawFour" && c.face === "WildDrawFour"),
-        );
-
-        if (counter) {
-          // Stack it
-          const chosenColor =
-            counter.color === "Wild" ? botPickColor() : undefined;
-          return applyCardPlayed(state, playerIndex, counter, chosenColor);
-        }
-
-        return applyDrawPenalty(state, playerIndex);
-      }
-
-      const chosen = botChooseCard(
-        hand,
-        topCard,
-        state.currentColor,
-        state.pendingDrawCount,
-      );
-
-      if (!chosen) {
-        // Draw one card
-        let currentDiscard = [...state.discard];
-        const { card: drawn, newDiscard } = drawFromDeck(currentDiscard);
-        currentDiscard = newDiscard;
-
-        const newHands = [...state.hands] as UnoGameState["hands"];
-
-        if (drawn) {
-          newHands[playerIndex] = [...hand, drawn];
-
-          // Can the drawn card be played?
-          if (canPlay(drawn, topCard, state.currentColor)) {
-            const chosenColor =
-              drawn.color === "Wild" ? botPickColor() : undefined;
-            const afterDraw: UnoGameState = {
-              ...state,
-              hands: newHands,
-              discard: currentDiscard,
-              log: [
-                `${PLAYER_NAMES[playerIndex]} drew a card and played it.`,
-                ...state.log,
-              ],
-            };
-            return applyCardPlayed(afterDraw, playerIndex, drawn, chosenColor);
-          }
-        }
-
-        const nextPlayer = nextPlayerIndex(playerIndex, state.direction);
-
-        return {
-          ...state,
-          hands: newHands,
-          discard: currentDiscard,
-          currentPlayer: nextPlayer,
-          log: [
-            `${PLAYER_NAMES[playerIndex]} drew a card and passed.`,
-            ...state.log,
-          ],
-        };
-      }
-
-      const chosenColor = chosen.color === "Wild" ? botPickColor() : undefined;
-      return applyCardPlayed(state, playerIndex, chosen, chosenColor);
-    },
-    [applyCardPlayed, applyDrawPenalty, drawFromDeck],
-  );
-
-  // ─── Drive bot turns automatically ───────────────────────────────────────
+  // ─── Bot turn loop (single bot step) ─────────────────────────────────────
 
   useEffect(() => {
     if (!gameState || gameState.gameOver || gameState.currentPlayer === 0) {
@@ -609,64 +353,49 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
 
         const next = runBotTurn(prev);
         botTurnActiveRef.current = false;
-
-        if (next.gameOver) {
-          settleRewardRun(next);
-        }
-
         return next;
       });
     }, 700);
 
     return () => clearTimeout(timeout);
-  }, [gameState, runBotTurn, settleRewardRun]);
+  }, [gameState]);
 
-  // ─── Player: draw a card ──────────────────────────────────────────────────
+  // ─── Player: the two doors a choice goes through ─────────────────────────
 
+  /**
+   * Draw one card (voluntarily, or take a pending penalty).
+   *
+   * Two jobs, in the order they matter: ask the engine, and only then record
+   * the choice. An engine that returns its input unchanged is a draw that
+   * cannot happen — not the player's turn, game over, nothing left to draw —
+   * and the update stops there, so the log contains exactly the draws that
+   * happened. The worker treats a no-op entry as a dead action at its index.
+   */
   const handlePlayerDraw = useCallback(() => {
-    if (!gameState || gameState.currentPlayer !== 0 || gameState.gameOver)
-      return;
-
-    const topCard = gameState.discard[gameState.discard.length - 1];
-
-    // Must take penalty
-    if (gameState.pendingDrawCount > 0) {
-      setGameState(applyDrawPenalty(gameState, 0));
+    if (!gameState || gameState.currentPlayer !== 0 || gameState.gameOver) {
       return;
     }
 
-    let currentDiscard = [...gameState.discard];
-    const { card: drawn, newDiscard } = drawFromDeck(currentDiscard);
-    currentDiscard = newDiscard;
+    const next = playerDraw(gameState);
+    if (next === gameState) {
+      return;
+    }
 
-    if (!drawn) return;
+    moveLogRef.current.push({ kind: "draw" });
+    setGameState(next);
+  }, [gameState]);
 
-    const newHands = [...gameState.hands] as UnoGameState["hands"];
-    newHands[0] = [...newHands[0], drawn];
-
-    const nextPlayer = nextPlayerIndex(0, gameState.direction);
-    setGameState({
-      ...gameState,
-      hands: newHands,
-      discard: currentDiscard,
-      currentPlayer: canPlay(drawn, topCard, gameState.currentColor)
-        ? 0
-        : nextPlayer,
-      log: [
-        canPlay(drawn, topCard, gameState.currentColor)
-          ? `You drew ${drawn.color} ${drawn.face}. You may play it.`
-          : `You drew ${drawn.color} ${drawn.face} and passed.`,
-        ...gameState.log,
-      ],
-    });
-  }, [gameState, applyDrawPenalty, drawFromDeck]);
-
-  // ─── Player: play a card ──────────────────────────────────────────────────
-
+  /** Play a card from the player's hand (a Wild pauses for its colour). */
   const handlePlayerPlay = useCallback(
     (card: UnoCard) => {
       if (!gameState || gameState.currentPlayer !== 0 || gameState.gameOver)
         return;
+
+      // The position in the *engine's* hand order — the action log records
+      // this, never the sorted display order and never a card id, so the
+      // worker can resolve the same card out of the state it rebuilds.
+      const index = gameState.hands[0].findIndex((c) => c.id === card.id);
+      if (index < 0) return;
 
       const topCard = gameState.discard[gameState.discard.length - 1];
 
@@ -686,28 +415,58 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
         return;
       }
 
-      const next = applyCardPlayed(gameState, 0, card);
-      setGameState(next);
+      const next = playerPlayCard(gameState, index);
+      if (next === gameState) return;
 
-      if (next.gameOver) settleRewardRun(next);
+      moveLogRef.current.push({ kind: "play", index });
+      setGameState(next);
     },
-    [gameState, applyCardPlayed, settleRewardRun],
+    [gameState],
   );
 
-  // ─── Player: choose wild colour ───────────────────────────────────────────
-
+  /** Commit the paused Wild play once the player has named a colour. */
   const handleWildColorChosen = useCallback(
     (color: Exclude<UnoColor, "Wild">) => {
       if (!pendingWildCard || !gameState) return;
 
       setPendingWildCard(null);
-      const next = applyCardPlayed(gameState, 0, pendingWildCard, color);
-      setGameState(next);
 
-      if (next.gameOver) settleRewardRun(next);
+      // Nothing can have changed the hand while the picker was up — it is
+      // the player's turn and the overlay covers the board — but resolve the
+      // index again rather than assuming it.
+      const index = gameState.hands[0].findIndex(
+        (c) => c.id === pendingWildCard.id,
+      );
+      if (index < 0) return;
+
+      const next = playerPlayCard(gameState, index, color);
+      if (next === gameState) return;
+
+      moveLogRef.current.push({
+        kind: "play",
+        index,
+        color: NON_WILD_COLORS.indexOf(color),
+      });
+      setGameState(next);
     },
-    [pendingWildCard, gameState, applyCardPlayed, settleRewardRun],
+    [pendingWildCard, gameState],
   );
+
+  // ─── Practice: play again ────────────────────────────────────────────────
+
+  const handlePlayAgain = useCallback(() => {
+    if (sessionMode !== "practice") return;
+
+    const seed = getRunSeed();
+    runSeedRef.current = seed;
+    runStartedAtRef.current = Date.now();
+    moveLogRef.current = [];
+    setGameState(createInitialState(seed));
+    setPendingWildCard(null);
+    setRewardSubmitted(false);
+    setRewardGranted(false);
+    botTurnActiveRef.current = false;
+  }, [getRunSeed, sessionMode]);
 
   const sortedPlayerHand = useMemo(() => {
     const hand = gameState?.hands[0] ?? [];
@@ -914,17 +673,20 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     );
   }
 
+  // Settle in the same render the game ends — the `completeRewardIfNeeded`
+  // pattern shared by the verified cabinets. The log cannot grow past this
+  // point (the engine refuses every choice once the game is over), so the
+  // proof this builds is the complete game, nothing before or after it.
+  if (gameState.gameOver) {
+    completeRewardIfNeeded();
+  }
+
   // ─── In-game screen ───────────────────────────────────────────────────────
 
   const topCard = gameState.discard[gameState.discard.length - 1];
   const playerHand = gameState.hands[0];
   const isPlayerTurn = gameState.currentPlayer === 0 && !gameState.gameOver;
-  const deckRemaining = Math.max(
-    108 -
-      gameState.hands.reduce((total, hand) => total + hand.length, 0) -
-      gameState.discard.length,
-    0,
-  );
+  const deckRemaining = gameState.deck.length;
 
   return (
     <OuterPanel className={unoPanelClassName}>
@@ -955,23 +717,15 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
               {gameState.gameOver ? (
                 <>
                   {sessionMode === "practice" && (
-                    <Button
-                      onClick={() => {
-                        const { state, deck } = createInitialState();
-                        deckRef.current = deck;
-                        setGameState(state);
-                        setPendingWildCard(null);
-                        setRewardSubmitted(false);
-                        setRewardGranted(false);
-                        botTurnActiveRef.current = false;
-                      }}
-                    >
-                      PLAY AGAIN
-                    </Button>
+                    <Button onClick={handlePlayAgain}>PLAY AGAIN</Button>
                   )}
                   <Button
                     onClick={() => {
-                      settleRewardRun(gameState);
+                      // The claim was already built and sent the moment the
+                      // game ended — see `completeRewardIfNeeded`. Exiting is
+                      // navigation now, not settlement, so winning and then
+                      // closing the cabinet through the arcade chrome claims
+                      // the same as pressing this button.
                       returnToMenu();
                     }}
                   >

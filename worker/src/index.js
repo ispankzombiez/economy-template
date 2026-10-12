@@ -118,6 +118,15 @@ import {
   runBlackjackReplay,
   validateBlackjackReplay,
 } from "./blackjackReplay.js";
+// Uno's verifier — the same twin again, for a four-player game whose proof is
+// still one player's choice list: the three bots are re-simulated from the
+// seed, so they add no log of their own. Replays whole in one request.
+import {
+  UnoReplayInputError,
+  unoReplayOutcome,
+  runUnoReplay,
+  validateUnoReplay,
+} from "./unoReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2498,11 +2507,72 @@ async function runBlackjackVerification({ env, farmId, payload, cabinet, claimSc
 }
 
 /**
+ * Verify a Uno claim — validate, replay, and record the verdict.
+ *
+ * The Uno twin of runSolitaireVerification, for the same structural reason as
+ * Solitaire: a turn-based game's proof is its choice list, which replays whole
+ * in one request even though three of the four players are bots — they are
+ * re-simulated from the same seed rather than logged (see `unoReplay.js` for
+ * the full argument). The three outcomes mirror the others: an input error
+ * (UnoReplayInputError) records matched: null as protocol noise rather than a
+ * mismatch, a throw mid-replay records matched: null because a crash is our
+ * defect and not evidence against the player, and only a completed replay
+ * records a real verdict through unoReplayOutcome — the only path that may
+ * refuse the coin.
+ *
+ * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
+ */
+async function runUnoVerification({ env, farmId, payload, cabinet, claimScore }) {
+  let validated;
+  try {
+    validated = validateUnoReplay(payload?.replay);
+  } catch (error) {
+    const reason =
+      error instanceof UnoReplayInputError
+        ? error.message
+        : "the replay could not be started";
+    await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
+    return { matched: null, reason };
+  }
+
+  try {
+    const replayed = runUnoReplay(validated);
+    const outcome = unoReplayOutcome(replayed, claimScore);
+
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      claimScore,
+      reason: outcome.reason,
+    });
+
+    return {
+      matched: outcome.matched,
+      replayScore: outcome.replayScore,
+      reason: outcome.reason,
+    };
+  } catch (error) {
+    await recordReplayVerdict(env, {
+      farmId,
+      cabinet,
+      matched: null,
+      claimScore,
+      reason: `the replay threw: ${String(error?.message ?? error).slice(0, 200)}`,
+    });
+    return { matched: null, reason: "the replay could not be completed" };
+  }
+}
+
+/**
  * Turn-based cabinets' whole-log verifiers, keyed by cabinet.
  *
  * These games replay their entire ask/move list inside the claim's own
  * request — no parking, no chunks, no continuation (see the headers of
- * `solitaireReplay.js`, `gofishReplay.js`, and `blackjackReplay.js` for why). A table rather than
+ * `solitaireReplay.js`, `gofishReplay.js`, `blackjackReplay.js` and
+ * `unoReplay.js` for why). A table rather than
  * another nested branch, so the next turn-based cabinet joins with a row:
  * the brawler's chunked verifier stays the default, and an unknown verified
  * cabinet falling through to it fails closed — its validator rejects any
@@ -2513,6 +2583,7 @@ const WHOLE_LOG_VERIFIERS = {
   solitaire: runSolitaireVerification,
   gofish: runGoFishVerification,
   blackjack: runBlackjackVerification,
+  uno: runUnoVerification,
 };
 
 /**
@@ -3067,6 +3138,7 @@ const VERIFIED_CABINETS = new Set([
   "solitaire",
   "gofish",
   "blackjack",
+  "uno",
 ]);
 
 /**

@@ -402,12 +402,13 @@ export type VerifiedRun = {
    * branches on the run-open's cabinet binding, so a brawler-shaped replay on
    * a solitaire run is a refusal, not a puzzle. The split is by *what the
    * game is* — brawler is tick-simulated, so its proof is per-tick inputs the
-   * worker re-simulates; the turn-based cabinets (Solitaire, Go Fish) are
-   * turn-based, so their proof is the list of moves the worker re-applies,
-   * which replays in microseconds and needs no chunking at all. Go Fish
-   * differs from Solitaire in one field only: it has no daily difficulty
-   * (its lobby "Daily" label is decorative), so its replay names a seed and
-   * the asks and nothing else.
+   * worker re-simulates; the turn-based cabinets (Solitaire, Go Fish, Uno)
+   * are turn-based, so their proof is the list of moves the worker re-applies,
+   * which replays in microseconds and needs no chunking at all. Go Fish and
+   * Uno differ from Solitaire in one field only: neither has a daily
+   * difficulty (their lobby "Daily" labels are decorative), so their replay
+   * names a seed and the choices and nothing else — the same two-field shape,
+   * decoded by whichever codec the cabinet binding names.
    */
   replay?:
     | {

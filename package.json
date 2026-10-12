@@ -16,6 +16,7 @@
     "anticheat:solitaire": "node scripts/solitaireReplayTest.mjs",
     "anticheat:gofish": "node scripts/goFishReplayTest.mjs",
     "anticheat:blackjack": "node scripts/blackjackReplayTest.mjs",
+    "anticheat:uno": "node scripts/unoReplayTest.mjs",
     "freerun:audit": "node scripts/auditFreeRuns.mjs",
     "freerun:add": "node scripts/addCabinetEconomyIds.mjs",
     "preview": "vite preview"
