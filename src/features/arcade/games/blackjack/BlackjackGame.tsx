@@ -150,6 +150,27 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     runSeedRef.current = null;
   }, []);
 
+  /**
+   * Deal a hand off `state` and record its bet in the replay log.
+   *
+   * The log's first entry is a *bet*, exactly like every later hand: the
+   * worker rebuilds the session from the seed and needs to know what was
+   * wagered before it can deal hand 1. Shared by session start, practice
+   * restart and the between-hands DEAL so no path can open a hand the
+   * verifier does not know about.
+   */
+  const openHand = useCallback((state: BlackjackState, bet: number): BlackjackState => {
+    currentHandLogRef.current = [];
+    const next = startHand(state, bet);
+    if (next.currentHand) {
+      const betIdx = BLACKJACK_BET_AMOUNTS.findIndex((b) => b === bet);
+      if (betIdx >= 0) {
+        moveLogRef.current.hands.push({ betIdx, actions: [] });
+      }
+    }
+    return next;
+  }, []);
+
   const startSession = useCallback(
     (mode: BlackjackMode) => {
       const seed = getRunSeed();
@@ -160,7 +181,9 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
       moveLogRef.current = { difficultyIdx: getDifficultyIdx(), hands: [] };
       runSeedRef.current = seed;
       runStartedAtRef.current = Date.now();
-      setGameState(createInitialState(seed, difficulty));
+      // Deal the opening hand immediately — the menu's bet selection *is*
+      // this hand's bet, so there is no separate bet screen before hand 1.
+      setGameState(openHand(createInitialState(seed, difficulty), selectedBet));
 
       if (mode === "reward" && !rewardRunStarted) {
         portalService.send({ type: "arcadeMinigame.started", name: "blackjack" });
@@ -168,24 +191,23 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
         setRewardRunStarted(true);
       }
     },
-    [getRunSeed, getDifficultyIdx, portalService, rewardRunStarted],
+    [
+      getRunSeed,
+      getDifficultyIdx,
+      openHand,
+      portalService,
+      rewardRunStarted,
+      selectedBet,
+      difficulty,
+    ],
   );
 
   const startNewHand = useCallback(
     (bet: number) => {
       if (!gameState) return;
-      currentHandLogRef.current = [];
-      const next = startHand(gameState, bet);
-      if (next.currentHand) {
-        // Record the bet
-        const betIdx = BLACKJACK_BET_AMOUNTS.findIndex((b) => b === bet);
-        if (betIdx >= 0) {
-          moveLogRef.current.hands.push({ betIdx, actions: [] });
-        }
-      }
-      setGameState(next);
+      setGameState(openHand(gameState, bet));
     },
-    [gameState],
+    [gameState, openHand],
   );
 
   const handleAction = useCallback(
@@ -219,11 +241,18 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     runStartedAtRef.current = Date.now();
     moveLogRef.current = { difficultyIdx: getDifficultyIdx(), hands: [] };
     currentHandLogRef.current = [];
-    setGameState(createInitialState(seed, difficulty));
+    setGameState(openHand(createInitialState(seed, difficulty), selectedBet));
     setRewardRunStarted(false);
     setRewardGranted(false);
     setConfirmExit(false);
-  }, [getRunSeed, getDifficultyIdx, difficulty, sessionMode]);
+  }, [
+    getRunSeed,
+    getDifficultyIdx,
+    openHand,
+    difficulty,
+    selectedBet,
+    sessionMode,
+  ]);
 
   const handleSessionExit = () => {
     if (sessionComplete) {
@@ -490,8 +519,10 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
 
   // ─── Render screens ────────────────────────────────────────────────────────
 
-  // Idle / menu screen
-  if (!gameState || (handStatus === "idle" && gameState.handsPlayed === 0)) {
+  // Menu — only while no session is open. A started session has a dealt hand
+  // (or, between hands, `handsPlayed > 0`), so keying this off `gameState`
+  // alone is what keeps START from landing back on this screen.
+  if (!gameState) {
     return (
       <OuterPanel className={bjPanelClassName}>
         <div className="relative flex h-full flex-col gap-6 overflow-y-auto p-6">
@@ -551,7 +582,7 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
           </div>
 
           <button
-            onClick={() => startSession("reward")}
+            onClick={rewardRun.start}
             disabled={!hasRewardRun || realChips < selectedBet}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
               hasRewardRun && realChips >= selectedBet
@@ -603,8 +634,10 @@ export const BlackjackGame: React.FC<BlackjackGameProps> = ({
     );
   }
 
-  // Between hands bet screen
-  if (handStatus === "idle" && gameState.handsPlayed > 0) {
+  // Between-hands bet screen — a session with no hand currently dealt
+  // (including hand 1's predecessor state, which never occurs now that the
+  // opening hand is dealt at session start).
+  if (!currentHand) {
     return (
       <OuterPanel className={bjPanelClassName}>
         <div className="relative flex h-full flex-col gap-6 overflow-y-auto p-6">
