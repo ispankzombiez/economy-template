@@ -2188,8 +2188,9 @@ async function intentClaimResult({ session, env, farmId }) {
  * The returned verdict is `{ matched, reason }` with `matched` tri-state:
  * `true` (replayed to the claimed outcome), `false` (completed and disagreed),
  * or `null` (could not be completed — rejected input, exhaustion, or a
- * throw). The caller records it and pays regardless; Stage C is where `false`
- * starts refusing.
+ * throw). Every path records that verdict to `replay_verdicts` itself before
+ * returning; the caller's only job is refusing the claim when it is not
+ * `true`, and it writes no row of its own.
  *
  * @param {object} args
  * @param {object} args.env      D1 and KV bindings.
@@ -2709,15 +2710,15 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
   });
 
   if (replayVerdict.matched !== true) {
+    // No verdict row is written here: the verifier above has already recorded
+    // its own — `1` for a win, `0` for a completed disagreement, `null` for
+    // rejected input or a crash — with the reason that fired first, and that
+    // row *is* the claim's verdict. (This used to record a second, coarser row
+    // for the same claim: `matched: false` even where the real verdict was
+    // `null`, so every failure counted twice in any rate read off the table.)
+    // Refusing the claim is this function's job; recording it is the
+    // verifier's.
     const reason = replayVerdict.reason ?? "replay did not match the claimed run";
-    await recordReplayVerdict(env, {
-      farmId,
-      cabinet: cabinetId,
-      matched: false,
-      replayScore: replayVerdict.replayScore ?? null,
-      claimScore: claimedScore,
-      reason,
-    });
     throw new HttpError(400, `That run could not be verified: ${reason}`);
   }
 
