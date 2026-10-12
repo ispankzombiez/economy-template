@@ -413,6 +413,14 @@ export type VerifiedRun = {
    * three-field shape at the end of this union — `difficulty` is an index into
    * the shared table, which the worker re-derives from the UTC date and
    * accepts only as today's or yesterday's.
+   *
+   * A fourth shape joins them: **Bumpkin-Man** is tick-simulated like the
+   * brawler (so its proof is per-step inputs, streamed as `verify-chunk`
+   * windows during play), but it has zero RNG — no `Math.random()`, no clock,
+   * the daily difficulty baked into the runtime at run-open — so there is no
+   * seed to carry. Its three fields are the brawler's minus the seed and
+   * champion: the difficulty by name, the step count, and one direction byte
+   * per 20ms step. See `pacman/engine.ts` and `worker/src/pacmanReplay.js`.
    */
   replay?:
     | {
@@ -510,6 +518,36 @@ export type VerifiedRun = {
          * `encodePokerLog`.
          */
         actions: string;
+      }
+    | {
+        /**
+         * Bumpkin-Man carries no seed: its engine has no RNG and no clock, so
+         * `(difficulty, inputs)` already fixes the entire run. The difficulty
+         * is the *name* (the brawler's convention) rather than Poker's index,
+         * and — like every cabinet that has a daily difficulty — it is
+         * re-derived from the UTC date by the worker and accepted only as
+         * today's or yesterday's, so "always claim easy" buys nothing.
+         */
+        difficulty: string;
+        /**
+         * Number of 20ms steps in the log — must equal `inputs` length.
+         *
+         * The step length is protocol, not tuning: the log is one direction
+         * per step, so both ends must advance simulated time by the same
+         * amount per entry or the replay would diverge from the play.
+         */
+        ticks: number;
+        /**
+         * The direction held before each step, one byte per step, base64.
+         *
+         * `0` none, `1` left, `2` right, `3` up, `4` down — see
+         * `codeFromDir` in `pacman/engine.ts`, the only encoder either end
+         * accepts. The worker feeds each byte to the same `tick` the client
+         * ran and pays only the score that falls out. Streamed like the
+         * brawler's log, window by window during play, because a run this
+         * long cannot be re-simulated inside one 10 ms request.
+         */
+        inputs: string;
       };
 };
 

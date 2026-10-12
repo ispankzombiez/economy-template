@@ -136,6 +136,19 @@ import {
   runUnoReplay,
   validateUnoReplay,
 } from "./unoReplay.js";
+// Bumpkin-Man's verifier — the brawler's sibling, not the turn-based twins':
+// it is tick-simulated, so its proof is a per-step input log the worker
+// re-runs, and a session is far too long for one 10 ms request, so it shares
+// the chunked park/continue machinery as well. What it does NOT share is a
+// seed or a champion: the engine has zero RNG, so the log plus the
+// date-derived difficulty is the whole run. See the header of pacmanReplay.js.
+import {
+  openPacmanChunkReplay,
+  pacmanOutcome,
+  startPacmanReplay,
+  stepPacmanReplay,
+  validatePacmanReplay,
+} from "./pacmanReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2203,13 +2216,18 @@ async function intentClaimResult({ session, env, farmId }) {
  * @returns {Promise<{ matched: boolean|null, reason: string|null }>}
  */
 async function runReplayVerification({ env, farmId, payload, cabinet, claimScore, runKey }) {
+  // Which engine steps this replay is decided by the cabinet the run was
+  // opened on — the same binding the claim itself is checked against — and not
+  // by anything in the payload.
+  const engine = tickEngineFor(cabinet);
+
   // Validation runs on every request, resumed or not: it is what binds the
   // parked state to *this* claim's inputs. Construction runs on the first chunk
   // only, because a resumed replay already holds the match it was stepping and
   // building another would spend the cold-start cost to immediately discard it.
   let validated;
   try {
-    validated = validateReplay(payload?.replay);
+    validated = engine.validate(payload?.replay);
   } catch (error) {
     // A malformed submission is not evidence of anything — it says the client
     // and worker disagree about the protocol, or that someone is probing. Either
@@ -2248,11 +2266,11 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
       total: parked.total,
     };
   } else {
-    state = startReplay(payload.replay);
+    state = engine.start(payload.replay);
   }
 
   try {
-    stepReplay(state, CHUNK_TICKS);
+    engine.step(state, CHUNK_TICKS);
 
     if (!isReplayComplete(state)) {
       // Out of request budget, not out of replay. Park the match exactly as it
@@ -2292,7 +2310,7 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
     // still a legitimately played run, and demanding identity on every field
     // would refuse honest players whose play simply differed from the replay's
     // tie-breaks. Same score, same win: that is the claim, and that is checked.
-    const outcome = replayOutcome(state);
+    const outcome = engine.outcome(state);
     const matched = outcome.score === claimScore && outcome.reachedFinale === true;
 
     await recordReplayVerdict(env, {
@@ -2656,6 +2674,53 @@ const WHOLE_LOG_VERIFIERS = {
 };
 
 /**
+ * Per-cabinet engines for the *streamed* replay path — the siblings of
+ * `WHOLE_LOG_VERIFIERS` above, for the other kind of proof.
+ *
+ * A turn-based cabinet replays its whole action list in microseconds and
+ * dispatches through that table. A tick-simulated cabinet's proof is a
+ * per-step input log, stepped under a shared `CHUNK_TICKS` budget and parked
+ * between requests; what differs between the tick-simulated cabinets is the
+ * engine itself — the step function, what its input bytes mean, and what its
+ * outcome fields are called. `replay.js` holds the brawler's engine, and the
+ * park/continue plumbing around this table (`resumeReplay`,
+ * `appendChunkInputs`, `isReplayComplete`, the `replay_state` rows) is shared
+ * by every cabinet in it, because none of that knows what a tick *is*.
+ *
+ * The brawler is the *default* rather than a required key, for the reason the
+ * whole-log dispatch defaults to the brawler verifier: a verified cabinet not
+ * listed here fails closed, because the brawler's validator rejects every
+ * replay shape that is not its own — no unknown cabinet can be processed by
+ * the more lenient of the two by accident.
+ */
+const TICK_ENGINES = {
+  "pac-man": {
+    validate: validatePacmanReplay,
+    start: startPacmanReplay,
+    openChunk: openPacmanChunkReplay,
+    step: stepPacmanReplay,
+    outcome: pacmanOutcome,
+  },
+};
+
+/**
+ * The engine to replay a run with, chosen by the run's **bound cabinet** —
+ * read from `active_runs` or `replay_state`, never inferred from the shape of
+ * the replay that arrived.
+ */
+function tickEngineFor(cabinet) {
+  return (
+    TICK_ENGINES[cabinet] ?? {
+      validate: validateReplay,
+      start: startReplay,
+      openChunk: openChunkReplay,
+      step: stepReplay,
+      outcome: replayOutcome,
+    }
+  );
+}
+
+/**
  * Claim a reward for a run on a verified cabinet.
  *
  * The replay IS the gate — no checkpoints, no separate verifier. The worker
@@ -2790,6 +2855,7 @@ async function intentVerifyChunk({ env, farmId, payload }) {
     throw new HttpError(400, "No streamed run is open on that cabinet.");
   }
   const { runKey, cabinet } = openedOn;
+  const engine = tickEngineFor(cabinet);
 
   let inputs;
   try {
@@ -2846,7 +2912,7 @@ async function intentVerifyChunk({ env, farmId, payload }) {
       throw new HttpError(400, "First chunk must be chunkIndex 0.");
     }
     try {
-      replay = openChunkReplay({
+      replay = engine.openChunk({
         seed: payload?.seed,
         playerId: payload?.playerId,
         difficulty: payload?.difficulty,
@@ -2862,7 +2928,7 @@ async function intentVerifyChunk({ env, farmId, payload }) {
     }
   }
 
-  stepReplay(replay, CHUNK_TICKS);
+  engine.step(replay, CHUNK_TICKS);
 
   // Park for the next window: the cursor has advanced over the ticks stepped,
   // `total` is the length of the log received so far, and the buffer is the
@@ -2957,7 +3023,11 @@ async function intentContinueVerification({ env, farmId }) {
     throw new HttpError(400, `That run's replay could not be resumed: ${reason}`);
   }
 
-  stepReplay(replay, CHUNK_TICKS);
+  // Which engine continues it comes from the park's own cabinet binding — the
+  // row was written by the claim, which was bound to the run-open's cabinet.
+  const engine = tickEngineFor(parked.cabinet);
+
+  engine.step(replay, CHUNK_TICKS);
 
   if (!isReplayComplete(replay)) {
     await writeReplayState(env, farmId, {
@@ -2994,7 +3064,7 @@ async function intentContinueVerification({ env, farmId }) {
   // still a legitimately played run, and demanding identity on every field
   // would refuse honest players whose play simply differed from the replay's
   // tie-breaks. Same score, same win: that is the claim, and that is checked.
-  const outcome = replayOutcome(replay);
+  const outcome = engine.outcome(replay);
   const matched =
     outcome.score === parked.claimScore && outcome.reachedFinale === true;
 
@@ -3209,21 +3279,24 @@ const VERIFIED_CABINETS = new Set([
   "blackjack",
   "poker",
   "uno",
+  "pac-man",
 ]);
 
 /**
  * Cabinets whose replays are *streamed* — the tick-simulated games that post
  * `verify-chunk` windows during play and park between requests (see
- * `openChunkReplay`).
+ * `openChunkReplay`). The brawler and Bumpkin-Man are the two so far; both
+ * step through `TICK_ENGINES`, which chooses the engine by this same cabinet
+ * name.
  *
  * Membership in `VERIFIED_CABINETS` is about which *claim* route a cabinet
  * takes; this set is about the *chunk* route, and a cabinet can be verified
- * without being streamed: the turn-based games (Solitaire, Go Fish) replay
- * whole in the claim's own request and never park. The chunk intent checks
- * this set so a run on a turn-based cabinet cannot open a brawler-style park
- * that nothing would ever drain.
+ * without being streamed: the turn-based games (Solitaire, Go Fish, Uno,
+ * Blackjack, Poker) replay whole in the claim's own request and never park.
+ * The chunk intent checks this set so a run on a turn-based cabinet cannot
+ * open a brawler-style park that nothing would ever drain.
  */
-const STREAMED_CABINETS = new Set(["sunflower-brawler"]);
+const STREAMED_CABINETS = new Set(["sunflower-brawler", "pac-man"]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,

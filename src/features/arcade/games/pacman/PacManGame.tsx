@@ -22,6 +22,11 @@ import { NPC_WEARABLES } from "lib/npcs";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import { useRewardRun } from "../adapters/rewardRun";
+import { useBootstrap } from "lib/portal/BootstrapContext";
+import type { VerifiedRun } from "lib/portal/api";
+import { writeNonce, getEconomyWorkerUrl } from "lib/portal/api";
+import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
+import { encodeInputLog } from "@nightshade/shared/anticheat/inputLog";
 import {
   getPacManDifficulty,
   isPacManRewardRunAvailable,
@@ -30,58 +35,23 @@ import {
   PacManDifficulty,
   PacManDifficultyName,
   PacManMode,
-  PELLET_POINTS,
-  POWER_PELLET_POINTS,
-  GHOST_EAT_BONUS,
 } from "./session";
+import {
+  FIXED_STEP_MS,
+  FRIGHTENED_FLASH_START_MS,
+  FRIGHTENED_FLASH_TOGGLE_MS,
+  MAZE_COLS,
+  MAZE_ROWS,
+  codeFromDir,
+  createRuntime,
+  tick,
+  type Dir,
+  type PacManRuntime,
+} from "./engine";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Maze definition
+// Draw-only constants (the maze itself lives in `engine.ts`)
 // ─────────────────────────────────────────────────────────────────────────────
-// Cell types:
-//  0  = empty (no pellet, no wall) — used in ghost house / corridors already eaten
-//  1  = wall
-//  2  = pellet
-//  3  = power pellet (kale)
-//  4  = ghost house (goblins start here, player cannot enter)
-//  5  = tunnel warp (left/right edges)
-// prettier-ignore
-const RAW_MAZE: number[][] = [
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-  [1,2,2,2,2,2,2,2,2,2,2,2,2,1,1,2,2,2,2,2,2,2,2,2,2,2,2,1],
-  [1,2,1,1,1,1,2,1,1,1,1,1,2,1,1,2,1,1,1,1,1,2,1,1,1,1,2,1],
-  [1,3,1,1,1,1,2,1,1,1,1,1,2,1,1,2,1,1,1,1,1,2,1,1,1,1,3,1],
-  [1,2,1,1,1,1,2,1,1,1,1,1,2,1,1,2,1,1,1,1,1,2,1,1,1,1,2,1],
-  [1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
-  [1,2,1,1,1,1,2,1,1,2,1,1,1,1,1,1,1,1,2,1,1,2,1,1,1,1,2,1],
-  [1,2,1,1,1,1,2,1,1,2,1,1,1,1,1,1,1,1,2,1,1,2,1,1,1,1,2,1],
-  [1,2,2,2,2,2,2,1,1,2,2,2,2,1,1,2,2,2,2,1,1,2,2,2,2,2,2,1],
-  [1,1,1,1,1,1,2,1,1,1,1,1,0,1,1,0,1,1,1,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,1,1,1,0,1,1,0,1,1,1,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,0,0,0,0,0,0,0,0,0,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,1,1,1,4,4,1,1,1,0,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,1,4,4,4,4,4,4,1,0,1,1,2,1,1,1,1,1,1],
-  [5,0,0,0,0,0,2,0,0,0,1,4,4,4,4,4,4,1,0,0,0,2,0,0,0,0,0,5],
-  [1,1,1,1,1,1,2,1,1,0,1,1,1,1,1,1,1,1,0,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,0,0,0,0,0,0,0,0,0,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,1,1,1,1,1,1,1,1,0,1,1,2,1,1,1,1,1,1],
-  [1,1,1,1,1,1,2,1,1,0,1,1,1,1,1,1,1,1,0,1,1,2,1,1,1,1,1,1],
-  [1,2,2,2,2,2,2,2,2,2,2,2,2,1,1,2,2,2,2,2,2,2,2,2,2,2,2,1],
-  [1,2,1,1,1,1,2,1,1,1,1,1,2,1,1,2,1,1,1,1,1,2,1,1,1,1,2,1],
-  [1,2,1,1,1,1,2,1,1,1,1,1,2,1,1,2,1,1,1,1,1,2,1,1,1,1,2,1],
-  [1,3,2,2,1,1,2,2,2,2,2,2,2,0,0,2,2,2,2,2,2,2,1,1,2,2,3,1],
-  [1,1,1,2,1,1,2,1,1,2,1,1,1,1,1,1,1,1,2,1,1,2,1,1,2,1,1,1],
-  [1,1,1,2,1,1,2,1,1,2,1,1,1,1,1,1,1,1,2,1,1,2,1,1,2,1,1,1],
-  [1,2,2,2,2,2,2,1,1,2,2,2,2,1,1,2,2,2,2,1,1,2,2,2,2,2,2,1],
-  [1,2,1,1,1,1,1,1,1,1,1,1,2,1,1,2,1,1,1,1,1,1,1,1,1,1,2,1],
-  [1,2,1,1,1,1,1,1,1,1,1,1,2,1,1,2,1,1,1,1,1,1,1,1,1,1,2,1],
-  [1,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,1],
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
-];
-
-const MAZE_COLS = 28;
-const MAZE_ROWS = RAW_MAZE.length; // 31
 const CELL = 20; // px per tile
 const ARENA_W = MAZE_COLS * CELL; // 560
 const ARENA_H = MAZE_ROWS * CELL; // 620
@@ -98,14 +68,6 @@ const ARENA_H = MAZE_ROWS * CELL; // 620
  */
 const MIN_STAGE_SCALE = 0.51;
 
-// Count original pellets / power pellets
-const INITIAL_PELLETS = RAW_MAZE.flat().filter((c) => c === 2).length;
-const INITIAL_POWER_PELLETS = RAW_MAZE.flat().filter((c) => c === 3).length;
-
-// Player spawn (row 22, just below the ghost house)
-const PLAYER_SPAWN_COL = 13;
-const PLAYER_SPAWN_ROW = 22;
-
 /**
  * How big the bumpkin is *drawn*, in pixels of visible character height.
  *
@@ -118,111 +80,6 @@ const PLAYER_SPAWN_ROW = 22;
  */
 const PLAYER_RENDER_HEIGHT = 30;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-type Dir = "left" | "right" | "up" | "down" | "none";
-
-interface Vec2 {
-  x: number;
-  y: number;
-}
-
-interface Ghost {
-  id: 0 | 1 | 2 | 3;
-  /** sub-cell floating position (centre of ghost in tile coords) */
-  col: number;
-  row: number;
-  dir: Dir;
-  released: boolean;
-  /** "chase" | "scatter" | "frightened" | "eaten" */
-  mode: "chase" | "scatter" | "frightened" | "eaten";
-  frightenedMs: number;
-  /** score multiplier index (0-3) during one power-up window */
-  eatIndex: number;
-  scatterTarget: Vec2;
-}
-
-interface PacManRuntime {
-  maze: number[][]; // mutable copy (pellets removed)
-  playerCol: number;
-  playerRow: number;
-  playerDir: Dir;
-  playerNextDir: Dir;
-  score: number;
-  lives: number;
-  round: number; // how many times grid has been cleared
-  pelletsLeft: number;
-  powerPelletsLeft: number;
-  ghosts: Ghost[];
-  gameOver: boolean;
-  won: boolean;
-  deathPauseMs: number;
-  powerPauseMs: number; // brief pause when eating ghost
-  globalMode: "scatter" | "chase";
-  modePhaseIndex: number;
-  modePhaseElapsedMs: number;
-  ghostReleaseMs: [number, number, number, number];
-  reason?: string;
-}
-
-// Ghost scatter corner targets (tile coords)
-const SCATTER_TARGETS: Vec2[] = [
-  { x: MAZE_COLS - 3, y: 0 }, // Blinky – top-right
-  { x: 2, y: 0 }, // Pinky  – top-left
-  { x: MAZE_COLS - 1, y: MAZE_ROWS - 1 }, // Inky – bottom-right
-  { x: 0, y: MAZE_ROWS - 1 }, // Clyde – bottom-left
-];
-
-/**
- * The corridor tile above the ghost-house door, on the way out.
- *
- * **Must be a whole tile.** The step loop only re-decides a ghost's direction at
- * a tile centre, gated on `|col - round(col)| < 0.15`, so a half-tile column can
- * never satisfy it: a ghost sitting on one is frozen in whatever direction it
- * last had, which is how the doorway used to fill with ghosts pacing back and
- * forth. The door is row 12 cols 13/14 and the corridor above is row 11, so
- * (13, 11) is a real tile and the shortest step out.
- */
-const GHOST_HOUSE_EXIT: Vec2 = { x: 13, y: 11 };
-
-/**
- * Where an eaten ghost is actually headed: a tile *inside* the house.
- *
- * This has to be inside, not the exit. `GHOST_HOUSE_EXIT` sits on row 11, above
- * the house, while respawning requires reaching rows 12-15 - so an eaten ghost
- * sent there converged on the doorway without ever stepping into the house to
- * trigger the respawn. Aiming at a house cell sends it through the door and the
- * respawn fires on the first tile centre it reaches.
- */
-const GHOST_HOUSE_HOME: Vec2 = { x: 13, y: 13 };
-
-const isInGhostHouseArea = (col: number, row: number) => {
-  return row >= 12 && row <= 15 && col >= 10 && col <= 17;
-};
-
-const GLOBAL_MODE_PHASES: Array<{
-  mode: "scatter" | "chase";
-  durationMs: number;
-}> = [
-  { mode: "scatter", durationMs: 7000 },
-  { mode: "chase", durationMs: 20000 },
-  { mode: "scatter", durationMs: 7000 },
-  { mode: "chase", durationMs: 20000 },
-  { mode: "scatter", durationMs: 5000 },
-  { mode: "chase", durationMs: 20000 },
-  { mode: "scatter", durationMs: 5000 },
-  { mode: "chase", durationMs: Number.POSITIVE_INFINITY },
-];
-
-const GHOST_RELEASE_DELAY_MS: [number, number, number, number] = [
-  0, 500, 4000, 8000,
-];
-const TUNNEL_ROW = 14;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
 const INTERCEPTED = new Set([
   "ArrowLeft",
   "ArrowRight",
@@ -242,365 +99,6 @@ const keyToDir = (code: string): Dir | null => {
   return null;
 };
 
-const dirVec = (d: Dir): Vec2 => {
-  switch (d) {
-    case "left":
-      return { x: -1, y: 0 };
-    case "right":
-      return { x: 1, y: 0 };
-    case "up":
-      return { x: 0, y: -1 };
-    case "down":
-      return { x: 0, y: 1 };
-    default:
-      return { x: 0, y: 0 };
-  }
-};
-
-const isWall = (maze: number[][], col: number, row: number): boolean => {
-  const r = Math.round(row);
-  const c = ((Math.round(col) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-  if (r < 0 || r >= MAZE_ROWS) return true;
-  return maze[r][c] === 1;
-};
-
-const isGhostHouse = (maze: number[][], col: number, row: number): boolean => {
-  const r = Math.round(row);
-  const c = ((Math.round(col) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-  if (r < 0 || r >= MAZE_ROWS) return false;
-  return maze[r][c] === 4;
-};
-
-/**
- * Who is trying to move, which decides whether the ghost house is passable.
- *
- *  - `player` — never enters the house.
- *  - `ghost` — a live ghost. May be *inside* the house while leaving it, but
- *    must not walk back in from outside.
- *  - `returning-ghost` — an eaten ghost on its way home, the only one allowed
- *    back in.
- */
-type MoverKind = "player" | "ghost" | "returning-ghost";
-
-const canMove = (
-  maze: number[][],
-  col: number,
-  row: number,
-  dir: Dir,
-  kind: MoverKind = "player",
-): boolean => {
-  const v = dirVec(dir);
-  const nc = (((col + v.x) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-  const nr = row + v.y;
-  if (isWall(maze, nc, nr)) return false;
-
-  if (kind === "returning-ghost") return true;
-  if (!isGhostHouse(maze, nc, nr)) return true;
-
-  // Reaching here means the next tile is inside the house.
-  //
-  // A live ghost is allowed in only while it is already inside, on its way out.
-  // Letting it re-enter from outside is what made released ghosts pace the
-  // doorway: out in the corridor its target became the player below, so "down"
-  // into the house looked like the shortest route; the moment it was back inside
-  // the target flipped to the house exit, so it walked out again and looped
-  // forever. Blocking the return removes the cycle at the source.
-  return kind === "ghost" && isInGhostHouseArea(col, row);
-};
-
-const dist = (a: Vec2, b: Vec2): number => Math.hypot(a.x - b.x, a.y - b.y);
-
-const canUseTunnelWrap = (row: number) => {
-  return Math.abs(row - TUNNEL_ROW) < 0.7;
-};
-
-const spawnMaze = (): number[][] => RAW_MAZE.map((row) => [...row]);
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Ghost AI helpers
-// ─────────────────────────────────────────────────────────────────────────────
-const OPPOSITE: Record<Dir, Dir> = {
-  left: "right",
-  right: "left",
-  up: "down",
-  down: "up",
-  none: "none",
-};
-const ALL_DIRS: Dir[] = ["left", "right", "up", "down"];
-const DIRECTION_PRIORITY: Dir[] = ["up", "left", "down", "right"];
-const FRIGHTENED_FLASH_START_MS = 2000;
-const FRIGHTENED_FLASH_TOGGLE_MS = 180;
-
-const getFrightenedChoiceIndex = (ghost: Ghost, candidateCount: number) => {
-  if (candidateCount <= 1) return 0;
-
-  // Deterministic pseudo-random selector for stable, arcade-like frightened turns.
-  const tick = Math.floor(ghost.frightenedMs / 120);
-  const seed = ((ghost.id + 1) * 1103515245 + tick * 12345) >>> 0;
-  return seed % candidateCount;
-};
-
-/**
- * The first step of a shortest walkable path from `from` to `to`, or `null`
- * when there is no path.
- *
- * ## Why this exists
- *
- * `chooseGhostDir` below minimises straight-line distance to the target, which
- * is the classic hunting rule and is exactly right for a goblin chasing the
- * player. But it has no notion of *reachability*, so it walks into a trap when
- * the target sits behind a wall. That is not hypothetical here — it is the
- * reported "goblins get stuck and never come back to spawn":
- *
- *   - an eaten goblin is released inside the house with its target flipped to
- *     the doorway above it (`GHOST_HOUSE_EXIT`);
- *   - the house is walled *internally* (row 12 has walls at columns 10-12 and
- *     15-17, and columns 10 and 17 are walls on rows 13-14), so the direct
- *     route up is blocked;
- *   - each individual step still shortens the straight-line distance, so the
- *     greedy rule walks a closed four-tile cycle before it finds its way out:
- *
- *       (12,13) -> (11,13) -> (11,14) -> (12,14) -> (12,13) -> (13,13) -> ...
- *
- *     which reads as a goblin visibly pacing inside the house on its way out.
- *
- * Measured over every walkable tile of this maze with the maze parsed straight
- * out of the source: the greedy rule revisits a tile on **310 of 310** journeys
- * out of the house, and this one on none. Worst-case walk home drops from 55
- * steps to 38.
- *
- * A breadth-first walk cannot cycle like that: it expands the whole reachable
- * frontier and then commits to the shortest route, so a walled-off target is
- * gone around rather than oscillated at.
- */
-const nextStepTowards = (
-  maze: number[][],
-  from: Vec2,
-  to: Vec2,
-  kind: MoverKind,
-): Dir | null => {
-  const startCol = Math.round(from.x);
-  const startRow = Math.round(from.y);
-  const goalCol = Math.round(to.x);
-  const goalRow = Math.round(to.y);
-  if (startCol === goalCol && startRow === goalRow) return null;
-
-  const keyOf = (col: number, row: number) => `${col},${row}`;
-  const startKey = keyOf(startCol, startRow);
-  const seen = new Set<string>([startKey]);
-  const cameFrom = new Map<string, string>();
-  const cameBy = new Map<string, Dir>();
-  const queue: Vec2[] = [{ x: startCol, y: startRow }];
-
-  while (queue.length) {
-    const node = queue.shift()!;
-
-    for (const dir of ALL_DIRS) {
-      const v = dirVec(dir);
-      const nc = (((node.x + v.x) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-      const nr = node.y + v.y;
-      const key = keyOf(nc, nr);
-
-      if (seen.has(key)) continue;
-      if (!canMove(maze, node.x, node.y, dir, kind)) continue;
-
-      seen.add(key);
-      cameFrom.set(key, keyOf(node.x, node.y));
-      cameBy.set(key, dir);
-
-      if (nc === goalCol && nr === goalRow) {
-        // Walk the chain back to the start. The last direction read is the one
-        // that leaves the start tile, which is the step we want.
-        let cursor = key;
-        let firstStep: Dir | null = null;
-        while (cursor !== startKey) {
-          firstStep = cameBy.get(cursor) ?? null;
-          cursor = cameFrom.get(cursor)!;
-        }
-        return firstStep;
-      }
-
-      queue.push({ x: nc, y: nr });
-    }
-  }
-
-  return null;
-};
-
-/**
- * Is this target a place the goblin has to *navigate* to, rather than hunt?
- *
- * The house and the corridor above it. A goblin heading there wants the shortest
- * legal walk, not the most direct line — the difference is the loop above. A
- * goblin chasing the player keeps the classic greedy rule, which is the arcade
- * behaviour and the thing a player reads as a goblin's personality.
- */
-const isNavigationTarget = (target: Vec2) =>
-  target.y >= GHOST_HOUSE_EXIT.y - 1 &&
-  target.y <= 15 &&
-  target.x >= 9 &&
-  target.x <= 18;
-
-const chooseGhostDir = (ghost: Ghost, maze: number[][], target: Vec2): Dir => {
-  // An eaten ghost is the only one that may re-enter the house on the way home.
-  const kind: MoverKind = ghost.mode === "eaten" ? "returning-ghost" : "ghost";
-
-  if (ghost.mode !== "frightened") {
-    if (ghost.mode === "eaten" || isNavigationTarget(target)) {
-      const step = nextStepTowards(
-        maze,
-        { x: ghost.col, y: ghost.row },
-        target,
-        kind,
-      );
-      // Falls through to the greedy rule when there is genuinely no path, so an
-      // unreachable target degrades to the old behaviour rather than freezing.
-      if (step) return step;
-    }
-  }
-
-  let candidates = ALL_DIRS.filter(
-    (d) =>
-      d !== OPPOSITE[ghost.dir] && canMove(maze, ghost.col, ghost.row, d, kind),
-  );
-
-  // If reverse is the only valid path, allow it to prevent hallway oscillation/stalls.
-  if (candidates.length === 0) {
-    candidates = ALL_DIRS.filter((d) =>
-      canMove(maze, ghost.col, ghost.row, d, kind),
-    );
-  }
-
-  if (ghost.mode === "frightened") {
-    // Classic frightened mode uses pseudo-random turns rather than targeted chase.
-    const idx = getFrightenedChoiceIndex(ghost, candidates.length || 1);
-    return candidates[idx] ?? ghost.dir;
-  }
-
-  // Pick direction that minimises distance to target.
-  // On ties, classic Pac-Man priority is Up, Left, Down, Right.
-  let bestDir: Dir = candidates[0] ?? ghost.dir;
-  let bestDist = Infinity;
-  for (const d of DIRECTION_PRIORITY) {
-    if (!candidates.includes(d)) continue;
-
-    const v = dirVec(d);
-    const nc = (((ghost.col + v.x) % MAZE_COLS) + MAZE_COLS) % MAZE_COLS;
-    const nr = ghost.row + v.y;
-    const d2 = dist({ x: nc, y: nr }, target);
-
-    if (d2 < bestDist) {
-      bestDist = d2;
-      bestDir = d;
-    }
-  }
-
-  return bestDir;
-};
-
-const ghostTarget = (
-  ghost: Ghost,
-  playerCol: number,
-  playerRow: number,
-  playerDir: Dir,
-  ghosts: Ghost[],
-): Vec2 => {
-  if (ghost.mode === "scatter") {
-    return ghost.scatterTarget;
-  }
-  if (ghost.mode === "frightened") {
-    return { x: playerCol, y: playerRow };
-  }
-  if (ghost.mode === "eaten") {
-    // Into the house, not to the doorway - see GHOST_HOUSE_HOME.
-    return GHOST_HOUSE_HOME;
-  }
-
-  // Chase targets (classic)
-  switch (ghost.id) {
-    case 0: // Blinky – direct chase
-      return { x: playerCol, y: playerRow };
-    case 1: {
-      // Pinky – 4 tiles ahead of player
-      const v = dirVec(playerDir);
-      // Classic Pac-Man Pinky bug: when facing up, offset 4 up AND 4 left
-      const ahead =
-        playerDir === "up"
-          ? { x: playerCol - 4, y: playerRow - 4 }
-          : { x: playerCol + v.x * 4, y: playerRow + v.y * 4 };
-      return ahead;
-    }
-    case 2: {
-      // Inky – uses Blinky's position
-      const blinky = ghosts[0];
-      const v = dirVec(playerDir);
-      const pivot = { x: playerCol + v.x * 2, y: playerRow + v.y * 2 };
-      return {
-        x: pivot.x + (pivot.x - blinky.col),
-        y: pivot.y + (pivot.y - blinky.row),
-      };
-    }
-    case 3: {
-      // Clyde – chase if far, scatter if within 8 tiles
-      const d = dist(
-        { x: ghost.col, y: ghost.row },
-        { x: playerCol, y: playerRow },
-      );
-      return d > 8 ? { x: playerCol, y: playerRow } : ghost.scatterTarget;
-    }
-    default:
-      return { x: playerCol, y: playerRow };
-  }
-};
-
-const createGhosts = (): Ghost[] =>
-  ([0, 1, 2, 3] as const).map((id) => ({
-    id,
-    // Blinky starts out on the corridor above the door; the rest start inside
-    // the house on distinct whole tiles, so every one of them can pass the
-    // step loop's tile-centre test. A half-tile start (13.5) never could.
-    col: id === 0 ? GHOST_HOUSE_EXIT.x : 12 + id,
-    row: id === 0 ? GHOST_HOUSE_EXIT.y : 13,
-    dir: "left" as Dir,
-    released: id === 0,
-    mode: "scatter" as const,
-    frightenedMs: 0,
-    eatIndex: 0,
-    scatterTarget: SCATTER_TARGETS[id],
-  }));
-
-const createRuntime = (): PacManRuntime => ({
-  maze: spawnMaze(),
-  playerCol: PLAYER_SPAWN_COL,
-  playerRow: PLAYER_SPAWN_ROW,
-  playerDir: "none",
-  playerNextDir: "none",
-  score: 0,
-  lives: 3,
-  round: 0,
-  pelletsLeft: INITIAL_PELLETS,
-  powerPelletsLeft: INITIAL_POWER_PELLETS,
-  ghosts: createGhosts(),
-  gameOver: false,
-  won: false,
-  deathPauseMs: 0,
-  powerPauseMs: 0,
-  globalMode: "scatter",
-  modePhaseIndex: 0,
-  modePhaseElapsedMs: 0,
-  ghostReleaseMs: [...GHOST_RELEASE_DELAY_MS],
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Speeds (tiles per second)
-// ─────────────────────────────────────────────────────────────────────────────
-const PLAYER_SPEED = 6.5; // tiles/s
-const GHOST_BASE_SPEED = 5.5;
-const GHOST_FRIGHTENED_SPEED = 3.0;
-const GHOST_EATEN_SPEED = 12.0;
-const DEATH_PAUSE_MS = 2000;
-const POWER_PAUSE_MS = 200;
-
 // ─────────────────────────────────────────────────────────────────────────────
 // xstate selector
 // ─────────────────────────────────────────────────────────────────────────────
@@ -613,6 +111,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState });
+  const bootstrap = useBootstrap();
 
   const hasRewardRun = useMemo(
     () => isPacManRewardRunAvailable({ game: portalGameState, isVip }),
@@ -632,23 +131,60 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     useState<PacManDifficultyName>(todaysDifficulty.name);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
 
-  const returnToMenu = useCallback(() => {
-    setShowExitConfirm(false);
-    setMode(null);
-    setRuntime(null);
-    nextDirRef.current = "none";
-  }, []);
+  /** Centering box for the portrait, whose own width is measured at runtime. */
+  const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
   const playerParts =
     portalGameState.bumpkin?.equipped ?? NPC_WEARABLES["pumpkin' pete"];
-
-  /** Centering box for the portrait, whose own width is measured at runtime. */
-  const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
   const nextDirRef = useRef<Dir>("none");
   const rewardGrantedRef = useRef(false);
   const frameRef = useRef<number | null>(null);
   const lastFrameAtRef = useRef<number | null>(null);
+
+  // ── The run, its proof log, and the streamed verification ────────────────
+  //
+  // The simulation state lives in `gameRef`, not in React state: a step is
+  // read from the settled previous step and produces the next one, possibly
+  // several times per frame, and the input log must be written exactly once
+  // per step — both are side effects, and running them inside a `setState`
+  // updater would double-write them under StrictMode's double-invoke. React
+  // state carries a per-frame *snapshot* for rendering only, exactly as the
+  // brawler's `matchRef` does (see `SunflowerBrawlerGame.tsx`, whose chunk
+  // plumbing below is mirrored one-for-one).
+  const gameRef = useRef<PacManRuntime | null>(null);
+
+  /** One byte per 20ms step: the direction held *before* that step ran. */
+  const inputLogRef = useRef<number[]>([]);
+
+  /** Real time not yet spent on whole `FIXED_STEP_MS` steps. */
+  const accumulatorRef = useRef(0);
+
+  /** When the current run opened — the claim's `elapsedMs`. */
+  const runStartedAtRef = useRef<number>(0);
+
+  /** The run's difficulty, readable from inside the loop effect. */
+  const activeDifficultyRef = useRef<PacManDifficulty>(todaysDifficulty);
+
+  /** The claim, frozen the instant the run settles — see `freezeClaim`. */
+  const frozenClaimRef = useRef<VerifiedRun | null>(null);
+
+  const chunkIndexRef = useRef(0);
+  const chunkBusyRef = useRef(false);
+  const chunkBrokenRef = useRef(false);
+  const chunkQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chunkDrainedRef = useRef<Promise<void> | null>(null);
+
+  const returnToMenu = useCallback(() => {
+    setShowExitConfirm(false);
+    setMode(null);
+    setRuntime(null);
+    nextDirRef.current = "none";
+    gameRef.current = null;
+    inputLogRef.current = [];
+    frozenClaimRef.current = null;
+    chunkDrainedRef.current = null;
+  }, []);
 
   // ── Start session ───────────────────────────────────────────────────────────
   const startSession = useCallback(
@@ -661,12 +197,33 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         todaysDifficulty;
       const runDiff = nextMode === "reward" ? todaysDifficulty : practiceDiff;
 
+      // One runtime instance, shared by the loop (through `gameRef`) and the
+      // first render (through its snapshot): two `createRuntime` calls would be
+      // two games, and the claim would describe the one nobody played.
+      const fresh = createRuntime(runDiff);
+      gameRef.current = fresh;
+      setRuntime({ ...fresh });
+
       setMode(nextMode);
       setActiveDifficulty(runDiff);
       setShowPracticePrompt(false);
       rewardGrantedRef.current = false;
-      setRuntime(createRuntime());
       nextDirRef.current = "none";
+
+      // Fresh run, fresh proof: the log, the claim and the stream all belong
+      // to exactly one run, and a "Play Again" that inherited the previous
+      // run's cursor would post its first window at an index the worker's
+      // brand-new park has never heard of.
+      activeDifficultyRef.current = runDiff;
+      inputLogRef.current = [];
+      frozenClaimRef.current = null;
+      accumulatorRef.current = 0;
+      runStartedAtRef.current = Date.now();
+      chunkIndexRef.current = 0;
+      chunkBusyRef.current = false;
+      chunkBrokenRef.current = false;
+      chunkQueueRef.current = Promise.resolve();
+      chunkDrainedRef.current = null;
 
       if (nextMode === "reward") {
         portalService.send({
@@ -706,421 +263,197 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [mode]);
 
-  // ── Game tick ───────────────────────────────────────────────────────────────
-  const tick = useCallback(
-    (prev: PacManRuntime, dtMs: number): PacManRuntime => {
-      if (prev.gameOver) return prev;
-
-      // ── Death pause ─────────────────────────────────────────────────────────
-      if (prev.deathPauseMs > 0) {
-        const remaining = prev.deathPauseMs - dtMs;
-        if (remaining > 0) return { ...prev, deathPauseMs: remaining };
-
-        // Respawn
-        return {
-          ...prev,
-          deathPauseMs: 0,
-          playerCol: PLAYER_SPAWN_COL,
-          playerRow: PLAYER_SPAWN_ROW,
-          playerDir: "none",
-          playerNextDir: "none",
-          ghosts: createGhosts(),
-        };
-      }
-
-      // ── Ghost-eat pause ─────────────────────────────────────────────────────
-      if (prev.powerPauseMs > 0) {
-        return { ...prev, powerPauseMs: Math.max(0, prev.powerPauseMs - dtMs) };
-      }
-
-      const dt = dtMs / 1000;
-      const maze = prev.maze.map((r) => [...r]);
-
-      // ── Global ghost mode timing (scatter/chase) ─────────────────────────
-      let globalMode = prev.globalMode;
-      let modePhaseIndex = prev.modePhaseIndex;
-      let modePhaseElapsedMs = prev.modePhaseElapsedMs;
-      let modeSwitched = false;
-
-      const hasFrightenedGhost = prev.ghosts.some(
-        (g) => g.mode === "frightened",
-      );
-      if (!hasFrightenedGhost) {
-        modePhaseElapsedMs += dtMs;
-
-        while (modePhaseIndex < GLOBAL_MODE_PHASES.length) {
-          const phase = GLOBAL_MODE_PHASES[modePhaseIndex];
-          if (
-            !Number.isFinite(phase.durationMs) ||
-            modePhaseElapsedMs < phase.durationMs
-          ) {
-            break;
-          }
-
-          modePhaseElapsedMs -= phase.durationMs;
-          modePhaseIndex = Math.min(
-            modePhaseIndex + 1,
-            GLOBAL_MODE_PHASES.length - 1,
-          );
-          const nextMode = GLOBAL_MODE_PHASES[modePhaseIndex].mode;
-
-          if (nextMode !== globalMode) {
-            globalMode = nextMode;
-            modeSwitched = true;
-          }
-        }
-      }
-
-      const ghostReleaseMs = [...prev.ghostReleaseMs] as [
-        number,
-        number,
-        number,
-        number,
-      ];
-      for (let i = 1; i <= 3; i++) {
-        ghostReleaseMs[i] = Math.max(0, ghostReleaseMs[i] - dtMs);
-      }
-
-      // ── Player movement ─────────────────────────────────────────────────────
-      let { playerCol, playerRow, playerDir } = prev;
-      const requestedDir = nextDirRef.current;
-
-      // Try to turn if player is close enough to tile centre
-      const colSnap = Math.abs(playerCol - Math.round(playerCol)) < 0.2;
-      const rowSnap = Math.abs(playerRow - Math.round(playerRow)) < 0.2;
-
-      if (requestedDir !== "none") {
-        const anchorCol = Math.round(playerCol);
-        const anchorRow = Math.round(playerRow);
-
-        if (canMove(maze, anchorCol, anchorRow, requestedDir)) {
-          if (playerDir === "none") {
-            // Snap to tile centre so first key press always starts movement.
-            playerCol = anchorCol;
-            playerRow = anchorRow;
-          }
-
-          if ((colSnap && rowSnap) || playerDir === "none") {
-            playerDir = requestedDir;
-          }
-        }
-      }
-
-      if (playerDir !== "none" && colSnap && rowSnap) {
-        if (
-          !canMove(
-            maze,
-            Math.round(playerCol),
-            Math.round(playerRow),
-            playerDir,
-          )
-        ) {
-          playerDir = "none";
-        }
-      }
-
-      const pv = dirVec(playerDir);
-      let nextPlayerCol = playerCol + pv.x * PLAYER_SPEED * dt;
-      let nextPlayerRow = playerRow + pv.y * PLAYER_SPEED * dt;
-
-      if (pv.x !== 0 && canUseTunnelWrap(playerRow)) {
-        if (nextPlayerCol < -0.5) nextPlayerCol = MAZE_COLS - 0.5;
-        if (nextPlayerCol > MAZE_COLS - 0.5) nextPlayerCol = -0.5;
-      } else {
-        nextPlayerCol = Math.max(0, Math.min(MAZE_COLS - 1, nextPlayerCol));
-      }
-
-      nextPlayerRow = Math.max(0, Math.min(MAZE_ROWS - 1, nextPlayerRow));
-
-      if (
-        !isWall(maze, nextPlayerCol, nextPlayerRow) &&
-        !isGhostHouse(maze, nextPlayerCol, nextPlayerRow)
-      ) {
-        playerCol = nextPlayerCol;
-        playerRow = nextPlayerRow;
-      } else {
-        playerCol = Math.round(playerCol);
-        playerRow = Math.round(playerRow);
-        if (playerDir !== "none") {
-          playerDir = "none";
-        }
-      }
-
-      // ── Collect pellets ─────────────────────────────────────────────────────
-      let { score, pelletsLeft, powerPelletsLeft } = prev;
-      let frightenGhosts = false;
-
-      const pr = Math.round(playerRow);
-      const pc = Math.round(playerCol);
-      const cell = maze[pr]?.[pc];
-
-      if (cell === 2) {
-        maze[pr][pc] = 0;
-        score += PELLET_POINTS;
-        pelletsLeft -= 1;
-      } else if (cell === 3) {
-        maze[pr][pc] = 0;
-        score += POWER_PELLET_POINTS;
-        powerPelletsLeft -= 1;
-        frightenGhosts = true;
-      }
-
-      // ── Maze cleared → reset maze, increment round ──────────────────────────
-      let { round } = prev;
-      if (pelletsLeft === 0 && powerPelletsLeft === 0) {
-        const newMaze = spawnMaze();
-        round += 1;
-        return {
-          ...prev,
-          maze: newMaze,
-          playerCol: PLAYER_SPAWN_COL,
-          playerRow: PLAYER_SPAWN_ROW,
-          playerDir: "none",
-          playerNextDir: "none",
-          score,
-          pelletsLeft: INITIAL_PELLETS,
-          powerPelletsLeft: INITIAL_POWER_PELLETS,
-          round,
-          ghosts: createGhosts(),
-          globalMode: "scatter",
-          modePhaseIndex: 0,
-          modePhaseElapsedMs: 0,
-          ghostReleaseMs: [...GHOST_RELEASE_DELAY_MS],
-          gameOver: score >= activeDifficulty.targetScore,
-          won: score >= activeDifficulty.targetScore,
-          reason:
-            score >= activeDifficulty.targetScore
-              ? "Target score reached!"
-              : undefined,
-        };
-      }
-
-      // ── Ghost update ────────────────────────────────────────────────────────
-      let ghosts = prev.ghosts.map((g): Ghost => {
-        let { frightenedMs } = g;
-        let { released } = g;
-        let mode = g.mode;
-
-        if (!released && g.id !== 0) {
-          if (ghostReleaseMs[g.id] <= 0) {
-            // Unlock the ghost where it stands; do not move it.
-            //
-            // This used to teleport the ghost to `GHOST_HOUSE_EXIT`, which is
-            // also the target a ghost inside the house is given - so it started
-            // life standing on its own goal. "Minimise distance to target" is
-            // then degenerate, because every direction is equally far and the
-            // turn falls to the static priority order, which points it sideways
-            // out of the doorway. Releasing in place keeps the exit genuinely
-            // ahead, so the ghost walks out under its own steam.
-            released = true;
-            return { ...g, released, mode: globalMode };
-          }
-
-          return {
-            ...g,
-            released,
-            mode: globalMode,
-          };
-        }
-
-        if (frightenGhosts && g.mode !== "eaten") {
-          mode = "frightened";
-          g = {
-            ...g,
-            mode,
-            dir: OPPOSITE[g.dir],
-            frightenedMs: activeDifficulty.frightenedDurationMs,
-            eatIndex: 0,
-          };
-          frightenedMs = g.frightenedMs;
-        }
-
-        if (mode === "frightened") {
-          frightenedMs = Math.max(0, frightenedMs - dtMs);
-          if (frightenedMs === 0) {
-            mode = globalMode;
-          }
-        }
-
-        if (modeSwitched && mode !== "eaten" && mode !== "frightened") {
-          g = { ...g, dir: OPPOSITE[g.dir], mode: globalMode };
-          mode = globalMode;
-        }
-
-        const speed =
-          mode === "eaten"
-            ? GHOST_EATEN_SPEED
-            : mode === "frightened"
-              ? GHOST_FRIGHTENED_SPEED
-              : GHOST_BASE_SPEED * activeDifficulty.ghostSpeedMultiplier;
-
-        // Decide direction at tile centres
-        const gcSnap = Math.abs(g.col - Math.round(g.col)) < 0.15;
-        const grSnap = Math.abs(g.row - Math.round(g.row)) < 0.15;
-
-        let { dir } = g;
-        if (gcSnap && grSnap) {
-          // Re-enter ghost house when eaten
-          if (
-            mode === "eaten" &&
-            g.row >= 12 &&
-            g.row <= 15 &&
-            g.col >= 10 &&
-            g.col <= 17
-          ) {
-            return {
-              ...g,
-              released: true,
-              mode: globalMode,
-              dir,
-              col: g.col,
-              row: g.row,
-            };
-          }
-
-          const target =
-            released && mode !== "eaten" && isInGhostHouseArea(g.col, g.row)
-              ? GHOST_HOUSE_EXIT
-              : ghostTarget(
-                  { ...g, mode, dir },
-                  playerCol,
-                  playerRow,
-                  playerDir,
-                  prev.ghosts,
-                );
-
-          dir = chooseGhostDir({ ...g, mode, dir }, maze, target);
-        }
-
-        const gv = dirVec(dir);
-        let newCol = g.col + gv.x * speed * dt;
-        let newRow = g.row + gv.y * speed * dt;
-
-        if (gv.x !== 0 && canUseTunnelWrap(g.row)) {
-          if (newCol < -0.5) newCol = MAZE_COLS - 0.5;
-          if (newCol > MAZE_COLS - 0.5) newCol = -0.5;
-        } else {
-          newCol = Math.max(0, Math.min(MAZE_COLS - 1, newCol));
-        }
-
-        newRow = Math.max(0, Math.min(MAZE_ROWS - 1, newRow));
-
-        if (isWall(maze, newCol, newRow)) {
-          newCol = Math.round(g.col);
-          newRow = Math.round(g.row);
-        }
-
-        return {
-          ...g,
-          released,
-          mode: mode === "eaten" || mode === "frightened" ? mode : globalMode,
-          dir,
-          col: newCol,
-          row: newRow,
-          frightenedMs,
-        };
-      });
-
-      // ── Collision player ↔ ghosts ───────────────────────────────────────────
-      let { lives } = prev;
-      let powerPauseMs = 0;
-      let deathPauseMs = 0;
-      let gameOver = false;
-      let won = false;
-      let reason: string | undefined;
-
-      for (let i = 0; i < ghosts.length; i++) {
-        const g = ghosts[i];
-        const d = dist({ x: g.col, y: g.row }, { x: playerCol, y: playerRow });
-
-        if (d < 0.8) {
-          if (g.mode === "frightened") {
-            // Eat ghost
-            const eatBonus =
-              GHOST_EAT_BONUS[Math.min(g.eatIndex, GHOST_EAT_BONUS.length - 1)];
-            score += eatBonus;
-            ghosts = ghosts.map((gh, idx) =>
-              idx === i
-                ? {
-                    ...gh,
-                    mode: "eaten",
-                    eatIndex: gh.eatIndex + 1,
-                    frightenedMs: 0,
-                  }
-                : gh,
-            );
-            powerPauseMs = POWER_PAUSE_MS;
-          } else if (g.mode === "chase" || g.mode === "scatter") {
-            // Player dies
-            lives -= 1;
-            deathPauseMs = DEATH_PAUSE_MS;
-            if (lives <= 0) {
-              gameOver = true;
-              won = false;
-              reason = "Out of lives";
-            }
-            break;
-          }
-        }
-      }
-
-      // Check win on score
-      if (!gameOver && score >= activeDifficulty.targetScore) {
-        gameOver = true;
-        won = true;
-        reason = "Target score reached!";
-      }
-
-      return {
-        ...prev,
-        maze,
-        playerCol,
-        playerRow,
-        playerDir,
-        playerNextDir: "none",
-        score,
-        lives,
-        round,
-        pelletsLeft,
-        powerPelletsLeft,
-        ghosts,
-        gameOver,
-        won,
-        deathPauseMs,
-        powerPauseMs,
-        globalMode,
-        modePhaseIndex,
-        modePhaseElapsedMs,
-        ghostReleaseMs,
-        reason,
-      };
-    },
-    [activeDifficulty],
-  );
-
-  // ── RAF loop ────────────────────────────────────────────────────────────────
+  // ── Game loop ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mode || !runtime || runtime.gameOver) {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
       lastFrameAtRef.current = null;
+      accumulatorRef.current = 0;
       return;
     }
 
+    accumulatorRef.current = 0;
+    lastFrameAtRef.current = null;
+
+    /**
+     * Queue one verification window behind the ones already on the wire.
+     *
+     * The chain is the whole point: the worker resumes a park only at exactly
+     * the cursor the next window belongs at, so two windows in flight at once
+     * would arrive in whichever order the network pleased and the second would
+     * void the park the first just built. Window 0 carries the run's
+     * difficulty — the only engine context a zero-RNG run needs — and every
+     * later window inherits it from the park.
+     */
+    const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
+      const send = async () => {
+        if (chunkBrokenRef.current) return;
+        const jwt = bootstrap?.jwt;
+        if (!jwt) return;
+
+        try {
+          const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json;charset=UTF-8",
+              accept: "application/json",
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({
+              intent: "verify-chunk",
+              nonce: writeNonce(),
+              chunkIndex,
+              inputs: encodeInputLog(bytes),
+              ...(chunkIndex === 0
+                ? { difficulty: activeDifficultyRef.current.name }
+                : {}),
+            }),
+          });
+          if (!res.ok) {
+            // Surface why the worker rejected it, and stop: windows are
+            // ordered, so the ones behind a refused window would be refused
+            // for the cursor rather than for their contents.
+            const detail = await res.text().catch(() => "");
+            console.warn(`[verify-chunk] ${res.status}`, detail);
+            chunkBrokenRef.current = true;
+          }
+        } catch {
+          // A dropped window cannot be re-sent out of order — the next window
+          // would arrive at a cursor the park no longer has — so the stream
+          // ends here and the claim has to replay the run itself, which a run
+          // this long will not fit in one request.
+          chunkBrokenRef.current = true;
+        }
+      };
+
+      chunkQueueRef.current = chunkQueueRef.current.then(send);
+    };
+
+    /**
+     * Queue every complete window the log has grown since the last one.
+     *
+     * A window is the unit: one is queued whenever a full one exists, whatever
+     * frame that happens to be — 600 steps is 12 seconds of play, so the queue
+     * trails the log by seconds rather than by ticks.
+     */
+    const pumpVerificationChunks = () => {
+      if (mode !== "reward") return;
+      if (chunkBusyRef.current || chunkBrokenRef.current) return;
+
+      const start = chunkIndexRef.current * CHUNK_TICKS;
+      if (inputLogRef.current.length - start < CHUNK_TICKS) return;
+
+      const end = start + CHUNK_TICKS;
+      const chunkIndex = chunkIndexRef.current;
+      chunkIndexRef.current += 1;
+      postVerificationWindow(
+        chunkIndex,
+        Uint8Array.from(inputLogRef.current.slice(start, end)),
+      );
+
+      // One window on the wire at a time: the response is what proves the park
+      // took it, and the next window may only be built on a park that did.
+      chunkBusyRef.current = true;
+      void chunkQueueRef.current.finally(() => {
+        chunkBusyRef.current = false;
+      });
+    };
+
+    /**
+     * Freeze the claim the moment the run settles, then close the log behind
+     * it.
+     *
+     * Runs after the steps, against the settled game: the score recorded here
+     * already contains whatever step ended the run (the engine applies wins
+     * and deaths inside the step), so the claim's score, its log and its
+     * duration are all read from one state of the run rather than from a later
+     * frame.
+     *
+     * The tail-close matters more than it looks. The worker refuses a claim
+     * whose park holds less log than the claim asserts (`parked.total` must
+     * equal the claim's `ticks`), because such a claim's replay cannot finish
+     * inside one request — so every window still unwritten is queued behind
+     * the windows already on the wire, and `chunkDrainedRef` is what the
+     * payout effect waits on. A claim that overtakes its own tail would start
+     * the replay from tick zero and never reach the end.
+     */
+    const freezeClaim = () => {
+      const game = gameRef.current;
+      if (!game || frozenClaimRef.current) return;
+      if (!game.gameOver || !game.won || mode !== "reward") return;
+
+      frozenClaimRef.current = {
+        cabinet: "pac-man",
+        score: game.score,
+        checkpoints: [],
+        elapsedMs: Date.now() - runStartedAtRef.current,
+        replay: {
+          difficulty: activeDifficultyRef.current.name,
+          ticks: inputLogRef.current.length,
+          inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
+        },
+      };
+
+      if (!chunkBrokenRef.current) {
+        const log = inputLogRef.current;
+        let start = chunkIndexRef.current * CHUNK_TICKS;
+        while (start < log.length) {
+          const end = Math.min(start + CHUNK_TICKS, log.length);
+          postVerificationWindow(
+            chunkIndexRef.current,
+            Uint8Array.from(log.slice(start, end)),
+          );
+          chunkIndexRef.current += 1;
+          start = end;
+        }
+      }
+      chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
+    };
+
     const loop = (ts: number) => {
-      const prevAt = lastFrameAtRef.current ?? ts;
-      const dtMs = Math.min(50, Math.max(8, ts - prevAt));
-      lastFrameAtRef.current = ts;
-      setRuntime((prev) => (prev ? tick(prev, dtMs) : prev));
       frameRef.current = requestAnimationFrame(loop);
+
+      const prevAt = lastFrameAtRef.current ?? ts;
+      lastFrameAtRef.current = ts;
+
+      const game = gameRef.current;
+      if (!game) return;
+
+      // Whole steps only, and never more simulated time than the tab was
+      // actually allowed to elapse (the brawler's own clamp): a backgrounded
+      // tab must not fast-forward the maze on return.
+      accumulatorRef.current += Math.min(ts - prevAt, 250);
+      while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
+        // Before the step, not after: the log records the direction the step
+        // was taken *under*, which is what the worker feeds its own copy of
+        // `tick`. Sampling afterwards would round a press and step apart.
+        inputLogRef.current.push(codeFromDir(nextDirRef.current));
+        gameRef.current = tick(game, FIXED_STEP_MS, nextDirRef.current);
+        accumulatorRef.current -= FIXED_STEP_MS;
+        pumpVerificationChunks();
+        if (gameRef.current.gameOver) break;
+      }
+
+      // The run may have ended on the step above — freeze it before the
+      // render that announces it.
+      freezeClaim();
+
+      // Guarded the way `freezeClaim` guards: the loop above only steps a
+      // live game (421), so the ref cannot be null here — but it is typed
+      // nullable, and the render wants the *latest* value, after the loop's
+      // reassignments.
+      const latest = gameRef.current;
+      if (latest !== null) setRuntime({ ...latest });
     };
 
     frameRef.current = requestAnimationFrame(loop);
     return () => {
       if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
       lastFrameAtRef.current = null;
     };
-  }, [mode, runtime?.gameOver, tick]);
+  }, [mode, runtime?.gameOver, bootstrap]);
 
   // ── Reward grant ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -1131,12 +464,36 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       mode !== "reward"
     )
       return;
-    submitScore({ score: runtime.score });
-    portalService.send({
-      type: "arcadeMinigame.ravenCoinWon",
-      amount: PAC_MAN_RAVEN_COIN_REWARD,
-    });
     rewardGrantedRef.current = true;
+
+    // The claim was frozen by the loop the instant the run settled — score,
+    // log and duration from one state. Absent means the win somehow happened
+    // without the loop settling, which cannot happen while the loop is
+    // running; it is still checked, because claiming with no log would burn
+    // the voucher for nothing — and the voucher is the player's ticket, not
+    // ours to spend.
+    const claim = frozenClaimRef.current;
+    if (!claim) {
+      rewardGrantedRef.current = false;
+      console.error("[pac-man] win with no frozen claim");
+      return;
+    }
+
+    submitScore({ score: runtime.score });
+
+    // The tail windows are still on the wire when this effect runs — the
+    // freeze, the tail and the `gameOver` that triggered this are all observed
+    // in the same frame. The claim may only land once the park holds the
+    // whole log: overtaking it makes the worker start the replay from tick
+    // zero, and a run this long cannot be re-simulated inside one request, so
+    // the refusal that follows would be of an honestly won coin.
+    void (chunkDrainedRef.current ?? Promise.resolve()).then(() => {
+      portalService.send({
+        type: "arcadeMinigame.ravenCoinWon",
+        amount: PAC_MAN_RAVEN_COIN_REWARD,
+        verify: claim,
+      });
+    });
   }, [mode, portalService, runtime]);
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1260,7 +617,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
 
           {showPracticePrompt && (
             <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4">
-              <div className="w-full max-w-md rounded border border-white/30 bg-slate-900 p-4 space-y-4 text-white">
+              <div className="w-full max-w-md rounded border border-white/30 bg-slate-900 p-5 text-white space-y-4">
                 <h3 className="text-lg font-bold">
                   Select Practice Difficulty
                 </h3>
@@ -1526,8 +883,8 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           {/* Bumpkin-Man was keyboard-only, which made the cabinet unplayable on
               a phone. `TouchDPad` is not a second input path: each button
               dispatches the real `ArrowLeft`/`ArrowRight`/`ArrowUp`/`ArrowDown`
-              keydown and keyup on `window`, which is exactly what the movement
-              tick above already turns into a heading — so a held pad direction
+              keydown and keyup on `window`, which is exactly what the key
+              handler above already turns into a heading — so a held pad direction
               is the same continuous heading a held arrow key gives, and the pad
               is driveable with no game code behind it. It is a *sibling* of the
               stage rather than a child of it, which is the point: `FitStage` sums
