@@ -142,6 +142,8 @@ export function useRewardRun({
     start,
     confirm,
     cancel,
+    /** Whether the confirmation dialog is open. */
+    confirming,
     /** Server refusal, e.g. "Insufficient Play Ticket". */
     error,
     dialog,

@@ -930,6 +930,31 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             {runtime.gameOver && mode === "reward" && hasRewardRun && (
               <Button onClick={rewardRun.start}>Play Again</Button>
             )}
+            {/* Confirmation dialog for "Play Again" when a ticket must be burned.
+                The lobby dialog (rewardRun.dialog) is not visible when the game
+                is over, so we render a copy here using the same confirming state. */}
+            {runtime.gameOver && mode === "reward" && rewardRun.confirming && (
+              <div className="fixed inset-0 z-30 bg-black/60 flex items-center justify-center p-4">
+                <div className="w-full max-w-md rounded border border-white/30 bg-slate-900 p-5 text-white space-y-4">
+                  <div className="font-bold text-lg">ARE YOU SURE?</div>
+                  <p className="text-sm text-slate-300">
+                    Today&apos;s free reward run is already used. Starting another one burns
+                    <b> 1 Play Ticket</b>.
+                  </p>
+                  <p className="text-sm text-slate-300">
+                    Play Tickets: <b>{rewardRun.tickets}</b>
+                  </p>
+                  <div className="flex flex-col gap-2">
+                    <Button onClick={rewardRun.confirm} className="w-full">
+                      CONFIRM — USE 1 PLAY TICKET
+                    </Button>
+                    <Button onClick={rewardRun.cancel} variant="secondary" className="w-full">
+                      CLOSE
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            )}
             {onClose && (
               <Button
                 onClick={() => {
