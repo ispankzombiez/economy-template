@@ -149,6 +149,16 @@ import {
   stepPacmanReplay,
   validatePacmanReplay,
 } from "./pacmanReplay.js";
+// Tetris verifier — tick-simulated like the brawler and Pac-Man. The engine uses
+// a seeded LCG for the piece bag, so the proof is (difficulty, seed, input log).
+import {
+  openTetrisChunkReplay,
+  resolveTetrisDifficulty,
+  startTetrisReplay,
+  stepTetrisReplay,
+  tetrisOutcome,
+  validateTetrisReplay,
+} from "./tetrisReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -2701,6 +2711,13 @@ const TICK_ENGINES = {
     step: stepPacmanReplay,
     outcome: pacmanOutcome,
   },
+  "tetris": {
+    validate: validateTetrisReplay,
+    start: startTetrisReplay,
+    openChunk: openTetrisChunkReplay,
+    step: stepTetrisReplay,
+    outcome: tetrisOutcome,
+  },
 };
 
 /**
@@ -3280,13 +3297,14 @@ const VERIFIED_CABINETS = new Set([
   "poker",
   "uno",
   "pac-man",
+  "tetris",
 ]);
 
 /**
  * Cabinets whose replays are *streamed* — the tick-simulated games that post
  * `verify-chunk` windows during play and park between requests (see
- * `openChunkReplay`). The brawler and Bumpkin-Man are the two so far; both
- * step through `TICK_ENGINES`, which chooses the engine by this same cabinet
+ * `openChunkReplay`). The brawler, Bumpkin-Man, and Tetris are the three so far;
+ * all step through `TICK_ENGINES`, which chooses the engine by this same cabinet
  * name.
  *
  * Membership in `VERIFIED_CABINETS` is about which *claim* route a cabinet
@@ -3296,7 +3314,7 @@ const VERIFIED_CABINETS = new Set([
  * The chunk intent checks this set so a run on a turn-based cabinet cannot
  * open a brawler-style park that nothing would ever drain.
  */
-const STREAMED_CABINETS = new Set(["sunflower-brawler", "pac-man"]);
+const STREAMED_CABINETS = new Set(["sunflower-brawler", "pac-man", "tetris"]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,

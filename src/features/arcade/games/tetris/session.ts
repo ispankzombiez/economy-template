@@ -67,13 +67,38 @@ export const getTetrisDifficultyFromSeed = (seed: number): TetrisDifficulty => {
 export const getTetrisDifficulty = (
   now: Date | number = Date.now(),
 ): TetrisDifficulty => {
+  return getTetrisDifficultyFromSeed(getTetrisDaySeed(now));
+};
+
+/**
+ * The bag seed for a run opened on a given day.
+ *
+ * The *same number* that picks the difficulty, exposed as its own function
+ * because the piece bag is generated from it too — the run has to be a single
+ * reproducible thing, not a difficulty that is reproducible and a bag that is
+ * not.
+ *
+ * It is the day's hash rather than a fresh random number because the worker
+ * cannot be told it: it re-derives the day from the UTC clock, accepts only
+ * today's or yesterday's difficulty name, and rebuilds the bag from the same
+ * hash. A client-chosen seed could not be checked, so every honest run would be
+ * refused — the coin would cost a ticket and never pay.
+ *
+ * A run that straddles UTC midnight keeps this number, which is exactly why it
+ * is baked into the runtime rather than re-derived per step: the park
+ * round-trips through D1 between chunk requests, and re-reading the clock on
+ * resume would deal a new bag into a game that was already half-played.
+ */
+export const getTetrisDaySeed = (now: Date | number = Date.now()): number => {
   const todayKey = getTodayKey(now);
 
-  const seed = todayKey.split("").reduce((accumulator, character) => {
-    return Math.imul(accumulator, 31) + character.charCodeAt(0);
-  }, 131);
-
-  return getTetrisDifficultyFromSeed(seed >>> 0);
+  return (
+    todayKey
+      .split("")
+      .reduce((accumulator, character) => {
+        return Math.imul(accumulator, 31) + character.charCodeAt(0);
+      }, 131) >>> 0
+  );
 };
 
 export const isTetrisRewardRunAvailable = ({

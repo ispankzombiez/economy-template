@@ -548,6 +548,47 @@ export type VerifiedRun = {
          * long cannot be re-simulated inside one 10 ms request.
          */
         inputs: string;
+      }
+    | {
+        /**
+         * Tetris is a streamed cabinet like Pac-Man and the brawler: its proof
+         * is per-tick inputs, posted as `verify-chunk` windows during play,
+         * because a run to the 35,000 target is tens of thousands of steps and
+         * cannot be re-simulated inside one 10 ms request.
+         *
+         * It carries **no seed field**, and there is not one to have. The piece
+         * bag is generated from the *day* the run was opened on, which the
+         * worker re-derives from its own UTC clock and accepts only as today's
+         * or yesterday's — the same rule as the difficulty name beside it. A
+         * client-chosen bag seed could not be checked at all, so every honest
+         * run would be refused and the coin would cost a ticket and never pay.
+         *
+         * The day hash rides *on the runtime* rather than being re-derived per
+         * step, because the park round-trips through D1 between chunks: a run
+         * that straddles UTC midnight has to keep dealing from the bag it
+         * started with.
+         */
+        difficulty: string;
+        /**
+         * Number of 16 ms steps in the log — must equal `inputs` length.
+         *
+         * The step length is protocol, not tuning: the log is one input byte
+         * per step, so both ends must advance simulated time by the same amount
+         * per entry or the replay would diverge from the play.
+         */
+        ticks: number;
+        /**
+         * The input byte for each step, base64 — a bitfield, not a command.
+         *
+         * `LEFT` `RIGHT` `SOFT_DROP` are *held* bits the player keeps set; the
+         * four others are single presses sampled on exactly one tick, which is
+         * what makes them replayable — a "rotate happened" flag with no tick
+         * attached would be a claim about *when*, and checking the claim is the
+         * whole job. See `INPUT_*` in `tetris/engine.ts`, the only encoder
+         * either end accepts; a byte with any other bit set is refused as not a
+         * player input.
+         */
+        inputs: string;
       };
 };
 

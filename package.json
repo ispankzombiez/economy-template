@@ -19,6 +19,7 @@
     "anticheat:poker": "node scripts/pokerReplayTest.mjs",
     "anticheat:uno": "node scripts/unoReplayTest.mjs",
     "anticheat:pacman": "node scripts/pacmanReplayTest.mjs",
+    "anticheat:tetris": "node scripts/tetrisReplayTest.mjs",
     "freerun:audit": "node scripts/auditFreeRuns.mjs",
     "freerun:add": "node scripts/addCabinetEconomyIds.mjs",
     "preview": "vite preview"
