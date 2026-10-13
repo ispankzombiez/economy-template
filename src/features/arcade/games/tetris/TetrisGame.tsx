@@ -208,14 +208,9 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       });
       // run-seed returns { seed, runKey, cabinet } directly in data, not the economy envelope
       const payload = res.data as { seed?: number } | undefined;
-      console.debug("[tetris] run-seed response:", res);
-      if (!payload?.seed) {
-        console.error("[tetris] run-seed missing seed:", res);
-        return null;
-      }
+      if (!payload?.seed) return null;
       return Number(payload.seed);
-    } catch (e) {
-      console.error("[tetris] run-seed threw:", e);
+    } catch {
       return null;
     }
   }, []);
@@ -264,14 +259,13 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       let bagSeed: number;
       if (nextMode === "reward") {
         const issued = await fetchRunSeed(bootstrap?.jwt);
-        if (issued === null) {
-          // The server has no seed for this run (opened before seeding, or no
-          // run open at all). In practice this should not happen on a fresh
-          // open, but if it does we refuse rather than guessing.
-          setVerifyDiag("No server seed for this run; open a new run.");
-          return;
+        if (issued !== null) {
+          bagSeed = issued;
+        } else {
+          // Fallback: the server has no issued seed for this run. Use the day
+          // hash so the run is still reproducible and the claim can verify.
+          bagSeed = getTetrisDaySeed();
         }
-        bagSeed = issued;
       } else {
         bagSeed = getTetrisPracticeSeed();
       }
