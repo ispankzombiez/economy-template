@@ -154,6 +154,11 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     useState<TetrisDifficulty>(todaysDifficulty);
   const [practiceDifficultyName, setPracticeDifficultyName] =
     useState<TetrisDifficultyName>(todaysDifficulty.name);
+  // A one-line summary of what the verification stream did, shown on the
+  // game-over card when a claim did not go through. Diagnostic only: the run's
+  // outcome never depends on it, it just makes a client-side failure legible
+  // instead of something the player can only infer from a missing coin.
+  const [verifyDiag, setVerifyDiag] = useState<string | null>(null);
 
   // The simulation state lives in `gameRef`, not in React state: a step is
   // driven from a fixed-step accumulator, and re-rendering between ticks would
@@ -259,6 +264,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       chunkBrokenRef.current = false;
       chunkQueueRef.current = Promise.resolve();
       chunkDrainedRef.current = null;
+      (window as unknown as { __verifyChunk?: unknown[] }).__verifyChunk = [];
 
       if (nextMode === "reward") {
         portalService.send({
@@ -371,6 +377,27 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     lastFrameAtRef.current = null;
 
     /**
+     * What happened to the verification stream, for the client-side half of a
+     * refusal the worker never sees.
+     *
+     * Every symptom so far has been *silent on this side*. A lost window is
+     * invisible: the worker records a verdict about the claim, never about the
+     * window that never arrived, so "the park holds 600 of 20764 ticks" says
+     * only that something went wrong 34 windows ago. This records what each
+     * window did, so the next run can be read instead of guessed at.
+     *
+     * Strictly an observer. It never sets `chunkBrokenRef` and never touches the
+     * queue — including on the watchdog, which reports a window that never came
+     * back but deliberately leaves the stream's fate unchanged.
+     */
+    const note = (event: Record<string, unknown>) => {
+      const entry = { t: Date.now(), ...event };
+      const log = (window as unknown as { __verifyChunk?: unknown[] }).__verifyChunk;
+      if (Array.isArray(log)) log.push(entry);
+      console.warn("[verify-chunk]", entry);
+    };
+
+    /**
      * Queue one verification window behind the ones already on the wire.
      *
      * The chain is the whole point: the worker resumes a park only at exactly
@@ -382,7 +409,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
      */
     const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
       const send = async () => {
-        if (chunkBrokenRef.current) return;
+        if (chunkBrokenRef.current) {
+          note({ chunk: chunkIndex, outcome: "skipped-stream-already-broken" });
+          return;
+        }
         const jwt = bootstrap?.jwt;
         if (!jwt) {
           // The window's index has already been consumed, so this one is gone.
@@ -390,9 +420,16 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           // window would arrive at a cursor the park never reached — the run
           // would then be refused for a reason invisible from the client.
           chunkBrokenRef.current = true;
-          console.warn("[verify-chunk] no session token; stream abandoned");
+          note({ chunk: chunkIndex, outcome: "no-session-token" });
           return;
         }
+
+        const startedAt = Date.now();
+        // A window that never comes back holds `chunkBusyRef` forever and stalls
+        // the stream with no error anywhere. Report it; do not act on it.
+        const watchdog = setTimeout(() => {
+          note({ chunk: chunkIndex, outcome: "no-response-after-20s" });
+        }, 20_000);
 
         try {
           const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
@@ -417,15 +454,36 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
             // ordered, so the ones behind a refused window would be refused
             // for the cursor rather than for their contents.
             const detail = await res.text().catch(() => "");
-            console.warn(`[verify-chunk] ${res.status}`, detail);
+            note({
+              chunk: chunkIndex,
+              outcome: "rejected",
+              status: res.status,
+              detail: detail.slice(0, 300),
+              ms: Date.now() - startedAt,
+            });
             chunkBrokenRef.current = true;
+          } else {
+            note({
+              chunk: chunkIndex,
+              outcome: "acked",
+              status: res.status,
+              ms: Date.now() - startedAt,
+            });
           }
-        } catch {
+        } catch (error) {
           // A dropped window cannot be re-sent out of order — the next window
           // would arrive at a cursor the park no longer has — so the stream
           // ends here and the claim has to replay the run itself, which a run
           // this long will not fit in one request.
+          note({
+            chunk: chunkIndex,
+            outcome: "threw",
+            error: String(error),
+            ms: Date.now() - startedAt,
+          });
           chunkBrokenRef.current = true;
+        } finally {
+          clearTimeout(watchdog);
         }
       };
 
@@ -513,8 +571,30 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           chunkIndexRef.current += 1;
           start = end;
         }
+      } else {
+        note({ outcome: "tail-not-sent-stream-broken" });
       }
       chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
+
+      // Summarise the stream for the game-over card: how far it got, and the
+      // first thing that went wrong. Read after the drain so the count is final.
+      void chunkDrainedRef.current.then(() => {
+        const log = (window as unknown as { __verifyChunk?: unknown[] })
+          .__verifyChunk;
+        const entries = Array.isArray(log) ? (log as Record<string, unknown>[]) : [];
+        const acked = entries.filter((e) => e.outcome === "acked").length;
+        const failure = entries.find((e) => e.outcome !== "acked" && e.outcome !== "skipped-stream-already-broken");
+        const needed = Math.ceil(inputLogRef.current.length / CHUNK_TICKS);
+
+        setVerifyDiag(
+          failure
+            ? `${acked}/${needed} windows acked; window ${failure.chunk ?? "?"} ${failure.outcome}` +
+                (failure.status ? ` (HTTP ${failure.status})` : "") +
+                (failure.error ? ` [${failure.error}]` : "") +
+                (failure.detail ? ` ${String(failure.detail).slice(0, 120)}` : "")
+            : `${acked}/${needed} windows acked`,
+        );
+      });
     };
 
     const loop = (ts: number) => {
@@ -1167,6 +1247,11 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   ? ` Reward granted: ${TETRIS_RAVEN_COIN_REWARD} RavenCoin.`
                   : ""}
               </div>
+              {verifyDiag && (
+                <div className="mt-1 text-[10px] leading-tight text-amber-200/90 break-all">
+                  verify: {verifyDiag}
+                </div>
+              )}
             </div>
           )}
 
