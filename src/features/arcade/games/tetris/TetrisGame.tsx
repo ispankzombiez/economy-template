@@ -206,8 +206,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         token: jwt,
         intent: "run-seed",
       });
-      if (!res.data?.run?.seed) return null;
-      return Number(res.data.run.seed);
+      // run-seed returns { seed, runKey, cabinet } directly in data, not the economy envelope
+      const payload = res.data as { seed?: number } | undefined;
+      if (!payload?.seed) return null;
+      return Number(payload.seed);
     } catch {
       return null;
     }
