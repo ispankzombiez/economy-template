@@ -157,6 +157,62 @@ export function startReplay(replay) {
 }
 
 /**
+ * Whether a parked row can be adopted by a claim whose log is *longer* than the
+ * park holds.
+ *
+ * ## Why this exists
+ *
+ * The park used to have to match the claim's log in size, exactly. That is a far
+ * stricter condition than it looks: a streamed run's park is built window by
+ * window over several minutes of play, and the claim's log is however long the
+ * run finally turned out to be. Any single window that failed to land — one
+ * dropped connection, one request the network never answered — leaves the park
+ * short, and an exact-size test throws away *all* the stepping that did survive
+ * and restarts the run from tick zero.
+ *
+ * For a short run that is merely wasteful. For a long one it is unrecoverable:
+ * the worker's whole budget is one 600-tick slice per request, so a 23,556-tick
+ * run restarted from zero can never be finished by the claim alone, no matter how
+ * many times it is retried. The run is stranded, and with it the player's coin.
+ *
+ * ## Why a prefix is safe to adopt
+ *
+ * Adopting is only sound if the parked match was stepped over *this claim's*
+ * bytes. So the parked log is compared byte-for-byte against the claim's own
+ * first `park.total` bytes, and any difference — a different run, an edited
+ * window, a swapped row — declines adoption and falls back to a fresh start,
+ * exactly as before.
+ *
+ * This is a strictly weaker precondition than "same size and same run key" *and*
+ * strictly stronger than trusting the park's length alone: the bytes the parked
+ * match already consumed are proven to be the claim's bytes, so continuing from
+ * `park.cursor` steps precisely the remaining input, in order, with no gap and no
+ * overlap.
+ *
+ * @param {{ total: unknown, inputs: unknown }} park
+ * @param {Uint8Array} claimInputs The claim's own decoded log.
+ * @returns {boolean} True when the park is a verified prefix of the claim.
+ */
+export function parkExtendsClaim(park, claimInputs) {
+  const total = Number(park?.total);
+  if (!Number.isInteger(total) || total <= 0) return false;
+  if (total > claimInputs.length) return false;
+
+  let parkedInputs;
+  try {
+    parkedInputs = decodeInputLog(String(park?.inputs ?? ""));
+  } catch {
+    return false;
+  }
+  if (parkedInputs.length !== total) return false;
+
+  for (let i = 0; i < total; i++) {
+    if (parkedInputs[i] !== claimInputs[i]) return false;
+  }
+  return true;
+}
+
+/**
  * Revive a parked replay so the next chunk can resume it.
  *
  * The continuation is sent nothing but its intent — deliberately. The inputs it

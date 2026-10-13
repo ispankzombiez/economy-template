@@ -159,6 +159,7 @@ const {
   ReplayInputError,
   CHUNK_TICKS,
   MAX_REPLAY_TICKS,
+  parkExtendsClaim,
 } = mod;
 
 const bytesToWire = (bytes) => encodeInputLog(Uint8Array.from(bytes));
@@ -516,16 +517,27 @@ function claimVerdict({ difficultyName, bytes, claimScore, park }) {
     inputs: bytesToWire(bytes),
   });
 
-  // The binding a claim must satisfy: the park holds exactly this log.
-  if (park.total !== validated.inputs.length) {
-    return { matched: null, reason: "park/claim length binding failed" };
+  // The binding a claim must satisfy. Not that the park is the same *size* —
+  // a park short by even one window used to throw away every tick it had
+  // already stepped, which stranded any run too long to re-simulate inside one
+  // request. What matters is that the park holds this claim's own bytes.
+  //
+  // Normalised to the wire form first, because that is what D1 holds: a park
+  // arrives from storage base64-encoded, and a check that only ever saw raw
+  // bytes would not be testing the decode it actually performs.
+  const wirePark = {
+    ...park,
+    inputs: park.inputs instanceof Uint8Array ? bytesToWire(park.inputs) : park.inputs,
+  };
+  if (!parkExtendsClaim(wirePark, validated.inputs)) {
+    return { matched: null, reason: "park/claim binding failed" };
   }
 
   const resumed = {
     match: park.match,
     inputs: validated.inputs,
     cursor: park.cursor,
-    total: park.total,
+    total: validated.inputs.length,
   };
   stepTetrisReplay(resumed, CHUNK_TICKS); // the tail — usually zero steps
 
@@ -713,14 +725,35 @@ if (winRun) {
     JSON.stringify(badScore),
   );
 
-  // A claim that arrives with the park one window short: the binding refuses
-  // it outright rather than re-simulating a log that cannot finish in-budget.
-  const shortPark = {
-    match: state.match,
-    cursor: Math.max(0, state.cursor - CHUNK_TICKS),
-    total: state.total - CHUNK_TICKS,
-    inputs: state.inputs.slice(0, -CHUNK_TICKS),
-  };
+  // A claim that arrives with the park one window short — the state a player is
+  // in when a single window never got through. Streamed for real, and stopping
+  // one window early, so the park's match is genuinely the state its own cursor
+  // has reached rather than the end of the run: the bug this reproduces was not
+  // a length comparison failing but the worker restarting and being unable to
+  // finish, and faking the cursor would not exercise that.
+  let shortPark = null;
+  {
+    const streamed = [];
+    for (let start = 0; start < bytes.length - CHUNK_TICKS; start += CHUNK_TICKS) {
+      const window = Uint8Array.from(bytes.slice(start, start + CHUNK_TICKS));
+      if (start === 0) {
+        streamed.push(openTetrisChunkReplay({ difficulty: easiest.name, inputs: window }));
+      } else {
+        streamed[0].inputs = Uint8Array.from([...streamed[0].inputs, ...window]);
+        streamed[0].total = streamed[0].inputs.length;
+      }
+      stepTetrisReplay(streamed[0], CHUNK_TICKS);
+      streamed[0].match = JSON.parse(JSON.stringify(streamed[0].match));
+    }
+    shortPark = streamed[0];
+  }
+
+  check(
+    shortPark.cursor < bytes.length && shortPark.cursor > 0,
+    "the short park is a genuine mid-run state",
+    `cursor ${shortPark.cursor} of ${bytes.length}`,
+  );
+
   const shortClaim = claimVerdict({
     difficultyName: easiest.name,
     bytes,
@@ -728,9 +761,44 @@ if (winRun) {
     park: shortPark,
   });
   check(
-    shortClaim.matched === null,
-    "a claim whose park holds less log than it asserts is refused (binding)",
+    shortClaim.matched === true,
+    "a claim whose park is a window short still verifies (prefix resume)",
     JSON.stringify(shortClaim),
+  );
+
+  // …but a park whose bytes are not this claim's is still refused, however
+  // plausible its length. This is the check the prefix rule must not weaken: a
+  // park built from a different run, or an edited window, declines adoption and
+  // falls back to a fresh start rather than being stepped as though it agreed.
+  const tampered = Uint8Array.from(bytes);
+  tampered[Math.floor(tampered.length / 2)] ^= INPUT_MASK;
+  const tamperedClaim = claimVerdict({
+    difficultyName: easiest.name,
+    bytes,
+    claimScore: game.score,
+    park: { ...state, inputs: bytesToWire(tampered) },
+  });
+  check(
+    tamperedClaim.matched === null,
+    "a park whose bytes disagree with the claim is not adopted (binding)",
+    JSON.stringify(tamperedClaim),
+  );
+
+  // A park *longer* than the claim is a park from another run, not a superset.
+  const longerPark = claimVerdict({
+    difficultyName: easiest.name,
+    bytes,
+    claimScore: game.score,
+    park: {
+      ...state,
+      total: state.total + 1,
+      inputs: bytesToWire([...bytes, 0]),
+    },
+  });
+  check(
+    longerPark.matched === null,
+    "a park longer than the claim is not adopted (binding)",
+    JSON.stringify(longerPark),
   );
 
   // Every chunk request's stepping has to fit a Workers Free request. 25 ms is
@@ -749,7 +817,8 @@ if (winRun) {
   const { game, bytes } = winRun;
 
   // Truncated log: the claim's ticks no longer match the park — refused by
-  // the binding, before any simulation decides anything.
+  // the binding, before any simulation decides anything. A park *longer* than
+  // the claim is the same failure seen from the other side.
   const truncated = claimVerdict({
     difficultyName: easiest.name,
     bytes: bytes.slice(0, -1),
@@ -758,7 +827,7 @@ if (winRun) {
       match: JSON.parse(JSON.stringify(game)),
       cursor: bytes.length,
       total: bytes.length,
-      inputs: Uint8Array.from(bytes),
+      inputs: bytesToWire(bytes),
     },
   });
   check(

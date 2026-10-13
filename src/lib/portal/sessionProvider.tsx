@@ -183,9 +183,14 @@ export function MinigameSessionProvider({
 
       void postPromise.then(
         (res) => {
-          setPlayerEconomy((prev) =>
-            mergeMinigameEconomyFromApi(prev, authoritativePlayerEconomy(res)),
-          );
+          // A response that carries no economy is not one to merge. A claim whose
+          // replay is merely unfinished answers 200 with a status stub — the
+          // continuation is what mints — and merging that through would let a
+          // normalisation default stand in for a balance the server never sent.
+          const authoritative = authoritativePlayerEconomy(res);
+          if (authoritative) {
+            setPlayerEconomy((prev) => mergeMinigameEconomyFromApi(prev, authoritative));
+          }
 
           // Runs *after* the economy is already settled, and is deliberately
           // fire-and-forget: in Stage B the replay only records whether it
@@ -197,7 +202,22 @@ export function MinigameSessionProvider({
           // for a continuation to pick up and the first call would just be
           // refused.
           if (verifiedReplay && "inputs" in verifiedReplay) {
-            void continueRunVerification({ token: bootstrap.jwt as string });
+            void continueRunVerification({
+              token: bootstrap.jwt as string,
+              // The continuation that reaches the end of a replay is the one that
+              // mints it, so every response's economy is merged as it lands —
+              // otherwise a run that verified would pay into a balance the player
+              // only saw on their next reload. The intermediate ones step ticks and
+              // carry no economy at all, and those must not be merged as if they
+              // had: a normalisation default is not a balance the server sent.
+              onSettled: (data) => {
+                const authoritative = authoritativePlayerEconomy(data);
+                if (!authoritative) return;
+                setPlayerEconomy((prev) =>
+                  mergeMinigameEconomyFromApi(prev, authoritative),
+                );
+              },
+            });
           }
         },
         (err) => {

@@ -76,6 +76,7 @@ import {
   appendChunkInputs,
   isReplayComplete,
   openChunkReplay,
+  parkExtendsClaim,
   replayOutcome,
   resumeReplay,
   startReplay,
@@ -2261,19 +2262,32 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
   // since one run plays one cabinet, but the failure it guards against —
   // resuming a replay under a different cabinet's rule set — is worth one more
   // comparison.
+  //
+  // Size used to be part of this test, and made it the single most expensive
+  // condition in the claim: a streamed park is assembled window by window over
+  // several minutes, so any one window the network dropped left the park short
+  // and the claim discarded all of it and restarted from tick zero — which a
+  // long run can never finish inside one 10 ms request. What is required for a
+  // safe resume is not that the park is the same *size* but that it is the same
+  // *bytes*: `parkExtendsClaim` proves the parked match was stepped over this
+  // claim's first `park.total` inputs, which is what makes continuing from
+  // `parked.cursor` sound. Streaming becomes an optimisation that a lost window
+  // costs a few hundred ticks of, rather than a precondition that costs the run.
   const parked = await readReplayState(env, farmId);
   let state;
   if (
     parked &&
     parked.runKey === runKey &&
     parked.cabinet === cabinet &&
-    parked.total === validated.total
+    (parked.total === validated.total || parkExtendsClaim(parked, validated.inputs))
   ) {
     state = {
       match: parked.state,
       inputs: validated.inputs,
       cursor: parked.cursor,
-      total: parked.total,
+      // The *claim's* length, not the park's: the remaining input is what the
+      // replay still has to cover, and it is longer whenever the park was short.
+      total: validated.total,
     };
   } else {
     state = engine.start(payload.replay);
@@ -2308,7 +2322,17 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
         claimScore,
         reason: `replay still in progress at ${state.cursor} of ${state.total} ticks`,
       });
-      return { matched: null, reason: "replay in progress" };
+      return {
+        matched: null,
+        reason: "replay in progress",
+        // Carried so the claim route can tell "not finished yet" apart from a
+        // refusal, and report where it got to. The two are opposites to the
+        // player and indistinguishable from the return type alone, and the
+        // client can only drive the replay to the end if it knows which it is.
+        inProgress: true,
+        cursor: state.cursor,
+        total: state.total,
+      };
     }
 
     await clearReplayState(env, farmId);
@@ -2791,6 +2815,33 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     runKey: openedOn.runKey,
   });
 
+  if (replayVerdict.inProgress === true) {
+    // Out of budget, not out of verdict. The run has been parked mid-replay and
+    // the rest of it is reached by `continue-verification`, which steps another
+    // slice per request and mints when the replay finally agrees.
+    //
+    // This used to be refused as a 400, which was unrecoverable: the client's
+    // continuation is driven from the *fulfilled* claim, so a rejection meant
+    // nothing would ever advance the park again. The replay was neither finished
+    // nor refused — it was merely unfinished, and refusing an unfinished replay
+    // refused an honestly won run for having streamed one window short.
+    //
+    // Deliberately no economy action. Nothing is minted here; the continuation
+    // that reaches the end of the replay is what pays, so the coin still follows
+    // the worker's own verdict and nothing is granted before it exists.
+    return {
+      verification: {
+        checkpoints: "passed",
+        replay: null,
+        replayProgress: `${replayVerdict.cursor} of ${replayVerdict.total} ticks`,
+        replayReason: "replay in progress",
+      },
+      async run() {
+        return { continued: false, complete: false, claimed: false };
+      },
+    };
+  }
+
   if (replayVerdict.matched !== true) {
     // No verdict row is written here: the verifier above has already recorded
     // its own — `1` for a win, `0` for a completed disagreement, `null` for
@@ -2999,7 +3050,7 @@ async function intentVerifyChunk({ env, farmId, payload }) {
  * and there is nothing to refund: a continuation that fails costs a delayed
  * verdict and nothing else.
  */
-async function intentContinueVerification({ env, farmId }) {
+async function intentContinueVerification({ env, farmId, session }) {
   // Bound to the park, not to an open run. The claim that started this replay
   // settles the run as it pays — `clearActiveRun` — so by the time the first
   // continuation arrives there is no open run to name, and requiring one would
@@ -3111,7 +3162,29 @@ async function intentContinueVerification({ env, farmId }) {
           `against a claim of ${parked.claimScore}`,
     },
     async run() {
-      return { continued: true, complete: true };
+      // Mint here, and only here, for any replay that needed more than one
+      // request. The dispatcher pays through `plan.run()`, so a continuation
+      // that merely recorded its verdict returned a stub and the coin was
+      // unreachable by this path *by construction* — a run long enough to be
+      // chunked could verify and still pay nothing.
+      //
+      // The same two lines the claim route runs, for the same reason: the run
+      // was opened once and is settled once, and the amount is ranged against
+      // this session's own rules rather than anything the request carried.
+      //
+      // On a disagreement nothing is minted. `matched` is the only thing that
+      // authorises a coin, and a continuation that reached the end and found
+      // the replay disagreed must leave the player exactly as the claim would
+      // have — refused, with the verdict recorded either way.
+      if (!matched) return { continued: true, complete: true, claimed: false };
+
+      const data = await callEconomy(env, session, {
+        type: "minigame.action",
+        action: "Claim-Raven-Coin",
+        amounts: rangedAmounts(session, "Claim-Raven-Coin", rewardAttemptKey(session)),
+      });
+      await clearActiveRun(env, farmId);
+      return data;
     },
   };
 }

@@ -676,11 +676,17 @@ export async function postPlayerEconomyAction(params: {
  * covers a run several times longer than any legal one — because hitting it
  * means the log was absurd, not that the player was slow.
  *
+ * `onSettled` is called with every response's economy body as it arrives, because
+ * the continuation that finishes a replay is also the one that mints it. The
+ * player should see the coin without a reload, and the response that carried it
+ * is the only place it exists.
+ *
  * @returns The final verdict, or `null` if it never resolved. Never throws.
  */
 export async function continueRunVerification(params: {
   token: string;
   maxContinuations?: number;
+  onSettled?: (data: MinigameActionResponse) => void;
 }): Promise<Record<string, unknown> | null> {
   const budget = params.maxContinuations ?? MAX_CONTINUATIONS;
   for (let sent = 0; sent < budget; sent += 1) {
@@ -693,6 +699,8 @@ export async function continueRunVerification(params: {
     } catch {
       return null;
     }
+
+    params.onSettled?.(response.data);
 
     const verdict = response.verification;
     if (!verdict) return null;
