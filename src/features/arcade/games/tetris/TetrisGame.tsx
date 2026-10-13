@@ -65,7 +65,7 @@ const TILE_SIZE = 24;
  * Keys the cabinet claims outright, so the page does not scroll or the host
  * reacts to them.
  *
- * `Q` is deliberately absent: hold/swap is `X`, and an unbound key must stay
+ * `Q` is deliberately absent: hold/swap is `C`, and an unbound key must stay
  * unbound rather than being swallowed and doing nothing, which is what leaving
  * it here would do.
  */
@@ -76,6 +76,7 @@ const INTERCEPTED_CODES = new Set([
   "ArrowDown",
   "KeyZ",
   "KeyX",
+  "KeyC",
   "Space",
 ]);
 
@@ -318,12 +319,13 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           heldRef.current |= INPUT_SOFT_DROP;
           break;
         case "ArrowUp":
+        case "KeyX":
           if (!isRepeat) pressRef.current |= INPUT_ROTATE_CW;
           break;
         case "KeyZ":
           if (!isRepeat) pressRef.current |= INPUT_ROTATE_CCW;
           break;
-        case "KeyX":
+        case "KeyC":
           if (!isRepeat) pressRef.current |= INPUT_HOLD;
           break;
         case "Space":
@@ -677,10 +679,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
               Left/Right to move, Down to soft drop, Space for hard drop.
             </div>
             <div className="mt-1">
-              Up rotates clockwise, Z rotates counter-clockwise.
+              Up or X rotates clockwise, Z rotates counter-clockwise.
             </div>
             <div className="mt-1">
-              Press X to hold/swap your active piece once per drop.
+              Press C to hold/swap your active piece once per drop.
             </div>
           </InnerPanel>
 
@@ -885,9 +887,9 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   <div>Left / Right - Move</div>
                   <div>Down - Soft Drop</div>
                   <div>Space - Hard Drop</div>
-                  <div>Up - Rotate CW</div>
+                  <div>Up or X - Rotate CW</div>
                   <div>Z - Rotate CCW</div>
-                  <div>X - Hold / Swap</div>
+                  <div>C - Hold / Swap</div>
                 </div>
               </div>
 
@@ -1017,14 +1019,14 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                rather than scrolled off. */
             <div className="order-5 md:order-3 sticky bottom-0 z-10 shrink-0 bg-slate-950/95 py-1 flex flex-col gap-1.5">
               {/* Row 1: HOLD on its own, above the rest.
-                  `X` is hold on the keyboard and there was no touch route to it
+                  `C` is hold on the keyboard and there was no touch route to it
                   at all, so a player on a phone could not bank a piece — one of
                   the three decisions the game is built around. It sits above the
                   directional rows because it is the rarest press, so it should
                   not cost any of the space the thumb sweeps. */}
               <TouchButton
                 held={held}
-                code="KeyX"
+                code="KeyC"
                 label={
                   <span className="flex items-center justify-center gap-1.5 leading-tight">
                     <span className="text-base">⇄</span>
