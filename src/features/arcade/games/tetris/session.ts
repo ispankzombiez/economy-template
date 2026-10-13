@@ -101,6 +101,20 @@ export const getTetrisDaySeed = (now: Date | number = Date.now()): number => {
   );
 };
 
+/**
+ * A bag seed for a *practice* run.
+ *
+ * Practice pays nothing and is never verified, so nothing needs to be able to
+ * check this number — it is drawn locally rather than issued, which is what lets
+ * a practice run start instantly instead of waiting on a round trip it does not
+ * need. From `crypto` rather than `Math.random`, so it is drawn the same way on
+ * every browser and not from a source the engines were kept clear of.
+ */
+export const getTetrisPracticeSeed = (): number => {
+  const drawn = globalThis.crypto?.getRandomValues?.(new Uint32Array(1));
+  return drawn ? drawn[0] : (Date.now() >>> 0) ^ 0x9e3779b9;
+};
+
 export const isTetrisRewardRunAvailable = ({
   game,
   isVip,

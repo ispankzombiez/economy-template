@@ -152,7 +152,8 @@ export type EconomyWriteIntent =
   | "claim-play-ticket"
   | "buy-item"
   | "dev-mint-tickets"
-  | "submit-score";
+  | "submit-score"
+  | "run-seed";
 
 const GRANT_PREFIX = "Grant-Free-Run-";
 const START_FREE_PREFIX = "Start-Free-Run-";
@@ -214,7 +215,7 @@ export function writeNonce(): string {
  * errors — so this is a transport swap rather than a change every caller has to
  * understand.
  */
-async function postEconomyWrite({
+export async function postEconomyWrite({
   token,
   intent,
   actionId,

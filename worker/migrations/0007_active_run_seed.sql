@@ -1,0 +1,29 @@
+-- Nightshade Arcade — the bag seed the server issued for the open run.
+--
+-- ## Why this exists
+--
+-- Tetris seeded its piece bag from a hash of the UTC date. That was the only
+-- seed the worker could check: it re-derives the day from the clock, so a
+-- client-chosen number could not be verified and every honest run using one
+-- would be refused. The consequence was that every player, on every run, all
+-- day, was dealt the same pieces in the same order — the bag was a property of
+-- the calendar rather than of the run, which is both dull and a weaker check
+-- than it looks (nothing about the log had to be invented to match it).
+--
+-- So the seed is **issued**: drawn server-side when the run is opened, written
+-- here, and read back at claim time from this row rather than from the claim.
+--
+-- ## Why the ledger row is the right home for it
+--
+-- The same reasoning that put `cabinet` and `opened_at` here, and it is the
+-- only moment a binding cannot be rewritten: the claim arrives *after* play, so
+-- anything the claim carries is the browser's word. Drawing the number at run
+-- open and storing it here makes the seed a fact about the run — the client
+-- learns it, but cannot choose it, so a forged log has to reproduce pieces that
+-- were actually dealt.
+--
+-- Nullable, deliberately: a row written before this column existed has no seed,
+-- and a seeded cabinet must refuse such a run rather than fall back to
+-- re-deriving one from the clock. That fallback would silently reintroduce
+-- exactly the shared bag this column exists to remove.
+ALTER TABLE active_runs ADD COLUMN seed INTEGER;

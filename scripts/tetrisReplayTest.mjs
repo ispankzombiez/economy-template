@@ -625,13 +625,12 @@ if (winRun) {
   let parityChecked = 0;
   let parityFailure = null;
 
-  const clientState = startTetrisReplay(
-    validateTetrisReplay({
-      difficulty: easiest.name,
-      ticks: bytes.length,
-      inputs: bytesToWire(bytes),
-    }),
-  );
+  const validated = validateTetrisReplay({
+    difficulty: easiest.name,
+    ticks: bytes.length,
+    inputs: bytesToWire(bytes),
+  });
+  const clientState = startTetrisReplay(validated, getTetrisDaySeed());
   stepTetrisReplay(clientState, Number.MAX_SAFE_INTEGER);
   const workFinal = clientState.match;
 
@@ -678,7 +677,7 @@ if (winRun) {
   for (let start = 0; start < bytes.length; start += CHUNK_TICKS) {
     const window = Uint8Array.from(bytes.slice(start, start + CHUNK_TICKS));
     if (start === 0) {
-      state = openTetrisChunkReplay({ difficulty: easiest.name, inputs: window });
+      state = openTetrisChunkReplay({ seed: getTetrisDaySeed(), difficulty: easiest.name, inputs: window });
     } else {
       // The park grows by exactly the ticks it receives — see appendChunkInputs.
       state.inputs = Uint8Array.from([...state.inputs, ...window]);
@@ -737,7 +736,7 @@ if (winRun) {
     for (let start = 0; start < bytes.length - CHUNK_TICKS; start += CHUNK_TICKS) {
       const window = Uint8Array.from(bytes.slice(start, start + CHUNK_TICKS));
       if (start === 0) {
-        streamed.push(openTetrisChunkReplay({ difficulty: easiest.name, inputs: window }));
+        streamed.push(openTetrisChunkReplay({ seed: getTetrisDaySeed(), difficulty: easiest.name, inputs: window }));
       } else {
         streamed[0].inputs = Uint8Array.from([...streamed[0].inputs, ...window]);
         streamed[0].total = streamed[0].inputs.length;
@@ -851,6 +850,7 @@ if (winRun) {
       ticks: cut.length,
       inputs: bytesToWire(cut),
     }),
+    getTetrisDaySeed(),
   );
   stepTetrisReplay(cutState, Number.MAX_SAFE_INTEGER);
   const cutOutcome = tetrisOutcome(cutState);
@@ -869,6 +869,7 @@ if (winRun) {
       ticks: padded.length,
       inputs: bytesToWire(padded),
     }),
+    getTetrisDaySeed(),
   );
   stepTetrisReplay(paddedState, Number.MAX_SAFE_INTEGER);
   check(
@@ -903,6 +904,7 @@ if (winRun) {
         ticks: lossRun.bytes.length,
         inputs: bytesToWire(lossRun.bytes),
       }),
+      getTetrisDaySeed(),
     );
     stepTetrisReplay(state, Number.MAX_SAFE_INTEGER);
     const outcome = tetrisOutcome(state);
@@ -1045,6 +1047,7 @@ if (winRun) {
         ticks: winRun.bytes.length,
         inputs: bytesToWire(winRun.bytes),
       }),
+      getTetrisDaySeed(),
     );
     const twice = startTetrisReplay(
       validateTetrisReplay({
@@ -1052,6 +1055,7 @@ if (winRun) {
         ticks: winRun.bytes.length,
         inputs: bytesToWire(winRun.bytes),
       }),
+      getTetrisDaySeed(),
     );
     stepTetrisReplay(once, Number.MAX_SAFE_INTEGER);
     stepTetrisReplay(twice, Number.MAX_SAFE_INTEGER);

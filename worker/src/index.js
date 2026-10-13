@@ -1784,14 +1784,31 @@ async function settleAttempt(env, nonce, state, detail) {
  * DO UPDATE` rather than a plain insert, because a player may open a second run
  * while the first is still unsettled and the newest open is the one the next
  * claim belongs to.
+ *
+ * ## The seed it also draws
+ *
+ * The bag seed for the run, from `crypto.getRandomValues` rather than anything
+ * derived from the clock. It is issued here for the same reason the cabinet is
+ * recorded here: this is the one request made before any play, so a number
+ * chosen here cannot be rewritten by the claim that follows. The client is told
+ * the seed so it can deal the same pieces — told, not asked.
+ *
+ * Re-opening draws a fresh seed, which is correct: the older run's voucher was
+ * consumed by the newer open, so the two runs are not the same run.
  */
 async function recordActiveRun(env, farmId, cabinet) {
+  const openedAt = Date.now();
+  const seed = crypto.getRandomValues(new Uint32Array(1))[0];
+
   await env.LEDGER.prepare(
-    `INSERT INTO active_runs (farm_id, cabinet, opened_at) VALUES (?, ?, ?)
-     ON CONFLICT(farm_id) DO UPDATE SET cabinet = excluded.cabinet, opened_at = excluded.opened_at`,
+    `INSERT INTO active_runs (farm_id, cabinet, opened_at, seed) VALUES (?, ?, ?, ?)
+     ON CONFLICT(farm_id) DO UPDATE SET
+       cabinet = excluded.cabinet, opened_at = excluded.opened_at, seed = excluded.seed`,
   )
-    .bind(farmId, cabinet, Date.now())
+    .bind(farmId, cabinet, openedAt, seed)
     .run();
+
+  return { runKey: openedAt, cabinet, seed };
 }
 
 /**
@@ -1805,7 +1822,7 @@ async function recordActiveRun(env, farmId, cabinet) {
  */
 async function readActiveRun(env, farmId) {
   const row = await env.LEDGER.prepare(
-    `SELECT cabinet, opened_at FROM active_runs WHERE farm_id = ?`,
+    `SELECT cabinet, opened_at, seed FROM active_runs WHERE farm_id = ?`,
   )
     .bind(farmId)
     .first();
@@ -1814,7 +1831,14 @@ async function readActiveRun(env, farmId) {
   // a second query would risk the two disagreeing if a run were opened between
   // them, and it is used as the identity of a parked replay, where a torn read
   // would resume one run's state against another run's inputs.
-  return row ? { cabinet: row.cabinet, runKey: row.opened_at } : null;
+  // `seed` is null for a row written before the column existed, and is *not*
+  // backfilled from the clock. A seeded cabinet refuses such a run outright: a
+  // day hash here would hand back the one shared bag the column exists to
+  // replace, and a run verified against a seed the client can predict is not a
+  // certified run.
+  return row
+    ? { cabinet: row.cabinet, runKey: row.opened_at, seed: row.seed ?? null }
+    : null;
 }
 
 /** Drop the binding once the run has been settled, so it cannot be reused. */
@@ -2226,7 +2250,7 @@ async function intentClaimResult({ session, env, farmId }) {
  *                                 than an assertion.
  * @returns {Promise<{ matched: boolean|null, reason: string|null }>}
  */
-async function runReplayVerification({ env, farmId, payload, cabinet, claimScore, runKey }) {
+async function runReplayVerification({ env, farmId, payload, cabinet, claimScore, runKey, runSeed }) {
   // Which engine steps this replay is decided by the cabinet the run was
   // opened on — the same binding the claim itself is checked against — and not
   // by anything in the payload.
@@ -2290,7 +2314,7 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
       total: validated.total,
     };
   } else {
-    state = engine.start(payload.replay);
+    state = engine.start(payload.replay, engine.seeded ? runSeed : undefined);
   }
 
   try {
@@ -2741,6 +2765,13 @@ const TICK_ENGINES = {
     openChunk: openTetrisChunkReplay,
     step: stepTetrisReplay,
     outcome: tetrisOutcome,
+    // The bag is drawn by this cabinet's own RNG, and its seed is *issued*: read
+    // from `active_runs.seed` rather than taken from the request. The flag is
+    // what says so, because the chunk path is shared — Pac-Man and the brawler
+    // have no bag of their own and still read `payload.seed`, and quietly
+    // switching them to a nullable ledger column would hand them a null seed
+    // without anyone noticing until their replays started disagreeing.
+    seeded: true,
   },
 };
 
@@ -2813,6 +2844,11 @@ async function intentClaimVerified({ session, env, payload, farmId }) {
     cabinet: cabinetId,
     claimScore: claimedScore,
     runKey: openedOn.runKey,
+    // From the ledger, never from `payload`. The seed is a fact about the run,
+    // fixed when the run opened; letting the claim name it would let a player
+    // deal a bag they chose and then be checked against it, which is the one
+    // thing a replay cannot be trusted to do.
+    runSeed: openedOn.seed,
   });
 
   if (replayVerdict.inProgress === true) {
@@ -2922,7 +2958,7 @@ async function intentVerifyChunk({ env, farmId, payload }) {
   if (openedOn === null || !STREAMED_CABINETS.has(openedOn.cabinet)) {
     throw new HttpError(400, "No streamed run is open on that cabinet.");
   }
-  const { runKey, cabinet } = openedOn;
+  const { runKey, cabinet, seed: runSeed } = openedOn;
   const engine = tickEngineFor(cabinet);
 
   let inputs;
@@ -2976,12 +3012,20 @@ async function intentVerifyChunk({ env, farmId, payload }) {
     // run that this write overwrites. The engine context (seed, champion,
     // difficulty) rides on the window that opens the run; every later window
     // inherits it from the park.
+    //
+    // The seed is the ledger's, not `payload.seed`, for an engine that draws its
+    // own randomness. Window 0 is still a request the browser composed, and
+    // taking its seed would let a client deal a bag it chose and then stream a
+    // log that faithfully reproduces it — a replay that agrees with itself. The
+    // run's bag was issued when the run opened. Engines without a bag of their
+    // own keep reading `payload.seed`, which for them is not a choice: they have
+    // no randomness to choose.
     if (chunkIndex !== 0) {
       throw new HttpError(400, "First chunk must be chunkIndex 0.");
     }
     try {
       replay = engine.openChunk({
-        seed: payload?.seed,
+        seed: engine.seeded ? runSeed : payload?.seed,
         playerId: payload?.playerId,
         difficulty: payload?.difficulty,
         inputs,
@@ -3402,7 +3446,70 @@ const INTENTS = {
   "buy-item": intentBuyItem,
   "dev-mint-tickets": intentDevMintTickets,
   "submit-score": intentSubmitScore,
+  "run-seed": intentRunSeed,
 };
+
+/**
+ * Cabinets whose randomness is **issued** — drawn here at run-open, stored in
+ * `active_runs.seed`, and read back from there by the claim and by every chunk.
+ *
+ * A cabinet joins this when its engine has randomness that materially decides the
+ * run, because only then is a seed something worth making unforgeable. One that
+ * does not (Pac-Man has no RNG; the turn-based cabinets draw no pieces) gains
+ * nothing but a round trip and a column to keep backfilled, so it keeps deriving
+ * whatever it derives and reading `payload.seed` as before.
+ */
+const SEEDED_CABINETS = new Set(["tetris"]);
+
+/**
+ * Hand the client the bag seed this worker issued for the run that is open.
+ *
+ * ## Why a read, and not an echo of what the claim sent
+ *
+ * The seed is drawn when the run is *opened* and stored in `active_runs`, which
+ * is the same moment-and-row the cabinet binding is fixed in for the same
+ * reason: it is the last point at which nothing the player controls has been
+ * said about this run. Once play starts the seed has to reach the browser —
+ * there is no other way it can deal the pieces the server will later replay —
+ * and the only honest way to deliver it is to *read* it rather than to accept
+ * it.
+ *
+ * ## What this is not
+ *
+ * Not a way to pick a seed. A request that names one is ignored: this returns
+ * the ledger's number or refuses, and `verify-chunk` and `claim-verified` both
+ * read the same column. A client that dealt a bag of its own choosing and
+ * streamed a log faithfully reproducing it has produced a replay that agrees
+ * with itself, which is exactly what this column exists to make impossible.
+ *
+ * ## Why it costs nothing
+ *
+ * It touches no economy and mints nothing, so it takes no ledger slot and runs
+ * no `callEconomy`. It is a read of a row the player already owns.
+ */
+function intentRunSeed({ farmId, env }) {
+  return {
+    async run() {
+      const openedOn = await readActiveRun(env, farmId);
+      if (openedOn === null) {
+        throw new HttpError(400, "No run is open. Start one before asking for its seed.");
+      }
+      if (!SEEDED_CABINETS.has(openedOn.cabinet)) {
+        // Refused rather than answered with a number nobody will use. It also
+        // keeps this intent from being a cabinet *oracle* for a farm with an open
+        // run, which would tell a caller which machine the player is sitting at.
+        throw new HttpError(400, "That cabinet's runs are not seeded by the server.");
+      }
+      if (openedOn.seed === null) {
+        throw new HttpError(
+          400,
+          "This run was opened before the server issued seeds and cannot be verified. Open a new run.",
+        );
+      }
+      return { seed: openedOn.seed, runKey: openedOn.runKey, cabinet: openedOn.cabinet };
+    },
+  };
+}
 
 /**
  * `POST /economy/write` — the only way anything moves in this economy.

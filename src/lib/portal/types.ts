@@ -133,6 +133,8 @@ export type MinigameActionResponse = {
   playerEconomy: MinigameSessionResponse["playerEconomy"];
   generatorJobId?: string;
   collectGrants?: { token: string; amount: number }[];
+  /** Seed the server issued for the run that is open. Present only on `run-seed`. */
+  run?: { seed: number; runKey: number; cabinet: string };
 };
 
 export type BootstrapContext = {

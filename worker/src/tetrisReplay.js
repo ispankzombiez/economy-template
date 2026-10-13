@@ -575,15 +575,40 @@ function validateTetrisReplay(replay) {
   return { difficulty, inputs };
 }
 
-/** A replay begun from tick zero — a claim with no park to resume. */
-function startTetrisReplay(validated) {
-  const state = createRuntime(validated.difficulty, daySeedOf(Date.now()));
+/**
+ * A replay begun from tick zero — a claim with no park to resume.
+ *
+ * `seed` is the number the server issued for this run, read from `active_runs`
+ * at claim time. It is never taken from the claim: the claim is the browser's
+ * word, and a seed the client picks is one the client can also satisfy, which
+ * would make the replay a restatement of the request rather than a check on it.
+ */
+function startTetrisReplay(validated, seed) {
+  const state = createRuntime(validated.difficulty, assertRunSeed(seed));
   return {
     match: state,
     inputs: validated.inputs,
     cursor: 0,
     total: validated.inputs.length,
   };
+}
+
+/**
+ * The issued seed, or a refusal.
+ *
+ * A row written before `active_runs.seed` existed has none, and there is no
+ * fallback to the old day hash: that would hand back the one shared bag the
+ * column exists to remove, and verify the run against a seed anyone could work
+ * out. Better to refuse the run and say why.
+ */
+function assertRunSeed(seed) {
+  const numeric = Number(seed);
+  if (!Number.isInteger(numeric) || numeric < 0 || numeric > 0xffffffff) {
+    throw new ReplayInputError(
+      "This run has no server-issued seed; it was opened before seeding and cannot be verified.",
+    );
+  }
+  return numeric;
 }
 
 /**
@@ -607,16 +632,22 @@ function assertInputBytes(inputs, what) {
 /**
  * Open a park on the first window.
  *
- * The bag seed comes from the *day the difficulty belongs to*, not from now —
- * a first chunk for yesterday's difficulty must deal yesterday's bag, or a run
- * that started before midnight would be checked against today's pieces.
+ * The bag seed is the one the server issued for this run (`active_runs.seed`),
+ * passed in rather than re-derived. It used to come from the *day the difficulty
+ * belongs to*, which meant every player, every run, all day, was dealt the same
+ * pieces in the same order — and left nothing for a forged log to have invented,
+ * since the sequence was a property of the calendar.
+ *
+ * The difficulty is still resolved by name and by day: it is the shared daily
+ * target score, not per-run, so a run that straddles UTC midnight keeps playing
+ * yesterday's challenge and is checked against it.
  *
  * `inputs instanceof Uint8Array`, not `Array.isArray`: the chunk arrives from
  * `decodeInputLog`, which returns a typed array, and `Array.isArray` answers
  * `false` for one. That check would refuse every real window — and a refusal
  * here is silent, because the client sees only a broken stream and retries.
  */
-function openTetrisChunkReplay({ difficulty, inputs }) {
+function openTetrisChunkReplay({ seed, difficulty, inputs }) {
   if (typeof difficulty !== "string") {
     throw new ReplayInputError("First chunk carries no difficulty.");
   }
@@ -631,10 +662,7 @@ function openTetrisChunkReplay({ difficulty, inputs }) {
   assertInputBytes(inputs, "The first chunk's");
 
   const resolved = difficultyForClaim(difficulty);
-  const state = createRuntime(
-    resolved.difficulty,
-    daySeedOf(resolved.now),
-  );
+  const state = createRuntime(resolved.difficulty, assertRunSeed(seed));
 
   return {
     match: state,

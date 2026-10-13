@@ -24,10 +24,11 @@ import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { useBootstrap } from "lib/portal/BootstrapContext";
-import { getEconomyWorkerUrl, writeNonce } from "lib/portal/api";
+import { getEconomyWorkerUrl, writeNonce, postEconomyWrite } from "lib/portal/api";
 import {
   getTetrisDaySeed,
   getTetrisDifficulty,
+  getTetrisPracticeSeed,
   isTetrisRewardRunAvailable,
   TETRIS_DIFFICULTIES,
   TETRIS_RAVEN_COIN_REWARD,
@@ -196,6 +197,22 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
 
   const held = useHeldKeys();
 
+  // Read the bag seed the server issued for the run that is open.
+  // Returns null on any error — the caller decides what to do (practice falls back to local).
+  const fetchRunSeed = useCallback(async (jwt: string | undefined): Promise<number | null> => {
+    if (!jwt) return null;
+    try {
+      const res = await postEconomyWrite({
+        token: jwt,
+        intent: "run-seed",
+      });
+      if (!res.data?.run?.seed) return null;
+      return Number(res.data.run.seed);
+    } catch {
+      return null;
+    }
+  }, []);
+
   const returnToMenu = useCallback(() => {
     setShowExitConfirm(false);
     setMode(null);
@@ -213,7 +230,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   }, [returnToMenu, runtime?.gameOver]);
 
   const startSession = useCallback(
-    (
+    async (
       nextMode: TetrisMode,
       practiceDifficultyOverride?: TetrisDifficultyName,
     ) => {
@@ -233,13 +250,25 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       // first render (through its snapshot): two `createRuntime` calls would be
       // two games, and the claim would describe the one nobody played.
       //
-      // The seed is the day's own, not a fresh random one. The worker derives
-      // the difficulty from the UTC date and only accepts today's or
-      // yesterday's, so a client-chosen bag seed could not be re-derived and
-      // every honest run would be refused; the date hash is what both ends
-      // agree on. It is baked into the runtime rather than passed per step, so
-      // a park resumed after midnight keeps dealing from the run's own bag.
-      const fresh = createRuntime(runDifficulty, getTetrisDaySeed());
+      // Reward run: the bag seed is *issued* by the server at run-open and read
+      // back here. Practice: a local seed, because it is never verified.
+      // The seed is baked into the runtime rather than passed per step, so a
+      // park resumed after midnight keeps dealing from the run's own bag.
+      let bagSeed: number;
+      if (nextMode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          // The server has no seed for this run (opened before seeding, or no
+          // run open at all). In practice this should not happen on a fresh
+          // open, but if it does we refuse rather than guessing.
+          setVerifyDiag("No server seed for this run; open a new run.");
+          return;
+        }
+        bagSeed = issued;
+      } else {
+        bagSeed = getTetrisPracticeSeed();
+      }
+      const fresh = createRuntime(runDifficulty, bagSeed);
       gameRef.current = fresh;
       setRuntime({ ...fresh });
 
@@ -278,7 +307,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         });
       }
     },
-    [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
+    [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty, bootstrap, fetchRunSeed],
   );
 
   // Free run first, then 1 burned Play Ticket per attempt — with the "are you
