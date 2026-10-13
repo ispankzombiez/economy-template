@@ -417,19 +417,30 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       const prevAt = lastFrameAtRef.current ?? ts;
       lastFrameAtRef.current = ts;
 
-      const game = gameRef.current;
+      let game = gameRef.current;
       if (!game) return;
 
       // Whole steps only, and never more simulated time than the tab was
       // actually allowed to elapse (the brawler's own clamp): a backgrounded
       // tab must not fast-forward the maze on return.
       accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // `game` is advanced *in place* through the loop. Reading the state once
+      // into a `const` before the loop and stepping that same value every
+      // iteration looks equivalent and is not: whenever a frame delivers more
+      // than one step of accumulated time — a stutter, a GC pause, a tab switch,
+      // anything the 250 ms clamp lets through — the second and later iterations
+      // re-step the *pre-loop* state, so the maze stops advancing while the log
+      // keeps recording a byte per iteration. The claim then asserts a run that
+      // never happened, the worker's replay steps one tick per byte from a
+      // correctly advancing engine, and the two diverge on the first hiccup.
       while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
         // Before the step, not after: the log records the direction the step
         // was taken *under*, which is what the worker feeds its own copy of
         // `tick`. Sampling afterwards would round a press and step apart.
         inputLogRef.current.push(codeFromDir(nextDirRef.current));
-        gameRef.current = tick(game, FIXED_STEP_MS, nextDirRef.current);
+        game = tick(game, FIXED_STEP_MS, nextDirRef.current);
+        gameRef.current = game;
         accumulatorRef.current -= FIXED_STEP_MS;
         pumpVerificationChunks();
         if (gameRef.current.gameOver) break;

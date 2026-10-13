@@ -163,11 +163,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const lastFrameAtRef = useRef<number | null>(null);
   const accumulatorRef = useRef(0);
 
-  // Held keys as one bitfield, exactly the byte the log records. The held bits
-  // are cleared on key-up; the four single-press bits are consumed by the step
-  // they landed on and never persist, because a rotation that happened "at some
-  // point" is not a claim the worker can check.
-  const inputRef = useRef(0);
+  // Held keys as one bitfield, exactly the byte the log records. The held bit is
+  // cleared on key-up; the press bits are consumed by the step they landed on
+  // and never persist, because a rotation that happened "at some point" is not a
+  // claim the worker can check.
   const heldRef = useRef(0);
   const pressRef = useRef(0);
 
@@ -243,7 +242,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       setActiveDifficulty(runDifficulty);
       setShowPracticeDifficultyPrompt(false);
       rewardGrantedRef.current = false;
-      inputRef.current = 0;
       heldRef.current = 0;
       pressRef.current = 0;
 
@@ -386,7 +384,15 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       const send = async () => {
         if (chunkBrokenRef.current) return;
         const jwt = bootstrap?.jwt;
-        if (!jwt) return;
+        if (!jwt) {
+          // The window's index has already been consumed, so this one is gone.
+          // Returning quietly would leave a hole in the stream and every later
+          // window would arrive at a cursor the park never reached — the run
+          // would then be refused for a reason invisible from the client.
+          chunkBrokenRef.current = true;
+          console.warn("[verify-chunk] no session token; stream abandoned");
+          return;
+        }
 
         try {
           const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
@@ -436,6 +442,11 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     const pumpVerificationChunks = () => {
       if (mode !== "reward") return;
       if (chunkBusyRef.current || chunkBrokenRef.current) return;
+      // Nothing to send until we are who we are sending as. The window index is
+      // consumed below, and an index consumed for a window that was never sent
+      // is a hole in the stream: every later window then arrives at a cursor the
+      // park never advanced to, and the whole run is refused.
+      if (!bootstrap?.jwt) return;
 
       const start = chunkIndexRef.current * CHUNK_TICKS;
       if (inputLogRef.current.length - start < CHUNK_TICKS) return;
@@ -512,13 +523,31 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       const prevAt = lastFrameAtRef.current ?? ts;
       lastFrameAtRef.current = ts;
 
-      const game = gameRef.current;
+      let game = gameRef.current;
       if (!game) return;
 
       // Whole steps only, and never more simulated time than the tab was
       // actually allowed to elapse (the brawler's own clamp): a backgrounded
       // tab must not fast-forward the board on return.
       accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // `game` is advanced *in place* through the loop, and this is the single
+      // most important line in the component.
+      //
+      // Reading the state once into a `const` before the loop and stepping that
+      // same value on every iteration looks equivalent and is not: whenever a
+      // frame delivers more than one step of accumulated time — a stutter, a GC
+      // pause, a tab switch, anything the 250 ms clamp lets through — the second
+      // and later iterations re-step the *pre-loop* state. The simulation stops
+      // advancing while the log keeps recording a byte per iteration, so the
+      // claim asserts a run that never happened. The worker's replay steps one
+      // tick per byte from a correctly advancing copy of the engine, so it
+      // diverges on the very first hiccup and every subsequent window lands at
+      // the wrong cursor.
+      //
+      // It hides at 60fps. A 16 ms step against a ~16 ms frame means the loop
+      // almost always runs exactly once, which is why a clean session verifies
+      // and a real one does not.
       while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
         // The single-press bits belong to exactly one step, so they are read
         // into the byte and cleared before the step rather than after: a press
@@ -526,16 +555,15 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         // two.
         const inputByte = heldRef.current | pressRef.current;
         pressRef.current = 0;
-        inputRef.current = inputByte;
 
         // Before the step, not after: the log records the inputs the step was
         // taken *under*, which is what the worker feeds its own copy of `tick`.
         // Sampling afterwards would round a press and a step apart.
         inputLogRef.current.push(inputByte);
-        gameRef.current = tick(game, FIXED_STEP_MS, inputByte);
+        game = tick(game, FIXED_STEP_MS, inputByte);
+        gameRef.current = game;
         accumulatorRef.current -= FIXED_STEP_MS;
         pumpVerificationChunks();
-        if (gameRef.current.gameOver) break;
       }
 
       // The run may have ended on the step above — freeze it before the

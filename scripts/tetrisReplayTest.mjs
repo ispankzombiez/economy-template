@@ -1041,6 +1041,67 @@ if (winRun) {
     );
   }
 
+  // Multi-step frames: the accumulator must carry state forward.
+  //
+  // The first conversion of this cabinet stepped the *same* pre-loop state
+  // whenever a frame delivered more than one step of accumulated time, so a
+  // stutter or a GC pause silently froze the simulation while the log kept
+  // recording a byte per iteration. At 60fps that is invisible — a 16 ms step
+  // against a ~16 ms frame runs the loop body once — which is why it shipped and
+  // why the harness could not see it: every check above drives `tick` in a plain
+  // sequential loop and never models the frame loop that was wrong.
+  //
+  // So model it here, deliberately badly first: the reference below is what the
+  // component does when it is correct, and the check is that a burst of frames
+  // lands on the same state as the same number of steps taken one at a time.
+  {
+    const burst = (frameMs, totalMs, log) => {
+      let state = createRuntime(today, 77);
+      const recorded = [];
+      let elapsed = 0;
+      while (elapsed < totalMs) {
+        elapsed += frameMs;
+        state = (() => {
+          // One frame's worth of accumulated time, stepped as a batch.
+          let advanced = state;
+          let budget = Math.min(frameMs, 250);
+          while (budget >= FIXED_STEP_MS && !advanced.gameOver) {
+            recorded.push(log);
+            advanced = tick(advanced, FIXED_STEP_MS, log);
+            budget -= FIXED_STEP_MS;
+          }
+          return advanced;
+        })();
+      }
+      return { state, recorded };
+    };
+
+    const stepped = (count, input) => {
+      let state = createRuntime(today, 77);
+      const recorded = [];
+      for (let i = 0; i < count; i++) {
+        recorded.push(input);
+        state = tick(state, FIXED_STEP_MS, input);
+      }
+      return { state, recorded };
+    };
+
+    // 120 ms in one frame is seven steps at once; the same 120 ms a step at a
+    // time must reach an identical state.
+    const batched = burst(120, 120, INPUT_HARD_DROP);
+    const oneAtATime = stepped(7, INPUT_HARD_DROP);
+    check(
+      JSON.stringify(batched.state) === JSON.stringify(oneAtATime.state),
+      "a burst of steps in one frame lands where the same steps land singly",
+      `batched score ${batched.state.score} vs ${oneAtATime.state.score}`,
+    );
+    check(
+      batched.recorded.length === 7,
+      "a burst records one byte per step, not one byte per frame",
+      `recorded ${batched.recorded.length}`,
+    );
+  }
+
   // The input byte is a bitfield, and every bit a client may set is one a key
   // produces: the mask is exactly the seven inputs.
   check(
