@@ -49,10 +49,18 @@ export type TetrisRuntime = {
 /**
  * Input byte, one per tick: a bitfield of what the player was doing.
  *
- * Held keys (move, soft drop) are bits the player keeps set; the rest are
- * single presses sampled on exactly one tick, which is what makes them
- * replayable — a "rotate happened" flag with no tick attached would be a claim
- * about *when*, and the claim is what the worker re-derives.
+ * Every bit here is a *press* sampled on exactly one tick, except
+ * `INPUT_SOFT_DROP`, which the player keeps set for as long as they hold it —
+ * it accelerates the fall rather than nudging the piece, so its duration is the
+ * intent. The rest are consumed by the step they landed on and never persist,
+ * because "a rotation happened" with no tick attached would be a claim about
+ * *when*, and checking the claim is the whole job.
+ *
+ * `INPUT_LEFT` and `INPUT_RIGHT` are presses and not held states on purpose: one
+ * keydown moves the piece one cell, and a key held down slides only because the
+ * player (or the OS, on auto-repeat) presses it again. Recorded as held, the
+ * step function would slide one cell per step for the duration of the tap, and
+ * a press would travel several columns instead of one.
  */
 export const INPUT_LEFT = 1 << 0;
 export const INPUT_RIGHT = 1 << 1;

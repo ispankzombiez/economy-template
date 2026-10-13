@@ -992,6 +992,55 @@ if (winRun) {
     );
   }
 
+  // One press, one cell.
+  //
+  // This is the regression the first conversion of this cabinet shipped: LEFT
+  // was recorded as a *held* bit, so the step function slid one cell per 16 ms
+  // tick for as long as the bit survived, and an ordinary 100 ms tap shunted the
+  // piece six columns. The log still replayed perfectly — it is the same bytes
+  // either way — so nothing about verification caught it. Only a check that asks
+  // what a press *does* will.
+  {
+    const fresh = createRuntime(today, 4242);
+
+    const leftOnce = tick(fresh, FIXED_STEP_MS, INPUT_LEFT);
+    check(
+      leftOnce.active.x === fresh.active.x - 1,
+      "a single LEFT press moves the piece exactly one cell",
+      `moved ${fresh.active.x - leftOnce.active.x}`,
+    );
+
+    const rightOnce = tick(fresh, FIXED_STEP_MS, INPUT_RIGHT);
+    check(
+      rightOnce.active.x === fresh.active.x + 1,
+      "a single RIGHT press moves the piece exactly one cell",
+      `moved ${rightOnce.active.x - fresh.active.x}`,
+    );
+
+    const twice = tick(leftOnce, FIXED_STEP_MS, INPUT_LEFT);
+    check(
+      twice.active.x === fresh.active.x - 2,
+      "two presses in two ticks move it two cells",
+      `moved ${fresh.active.x - twice.active.x}`,
+    );
+
+    // An idle tick must not drift sideways: holding is the *player's* business,
+    // expressed as more presses, never the step function's.
+    const idle = tick(fresh, FIXED_STEP_MS, 0);
+    check(
+      idle.active.x === fresh.active.x,
+      "an idle tick does not move the piece sideways",
+    );
+
+    // And a press does not rotate, or bank, or drop.
+    check(
+      idle.active.rotation === fresh.active.rotation &&
+        idle.hold === fresh.hold &&
+        idle.gameOver === fresh.gameOver,
+      "an idle tick does not rotate, bank or drop",
+    );
+  }
+
   // The input byte is a bitfield, and every bit a client may set is one a key
   // produces: the mask is exactly the seven inputs.
   check(

@@ -61,6 +61,14 @@ const _portalState = (state: PortalMachineState) => state.context.state;
 
 const TILE_SIZE = 24;
 
+/**
+ * Keys the cabinet claims outright, so the page does not scroll or the host
+ * reacts to them.
+ *
+ * `Q` is deliberately absent: hold/swap is `X`, and an unbound key must stay
+ * unbound rather than being swallowed and doing nothing, which is what leaving
+ * it here would do.
+ */
 const INTERCEPTED_CODES = new Set([
   "ArrowLeft",
   "ArrowRight",
@@ -68,7 +76,6 @@ const INTERCEPTED_CODES = new Set([
   "ArrowDown",
   "KeyZ",
   "KeyX",
-  "KeyQ",
   "Space",
 ]);
 
@@ -286,46 +293,41 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       event.stopPropagation();
       event.stopImmediatePropagation();
 
-      // A repeat of a held key is not a new intent — the key is already down,
-      // and treating auto-repeat as a fresh press would log a rotation for every
-      // tick the OS decided to send one.
-      if (event.repeat) {
-        switch (event.code) {
-          case "ArrowLeft":
-            heldRef.current |= INPUT_LEFT;
-            break;
-          case "ArrowRight":
-            heldRef.current |= INPUT_RIGHT;
-            break;
-          case "ArrowDown":
-            heldRef.current |= INPUT_SOFT_DROP;
-            break;
-        }
-        return;
-      }
+      // Left and Right are *presses*, not held states: one keydown moves the piece
+      // exactly one cell, and a key held down slides only because the OS repeats
+      // it. Recording them as held bits instead — which is what the first cut of
+      // this conversion did — makes the step function move one cell per 16 ms
+      // tick for as long as the bit survives, so an ordinary 100 ms tap shunts
+      // the piece six columns and the cabinet stops feeling playable.
+      //
+      // Auto-repeat is therefore wanted for the arrows and unwanted for
+      // everything else: a player who leans on Left means to slide, but a
+      // rotation held down should not log one rotation per repeat tick.
+      const isRepeat = event.repeat;
 
       switch (event.code) {
         case "ArrowLeft":
-          heldRef.current |= INPUT_LEFT;
+          pressRef.current |= INPUT_LEFT;
           break;
         case "ArrowRight":
-          heldRef.current |= INPUT_RIGHT;
+          pressRef.current |= INPUT_RIGHT;
           break;
         case "ArrowDown":
+          // Soft drop is the one genuinely continuous input: it speeds the fall
+          // for as long as it is down, so it stays a held bit.
           heldRef.current |= INPUT_SOFT_DROP;
           break;
         case "ArrowUp":
-        case "KeyX":
-          pressRef.current |= INPUT_ROTATE_CW;
+          if (!isRepeat) pressRef.current |= INPUT_ROTATE_CW;
           break;
         case "KeyZ":
-          pressRef.current |= INPUT_ROTATE_CCW;
+          if (!isRepeat) pressRef.current |= INPUT_ROTATE_CCW;
           break;
-        case "KeyQ":
-          pressRef.current |= INPUT_HOLD;
+        case "KeyX":
+          if (!isRepeat) pressRef.current |= INPUT_HOLD;
           break;
         case "Space":
-          pressRef.current |= INPUT_HARD_DROP;
+          if (!isRepeat) pressRef.current |= INPUT_HARD_DROP;
           break;
       }
     };
@@ -337,16 +339,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       event.stopPropagation();
       event.stopImmediatePropagation();
 
-      switch (event.code) {
-        case "ArrowLeft":
-          heldRef.current &= ~INPUT_LEFT;
-          break;
-        case "ArrowRight":
-          heldRef.current &= ~INPUT_RIGHT;
-          break;
-        case "ArrowDown":
-          heldRef.current &= ~INPUT_SOFT_DROP;
-          break;
+      // Only soft drop survives a key-up; the arrows are single presses, consumed by
+      // the step they landed on, so there is nothing of theirs left to release.
+      if (event.code === "ArrowDown") {
+        heldRef.current &= ~INPUT_SOFT_DROP;
       }
     };
 
@@ -681,10 +677,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
               Left/Right to move, Down to soft drop, Space for hard drop.
             </div>
             <div className="mt-1">
-              Up or X rotates clockwise, Z rotates counter-clockwise.
+              Up rotates clockwise, Z rotates counter-clockwise.
             </div>
             <div className="mt-1">
-              Press Q to hold/swap your active piece once per drop.
+              Press X to hold/swap your active piece once per drop.
             </div>
           </InnerPanel>
 
@@ -889,9 +885,9 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   <div>Left / Right - Move</div>
                   <div>Down - Soft Drop</div>
                   <div>Space - Hard Drop</div>
-                  <div>Up or X - Rotate CW</div>
+                  <div>Up - Rotate CW</div>
                   <div>Z - Rotate CCW</div>
-                  <div>Q - Hold / Swap</div>
+                  <div>X - Hold / Swap</div>
                 </div>
               </div>
 
@@ -1021,14 +1017,14 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                rather than scrolled off. */
             <div className="order-5 md:order-3 sticky bottom-0 z-10 shrink-0 bg-slate-950/95 py-1 flex flex-col gap-1.5">
               {/* Row 1: HOLD on its own, above the rest.
-                  `Q` is hold on the keyboard and there was no touch route to it
+                  `X` is hold on the keyboard and there was no touch route to it
                   at all, so a player on a phone could not bank a piece — one of
                   the three decisions the game is built around. It sits above the
                   directional rows because it is the rarest press, so it should
                   not cost any of the space the thumb sweeps. */}
               <TouchButton
                 held={held}
-                code="KeyQ"
+                code="KeyX"
                 label={
                   <span className="flex items-center justify-center gap-1.5 leading-tight">
                     <span className="text-base">⇄</span>
