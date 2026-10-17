@@ -169,6 +169,24 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   /** The claim, frozen the instant the run settles — see `freezeClaim`. */
   const frozenClaimRef = useRef<VerifiedRun | null>(null);
 
+  /**
+   * The QUIT dialog's forfeit, requested by the button and settled by the
+   * loop.
+   *
+   * The run ends *inside* a step — wins, deaths and forfeits all pass through
+   * `gameRef` so the frozen claim, its log and the render's snapshot are read
+   * from one state of the run. A direct `setRuntime` from the dialog would
+   * flip the render while the loop kept stepping a different object. Same
+   * arrangement as `FroggerGame.tsx` and `GoblinInvadersGame.tsx`.
+   *
+   * A forfeited run is always a *loss* here, and the shape of that is the
+   * engine's doing: `tick` ends the run the moment `score >= targetScore`
+   * (engine.ts, the `won` block), so a run still in flight is by construction
+   * below the target — this settle therefore never claims, it only brings the
+   * run and its streamed windows to a clean end at the score actually played.
+   */
+  const forfeitRequestedRef = useRef(false);
+
   const chunkIndexRef = useRef(0);
   const chunkBusyRef = useRef(false);
   const chunkBrokenRef = useRef(false);
@@ -183,6 +201,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     gameRef.current = null;
     inputLogRef.current = [];
     frozenClaimRef.current = null;
+    forfeitRequestedRef.current = false;
     chunkDrainedRef.current = null;
   }, []);
 
@@ -217,6 +236,7 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       activeDifficultyRef.current = runDiff;
       inputLogRef.current = [];
       frozenClaimRef.current = null;
+      forfeitRequestedRef.current = false;
       accumulatorRef.current = 0;
       runStartedAtRef.current = Date.now();
       chunkIndexRef.current = 0;
@@ -424,6 +444,23 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       // actually allowed to elapse (the brawler's own clamp): a backgrounded
       // tab must not fast-forward the maze on return.
       accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // A forfeit from the QUIT dialog settles here, through the same door
+      // every other run end comes through — the loop, in place of `gameRef`,
+      // one frame after the button was pressed. Never a claim: the engine ends
+      // a run at the target inside its own step, so a live game is below it
+      // and `won` here is false by construction — the settle ends the run and
+      // its stream without ever asking the worker to mint for it.
+      if (forfeitRequestedRef.current && !game.gameOver) {
+        forfeitRequestedRef.current = false;
+        game = {
+          ...game,
+          gameOver: true,
+          won: game.score >= game.difficulty.targetScore,
+          reason: "Run forfeited.",
+        };
+        gameRef.current = game;
+      }
 
       // `game` is advanced *in place* through the loop. Reading the state once
       // into a `const` before the loop and stepping that same value every
@@ -996,30 +1033,48 @@ export const PacManGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
           </div>
         </div>
 
-        {/* Exit confirmation dialog */}
+        {/* Quit confirmation dialog. A reward run quits by *settling* — the
+            button hands the forfeit to the loop (see `forfeitRequestedRef`),
+            which ends the run at the score actually played and lets the banner
+            below announce it. Closing the popup directly instead would leave the
+            run and its streamed windows hanging mid-flight. Practice has no
+            proof and no economy behind it, so it still just leaves. */}
         {showExitConfirm && (
           <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
             <div className="w-full max-w-sm bg-slate-900 rounded border border-white/30 p-5 text-white space-y-4">
-              <div className="font-bold text-lg">Exit Bumpkin-Man?</div>
+              <div className="font-bold text-lg">
+                {mode === "reward" ? "Quit the run?" : "Exit Bumpkin-Man?"}
+              </div>
               <div className="text-sm text-slate-300">
-                Your progress will be lost.
+                {mode === "reward"
+                  ? "Your run ends here and counts as used. Only a run that reaches today's target pays out."
+                  : "Your progress will be lost."}
               </div>
               <div className="flex gap-3 justify-end">
                 <Button onClick={() => setShowExitConfirm(false)}>
-                  Cancel
+                  {mode === "reward" ? "KEEP PLAYING" : "Cancel"}
                 </Button>
                 <Button
                   onClick={() => {
+                    setShowExitConfirm(false);
+
+                    // The loop runs behind this dialog, so the run may have
+                    // settled while it was open — then there is nothing to
+                    // forfeit and only the run's own ending to show.
                     if (runtime?.gameOver) {
                       returnToMenu();
                       return;
                     }
 
-                    setShowExitConfirm(false);
+                    if (mode === "reward") {
+                      forfeitRequestedRef.current = true;
+                      return;
+                    }
+
                     onClose?.();
                   }}
                 >
-                  Exit
+                  {mode === "reward" ? "QUIT RUN" : "Exit"}
                 </Button>
               </div>
             </div>
