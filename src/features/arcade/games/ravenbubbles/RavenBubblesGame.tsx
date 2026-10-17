@@ -15,81 +15,90 @@ import { ITEM_DETAILS } from "../adapters/itemDetails";
 import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
+import { startAttempt, submitScore } from "../adapters/portalUtil";
+import { useBootstrap } from "lib/portal/BootstrapContext";
+import type { VerifiedRun } from "lib/portal/api";
+import {
+  writeNonce,
+  getEconomyWorkerUrl,
+  postEconomyWrite,
+} from "lib/portal/api";
+import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
+import { encodeInputLog } from "@nightshade/shared/anticheat/inputLog";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import {
-  COLS,
   getRavenBubblesDifficulty,
-  INITIAL_ROWS,
   isRavenBubblesRewardRunAvailable,
-  POINTS_PER_DROP,
-  POINTS_PER_POP,
   RAVEN_BUBBLES_DIFFICULTIES,
   RAVEN_BUBBLES_RAVEN_COIN_REWARD,
   type RavenBubblesDifficulty,
   type RavenBubblesDifficultyName,
   type RavenBubblesMode,
 } from "./session";
+import {
+  CEILING_SECONDS,
+  CEILING_THICKNESS,
+  DANGER_LINE_Y,
+  FIXED_STEP_MS,
+  MAX_GUIDE_PX,
+  MIN_CLUSTER,
+  PLAYFIELD_HEIGHT,
+  PLAYFIELD_WIDTH,
+  RADIUS,
+  SHOOTER_X,
+  SHOOTER_Y,
+  SHOTS_PER_DROP,
+  cellX,
+  cellY,
+  ceilingLimitY,
+  clampAim,
+  createRuntime,
+  encodeTick,
+  levelToAim,
+  tick,
+  touchesBubble,
+  type BubbleColor,
+  type RavenBubblesRuntime,
+} from "./engine";
+
+/**
+ * Raven Bubbles' cabinet shell — the reward plumbing, not the rules.
+ *
+ * ## Why this file shrank around `engine.ts`
+ *
+ * This is a tick-simulated cabinet now: the worker mints a Raven Coin only if
+ * its own re-run of the claimed session — `(difficulty, seed, inputs)` — ends
+ * `gameOver && won` at the score the claim asserts. Re-running needs one copy
+ * of the rules shared by both ends, which is `engine.ts`; what stays here is
+ * everything the server cannot and should not do: aiming with a pointer, the
+ * keyboard, the render, and the run's *transport* — reading the issued seed,
+ * writing one input byte per 16 ms step, streaming the log to the worker as it
+ * grows, and claiming only from the state the loop settled. The structure
+ * mirrors `GoblinInvadersGame.tsx` one-for-one for exactly the reasons its
+ * header gives: a whole-log shape cannot re-simulate a run this long inside one
+ * request, so the proof arrives as `verify-chunk` windows during play and parks
+ * between them.
+ *
+ * ## The seed, the log, and the claim
+ *
+ * Reward runs open with a `run-seed` intent against the server-issued run: the
+ * seed that fixes every `createBoard`/`pickNextColor` roll is read back, not
+ * invented (`fetchRunSeed`; a failed read stops the run with the seed-error
+ * card rather than starting a game that could never be paid). Practice keeps a
+ * local seed because it is never verified.
+ *
+ * Each step samples the input (the staged aim angle, the latched fire press),
+ * encodes it to its log byte *first*, then steps under the same value — so the
+ * byte on the left of `encodeTick` is exactly the input the step ran under. A
+ * win freezes the claim (`freezeClaim`) from the settled game before the
+ * render announces it, flushes the log's unwritten tail behind the windows
+ * already on the wire, and the payout effect waits for that tail to drain: the
+ * worker refuses a claim whose park holds less log than the claim asserts.
+ */
 
 const _portalState = (state: PortalMachineState) => state.context.state;
 
-// ── Board geometry ───────────────────────────────────────────────────────────
-/**
- * A hex grid: every row holds `COLS` bubbles and odd rows are shifted half a
- * bubble to the right, which is what makes the cluster maths (and the look)
- * the original game's.
- */
-const MAX_ROWS = 13;
-const RADIUS = 18;
-const DIAMETER = RADIUS * 2;
-const ROW_HEIGHT = RADIUS * Math.sqrt(3);
-/**
- * The ceiling slab, drawn in a band above row 0 so it is always visible.
- *
- * The grid has to start below it, or the slab would render off the top of the
- * playfield and be clipped away — which is how the ceiling came to be invisible
- * in the first place.
- */
-const CEILING_THICKNESS = 12;
-/** One radius wider than `COLS` bubbles so the shifted odd rows still fit. */
-const PLAYFIELD_WIDTH = COLS * DIAMETER + RADIUS;
-const PLAYFIELD_HEIGHT = 470 + CEILING_THICKNESS;
-const SHOOTER_X = PLAYFIELD_WIDTH / 2;
-const SHOOTER_Y = PLAYFIELD_HEIGHT - 32;
-/** A bubble resting on this row has crossed the line and ends the run. */
-const DANGER_ROW = 11;
-/** Longest the dotted aim guide is drawn, in px. */
-const MAX_GUIDE_PX = 240;
-/** Shots before the ceiling drops a row — the original's pressure valve. */
-const SHOTS_PER_DROP = 15;
-/**
- * Seconds before the ceiling drops a row regardless of how many shots were
- * fired.
- *
- * The shot counter alone lets a player stall indefinitely: sit and think for
- * five minutes and the ceiling never moves. This is the same drop on a second
- * trigger, so the pressure is on the clock as well as on the shooting. Whichever
- * comes first wins, and whichever fired resets the other.
- */
-const CEILING_SECONDS = 30;
-const SHOT_SPEED = 950;
-/** Longest a single physics substep may travel, in px. See the flight loop. */
-const MAX_STEP_PX = 5;
-/** Aim is measured from straight up, in radians. */
-const MIN_AIM = -1.15;
-const MAX_AIM = 1.15;
-const MIN_CLUSTER = 3;
-
-// ── Bubbles ──────────────────────────────────────────────────────────────────
-type BubbleColor = "Sunflower" | "Carrot" | "Pumpkin" | "Potato" | "Corn" | "Wheat";
-
-const BUBBLE_COLORS: BubbleColor[] = [
-  "Sunflower",
-  "Carrot",
-  "Pumpkin",
-  "Potato",
-  "Corn",
-  "Wheat",
-];
+// ── Bubbles (art only — the rules live in `engine.ts`) ───────────────────────
 
 /** The SFL crop art inside each bubble — the same theming Tetris uses. */
 const BUBBLE_IMAGES: Record<BubbleColor, string> = {
@@ -111,463 +120,10 @@ const BUBBLE_SHELL: Record<BubbleColor, string> = {
   Wheat: "#b45309",
 };
 
-type Cell = BubbleColor | null;
-type Grid = Cell[][];
-
-const emptyGrid = (): Grid =>
-  Array.from({ length: MAX_ROWS }, () => Array<Cell>(COLS).fill(null));
-
-/**
- * Every other row is shifted half a bubble to the right — the hex packing.
- *
- * The shift is measured **from the ceiling**, not from an absolute row number.
- * That is the whole trick behind a ceiling drop: every row moves down by one,
- * and if the stagger were absolute then every row would also flip parity and
- * the entire cluster would jump sideways by half a bubble. Measuring from the
- * ceiling means `(row - ceilingRow)` is unchanged by a drop and the cluster
- * descends as one rigid body, which is what the original does.
- */
-const isStaggered = (row: number, ceilingRow: number) =>
-  (((row - ceilingRow) % 2) + 2) % 2 === 1;
-
-const cellX = (row: number, col: number, ceilingRow: number) =>
-  RADIUS + col * DIAMETER + (isStaggered(row, ceilingRow) ? RADIUS : 0);
-const cellY = (row: number) =>
-  CEILING_THICKNESS + RADIUS + row * ROW_HEIGHT;
-
-/** The bottom of row 11 — the line the cluster must not reach. */
-const DANGER_LINE_Y = cellY(DANGER_ROW) + RADIUS;
-
-/**
- * The underside of the ceiling slab.
- *
- * The ceiling is a solid the shot bounces off, not just the row the
- * floating-bubbles check happens to anchor to. Without this the shot flew on up
- * past the real ceiling into the space behind it and bounced around up there
- * where nothing could ever reach it.
- */
-const ceilingLimitY = (ceilingRow: number) => cellY(ceilingRow) - RADIUS;
-
-/** The six hex neighbours of a cell, given the stagger from the ceiling. */
-function neighbours(
-  row: number,
-  col: number,
-  ceilingRow: number,
-): [number, number][] {
-  const deltas: [number, number][] = isStaggered(row, ceilingRow)
-    ? [
-        [0, -1],
-        [0, 1],
-        [-1, 0],
-        [-1, 1],
-        [1, 0],
-        [1, 1],
-      ]
-    : [
-        [0, -1],
-        [0, 1],
-        [-1, -1],
-        [-1, 0],
-        [1, -1],
-        [1, 0],
-      ];
-
-  return deltas
-    .map(([dr, dc]) => [row + dr, col + dc] as [number, number])
-    .filter(([r, c]) => r >= 0 && r < MAX_ROWS && c >= 0 && c < COLS);
-}
-
-/** Every empty cell a new bubble could land in: the row the ceiling is
- *  currently sitting on, plus the empty cells touching an existing bubble. */
-function snapCandidates(grid: Grid, ceilingRow: number): [number, number][] {
-  const seen = new Set<string>();
-  const out: [number, number][] = [];
-
-  const push = (row: number, col: number) => {
-    if (row < 0 || row >= MAX_ROWS || col < 0 || col >= COLS) return;
-    // Above the ceiling slab is solid: no bubble can come to rest up there.
-    if (row < ceilingRow) return;
-    if (grid[row][col]) return;
-    const key = `${row},${col}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    out.push([row, col]);
-  };
-
-  for (let col = 0; col < COLS; col++) push(ceilingRow, col);
-
-  for (let row = 0; row < MAX_ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      if (!grid[row][col]) continue;
-      for (const neighbour of neighbours(row, col, ceilingRow)) push(...neighbour);
-    }
-  }
-
-  return out;
-}
-
-/** The empty cell closest to a point — where a shot that hit something lands. */
-function nearestEmptyCell(
-  grid: Grid,
-  x: number,
-  y: number,
-  ceilingRow: number,
-): [number, number] | null {
-  let best: [number, number] | null = null;
-  let bestDistance = Infinity;
-
-  for (const [row, col] of snapCandidates(grid, ceilingRow)) {
-    const dx = cellX(row, col, ceilingRow) - x;
-    const dy = cellY(row) - y;
-    const distance = dx * dx + dy * dy;
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = [row, col];
-    }
-  }
-
-  return best;
-}
-
-/** Flood fill of the same-colour cluster a cell belongs to. */
-function clusterOf(
-  grid: Grid,
-  row: number,
-  col: number,
-  ceilingRow: number,
-): [number, number][] {
-  const color = grid[row]?.[col];
-  if (!color) return [];
-
-  const seen = new Set<string>([`${row},${col}`]);
-  const stack: [number, number][] = [[row, col]];
-  const cluster: [number, number][] = [];
-
-  while (stack.length) {
-    const [r, c] = stack.pop()!;
-    cluster.push([r, c]);
-
-    for (const [nr, nc] of neighbours(r, c, ceilingRow)) {
-      const key = `${nr},${nc}`;
-      if (seen.has(key) || grid[nr][nc] !== color) continue;
-      seen.add(key);
-      stack.push([nr, nc]);
-    }
-  }
-
-  return cluster;
-}
-
-/**
- * Bubbles no longer connected to the ceiling — they fall.
- *
- * `ceilingRow` is the row the ceiling is currently resting on, which moves down
- * one row every time the ceiling drops. Anchoring on row 0 instead would read a
- * post-drop board as nothing-but-floating and drop the whole cluster.
- */
-function floatingCells(grid: Grid, ceilingRow: number): [number, number][] {
-  const anchored = new Set<string>();
-  const stack: [number, number][] = [];
-
-  for (let col = 0; col < COLS; col++) {
-    if (grid[ceilingRow]?.[col]) {
-      anchored.add(`${ceilingRow},${col}`);
-      stack.push([ceilingRow, col]);
-    }
-  }
-
-  while (stack.length) {
-    const [row, col] = stack.pop()!;
-    for (const [nr, nc] of neighbours(row, col, ceilingRow)) {
-      const key = `${nr},${nc}`;
-      if (anchored.has(key) || !grid[nr][nc]) continue;
-      anchored.add(key);
-      stack.push([nr, nc]);
-    }
-  }
-
-  const floating: [number, number][] = [];
-  for (let row = 0; row < MAX_ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      if (grid[row][col] && !anchored.has(`${row},${col}`)) {
-        floating.push([row, col]);
-      }
-    }
-  }
-
-  return floating;
-}
-
-const coloursOnBoard = (grid: Grid): BubbleColor[] => {
-  const present = new Set<BubbleColor>();
-  for (const row of grid) {
-    for (const cell of row) {
-      if (cell) present.add(cell);
-    }
-  }
-  return BUBBLE_COLORS.filter((color) => present.has(color));
-};
-
-/** How many bubbles of one colour the board is holding. */
-function countOnBoard(grid: Grid, color: BubbleColor): number {
-  let total = 0;
-  for (const row of grid) {
-    for (const cell of row) {
-      if (cell === color) total++;
-    }
-  }
-  return total;
-}
-
-/**
- * The cells a shot can actually come to rest in.
- *
- * Traced from the shooter, bouncing off the walls exactly as a real shot does.
- * "Can this colour pop" is only worth asking if the player has an angle that
- * lands the bubble beside the pair — a triple buried in the middle of the
- * cluster is not a play, it is a coincidence, and offering it as one hands out
- * dead bubbles.
- */
-function landingCells(grid: Grid, ceilingRow: number): Set<string> {
-  const cells = new Set<string>();
-  const RAYS = 44;
-
-  for (let ray = 0; ray <= RAYS; ray++) {
-    const angle = -MAX_AIM + (ray / RAYS) * (MAX_AIM * 2);
-    let x = SHOOTER_X;
-    let y = SHOOTER_Y;
-    let dx = Math.sin(angle);
-    let dy = -Math.cos(angle);
-
-    for (let step = 0; step < 400; step++) {
-      x += dx * 4;
-      y += dy * 4;
-
-      if (x < RADIUS) {
-        x = RADIUS;
-        dx = -dx;
-      } else if (x > PLAYFIELD_WIDTH - RADIUS) {
-        x = PLAYFIELD_WIDTH - RADIUS;
-        dx = -dx;
-      }
-
-      const hitCeiling = y - RADIUS <= ceilingLimitY(ceilingRow);
-      let hitBubble = false;
-
-      if (!hitCeiling) {
-        for (let row = 0; row < MAX_ROWS && !hitBubble; row++) {
-          for (let col = 0; col < COLS && !hitBubble; col++) {
-            if (!grid[row][col]) continue;
-            const bx = cellX(row, col, ceilingRow) - x;
-            const by = cellY(row) - y;
-            if (bx * bx + by * by < (DIAMETER - 2) * (DIAMETER - 2)) {
-              hitBubble = true;
-            }
-          }
-        }
-      }
-
-      if (hitCeiling || hitBubble) {
-        const cell = nearestEmptyCell(grid, x, y, ceilingRow);
-        if (cell) cells.add(cell[0] + "," + cell[1]);
-        break;
-      }
-    }
-  }
-
-  return cells;
-}
-
-/**
- * Colours the player could actually complete with the shot they are holding.
- *
- * Walks the cells {@link landingCells} can reach and asks, for each colour still
- * on the board, whether putting it there would pop.
- */
-function completableColours(grid: Grid, ceilingRow: number): BubbleColor[] {
-  const present = coloursOnBoard(grid);
-  const found = new Set<BubbleColor>();
-
-  for (const key of landingCells(grid, ceilingRow)) {
-    const [row, col] = key.split(",").map(Number);
-
-    for (const color of present) {
-      if (found.has(color)) continue;
-
-      const scratch = grid.map((line) => [...line]);
-      scratch[row][col] = color;
-      if (clusterOf(scratch, row, col, ceilingRow).length >= MIN_CLUSTER) {
-        found.add(color);
-      }
-    }
-  }
-
-  return present.filter((color) => found.has(color));
-}
-
-/**
- * The colour the shooter hands out next.
- *
- * Restricted to colours that are actually on the board (a colour nothing else
- * uses is a wasted shot), and then weighted towards the ones the player can act
- * on right now.
- *
- * The weighting is deliberately not exclusive. A colour with one or two bubbles
- * left can never complete a triple by itself, so a pool of only playable colours
- * strands it for good: it can never be matched, so it can never be cleared, and
- * the ceiling eventually wins the run. Every colour still on the board stays in
- * the pool at roughly a quarter of the weight, which keeps a lone bubble
- * reachable without handing out dead shots most of the time.
- *
- * Without any bias at all the cabinet is unwinnable rather than merely hard, so
- * this is the compromise: playable colours dominate the queue, and nothing on
- * the board is ever stranded by it.
- */
-function pickNextColor(
-  grid: Grid,
-  ceilingRow: number,
-  exclude?: BubbleColor,
-): BubbleColor {
-  const present = coloursOnBoard(grid).filter((color) => color !== exclude);
-
-  if (present.length === 0) {
-    return BUBBLE_COLORS[Math.floor(Math.random() * BUBBLE_COLORS.length)];
-  }
-
-  const live = completableColours(grid, ceilingRow).filter((color) =>
-    present.includes(color),
-  );
-
-  // Colours that cannot complete themselves carry the same weight as playable
-  // ones. Fewer than MIN_CLUSTER bubbles of a colour on the board means the
-  // queue can never complete it alone, so it is exactly the colour that would
-  // otherwise sit there forever while the ceiling closes in — the lone Corn of
-  // the original report. Dealing it on a par with a playable colour is what
-  // guarantees the loop closes: two of them make a pair, the third pops it.
-  const stranded = present.filter(
-    (color) => countOnBoard(grid, color) < MIN_CLUSTER && !live.includes(color),
-  );
-
-  const pool = [
-    ...live,
-    ...live,
-    ...live,
-    ...stranded,
-    ...stranded,
-    ...stranded,
-    ...present,
-  ];
-
-  return pool[Math.floor(Math.random() * pool.length)];
-}
-
-/**
- * A fresh board, used for the opening deal and for every refill.
- *
- * Dealt in small clumps — one or two bubbles of a colour at a time — so the
- * board is full of loose singles and pairs and the player assembles the three
- * themselves. That is the actual game: bigger clumps hand out free triples, the
- * cluster never grows a floor, and the ceiling never gets to matter.
- *
- * Clumping at all, even this little, is load-bearing. Filling cell-by-cell at
- * random does not work either: with six colours the chance that any given cell
- * and two of its neighbours agree is 1 in 36, so a board of fifty contains
- * roughly one accidental triplet — and a board with no triplets in it has no
- * plays at all. Every shot then just snaps a bubble onto the floor of the
- * cluster and pushes it down a row, and the line is crossed within ten shots no
- * matter how well the player aims. Pairs are enough: one lands against the pair
- * and makes the three.
- */
-function createBoard(): Grid {
-  const grid = emptyGrid();
-  const inDeal = (row: number, col: number) =>
-    row >= 0 && row < INITIAL_ROWS && col >= 0 && col < COLS;
-
-  for (let row = 0; row < INITIAL_ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      if (grid[row][col]) continue;
-
-      const color = BUBBLE_COLORS[Math.floor(Math.random() * BUBBLE_COLORS.length)];
-      // One or two. Bigger clumps hand the player free triples and the run turns
-      // into a formality — every shot pops, the cluster never grows a floor, and
-      // the ceiling never gets to matter. At one or two, the board is made of
-      // loose singles and pairs and the player has to build the three themselves,
-      // which is the actual game.
-      const size = 1 + Math.floor(Math.random() * 2);
-
-      grid[row][col] = color;
-      const candidates = neighbours(row, col, 0).filter(
-        ([r, c]) => inDeal(r, c) && !grid[r][c],
-      );
-
-      // Grow the clump one cell at a time, so it stays compact instead of
-      // trailing off in a line.
-      for (let placed = 1; placed < size && candidates.length > 0; placed++) {
-        const index = Math.floor(Math.random() * candidates.length);
-        const [r, c] = candidates.splice(index, 1)[0];
-        if (grid[r][c]) continue;
-
-        grid[r][c] = color;
-        for (const [nr, nc] of neighbours(r, c, 0)) {
-          if (inDeal(nr, nc) && !grid[nr][nc]) candidates.push([nr, nc]);
-        }
-      }
-    }
-  }
-
-  return grid;
-}
-
-const touchesBubble = (
-  grid: Grid,
-  x: number,
-  y: number,
-  ceilingRow: number,
-): boolean => {
-  const reach = DIAMETER - 2;
-  for (let row = 0; row < MAX_ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      if (!grid[row][col]) continue;
-      const dx = cellX(row, col, ceilingRow) - x;
-      const dy = cellY(row) - y;
-      if (dx * dx + dy * dy < reach * reach) return true;
-    }
-  }
-  return false;
-};
-
-const clampAim = (angle: number) => Math.min(MAX_AIM, Math.max(MIN_AIM, angle));
-
-/**
- * Shift the whole cluster down one row.
- *
- * The caller moves the ceiling with it. The hex stagger is measured from the
- * ceiling ({@link isStaggered}), so descending does not also slide the cluster
- * sideways — it moves as one piece, which is the whole reason the stagger is
- * relative.
- */
-const dropCeilingOnce = (grid: Grid): Grid => {
-  const shifted = emptyGrid();
-  for (let row = 0; row < MAX_ROWS - 1; row++) {
-    for (let col = 0; col < COLS; col++) {
-      shifted[row + 1][col] = grid[row][col];
-    }
-  }
-  return shifted;
-};
-
-/** Has anything come to rest on or below the line? */
-const hasCrossedTheLine = (grid: Grid): boolean =>
-  grid.some((row, rowIndex) => rowIndex >= DANGER_ROW && row.some(Boolean));
-
-/** Is the field completely empty? */
-const isBoardEmpty = (grid: Grid): boolean =>
-  grid.every((row) => row.every((cell) => cell === null));
-
 /** One bubble: a glossy shell with the crop art inside. */
 const Bubble: React.FC<{ color: BubbleColor; size?: number }> = ({
   color,
-  size = DIAMETER,
+  size = RADIUS * 2,
 }) => (
   <div
     className="rounded-full border border-black/40 flex items-center justify-center"
@@ -591,15 +147,14 @@ const Bubble: React.FC<{ color: BubbleColor; size?: number }> = ({
   </div>
 );
 
+/**
+ * Where the run is, as one word for the handlers and the render.
+ *
+ * The engine has no `status` field — `shot: null` *is* aiming, and
+ * `gameOver`/`won` carry the endings — so this derives it rather than
+ * duplicating a status the step would then have to keep in sync.
+ */
 type ShotStatus = "aiming" | "shooting" | "won" | "lost";
-
-type Shot = {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  color: BubbleColor;
-};
 
 export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   onClose,
@@ -607,6 +162,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState });
+  const bootstrap = useBootstrap();
 
   const hasRewardRun = useMemo(
     () => isRavenBubblesRewardRunAvailable({ game: portalGameState, isVip }),
@@ -615,32 +171,32 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
 
   const todaysDifficulty = useMemo(() => getRavenBubblesDifficulty(), []);
 
+  const isTouchDevice = useMemo(
+    () =>
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(pointer: coarse)").matches,
+    [],
+  );
+
   const [mode, setMode] = useState<RavenBubblesMode | null>(null);
-  const [grid, setGrid] = useState<Grid>(() => createBoard());
-  const [score, setScore] = useState(0);
-  const [current, setCurrent] = useState<BubbleColor>("Sunflower");
-  const [next, setNext] = useState<BubbleColor>("Carrot");
-  const [shotsLeft, setShotsLeft] = useState(SHOTS_PER_DROP);
-  /** Grid row the ceiling is currently resting on; it drops one row at a time. */
-  const [ceilingRow, setCeilingRow] = useState(0);
-  const [status, setStatus] = useState<ShotStatus>("aiming");
-  const [aim, setAim] = useState(0);
-  const [movingBubble, setMovingBubble] = useState<{
-    x: number;
-    y: number;
-    color: BubbleColor;
-  } | null>(null);
-  const [activeDifficulty, setActiveDifficulty] =
-    useState<RavenBubblesDifficulty>(todaysDifficulty);
+  const [runtime, setRuntime] = useState<RavenBubblesRuntime | null>(null);
   const [practiceDifficultyName, setPracticeDifficultyName] =
     useState<RavenBubblesDifficultyName>(todaysDifficulty.name);
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
     useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [scale, setScale] = useState(1);
-  /** Seconds left on the ceiling clock. */
-  const [ceilingSeconds, setCeilingSeconds] = useState(CEILING_SECONDS);
-  const ceilingSecondsRef = useRef(CEILING_SECONDS);
+  // True from the moment a reward run is confirmed until its first step is
+  // taken. Opening a paid run waits on a server round-trip (burn the ticket,
+  // then read back the issued seed) — so without this the menu just sits
+  // looking frozen, and "START REWARD RUN" stays live underneath, where a
+  // second click would burn a *second* run.
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The run is never started from a local substitute: the claim only mints
+  // against the issued seed, so playing on would be a win that pays nothing.
+  const [seedError, setSeedError] = useState(false);
 
   const scaleRef = useRef(1);
   useEffect(() => {
@@ -651,306 +207,154 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
   const playfieldRef = useRef<HTMLDivElement | null>(null);
   const touchAimingRef = useRef(false);
 
-  // Refs mirror the state the flight loop and the resolver read, so neither has
-  // to be recreated (and restart the animation frame) on every change.
-  const gridRef = useRef(grid);
-  const scoreRef = useRef(score);
-  const shotsLeftRef = useRef(shotsLeft);
-  const statusRef = useRef(status);
-  const aimRef = useRef(aim);
-  const currentRef = useRef(current);
-  const nextRef = useRef(next);
-  const difficultyRef = useRef(activeDifficulty);
-  const ceilingRowRef = useRef(ceilingRow);
-  const shotRef = useRef<Shot | null>(null);
+  /**
+   * The aim angle as last *pointed at*, staged for the next step.
+   *
+   * A ref, not state: the pointer handlers only aim, the step samples it, and
+   * what the render shows is the step's quantised `runtime.aimLevel` — so the
+   * indicator, the guide dots and the shot all describe the same 128-level
+   * angle the byte carries, never a float the byte could not.
+   */
+  const aimRef = useRef(0);
+  /** A fire press latched until the next step consumes it. */
+  const firePendingRef = useRef(false);
 
-  useEffect(() => {
-    gridRef.current = grid;
-  }, [grid]);
-  useEffect(() => {
-    scoreRef.current = score;
-  }, [score]);
-  useEffect(() => {
-    shotsLeftRef.current = shotsLeft;
-  }, [shotsLeft]);
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
-  useEffect(() => {
-    aimRef.current = aim;
-  }, [aim]);
-  useEffect(() => {
-    currentRef.current = current;
-  }, [current]);
-  useEffect(() => {
-    nextRef.current = next;
-  }, [next]);
-  useEffect(() => {
-    difficultyRef.current = activeDifficulty;
-  }, [activeDifficulty]);
-  useEffect(() => {
-    ceilingRowRef.current = ceilingRow;
-  }, [ceilingRow]);
+  // ── The run, its proof log, and the streamed verification ─────────────────
+  //
+  // The simulation state lives in `gameRef`, not in React state: a step is
+  // read from the settled previous step and produces the next one, possibly
+  // several times per frame, and the input log must be written exactly once
+  // per step — both are side effects, and running them inside a `setState`
+  // updater would double-write them under StrictMode's double-invoke. React
+  // state carries a per-frame *snapshot* for rendering only (the same
+  // arrangement as `FroggerGame.tsx`'s `gameRef`, whose chunk plumbing below
+  // is mirrored one-for-one).
+  const gameRef = useRef<RavenBubblesRuntime | null>(null);
 
-  const isTouchDevice = useMemo(
-    () =>
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(pointer: coarse)").matches,
+  /** One byte per 16ms step: the input the step was taken *under*. */
+  const inputLogRef = useRef<number[]>([]);
+
+  /** Real time not yet spent on whole `FIXED_STEP_MS` steps. */
+  const accumulatorRef = useRef(0);
+
+  const frameRef = useRef<number | null>(null);
+  const lastFrameAtRef = useRef<number | null>(null);
+
+  /** When the current run opened — the claim's `elapsedMs`. */
+  const runStartedAtRef = useRef<number>(0);
+
+  /** The run's difficulty, readable from inside the loop effect. */
+  const activeDifficultyRef = useRef<RavenBubblesDifficulty>(todaysDifficulty);
+
+  /** The claim, frozen the instant the run settles — see `freezeClaim`. */
+  const frozenClaimRef = useRef<VerifiedRun | null>(null);
+
+  /**
+   * The QUIT dialog's forfeit, requested by the button and settled by the
+   * loop.
+   *
+   * The game ends *inside* a step — losses, wins and forfeits all pass through
+   * `gameRef` so the frozen claim, its log and the render's snapshot are read
+   * from one state of the run. A direct `setRuntime` here would flip the
+   * render while the loop kept stepping a different object, and the claim
+   * would describe the run nobody played.
+   */
+  const forfeitRequestedRef = useRef(false);
+
+  const chunkIndexRef = useRef(0);
+  const chunkBusyRef = useRef(false);
+  const chunkBrokenRef = useRef(false);
+  const chunkQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chunkDrainedRef = useRef<Promise<void> | null>(null);
+
+  // Derived from the one runtime — see `ShotStatus`. `aim` and the clock are
+  // the same story: the render shows the step's values, not a parallel copy.
+  const status: ShotStatus = !runtime
+    ? "aiming"
+    : runtime.gameOver
+      ? runtime.won
+        ? "won"
+        : "lost"
+      : runtime.shot
+        ? "shooting"
+        : "aiming";
+  const aim = runtime ? levelToAim(runtime.aimLevel) : 0;
+  const ceilingSeconds = runtime
+    ? Math.ceil(runtime.ceilingMs / 1000)
+    : CEILING_SECONDS;
+
+  const returnToMenu = useCallback(() => {
+    aimRef.current = 0;
+    firePendingRef.current = false;
+    touchAimingRef.current = false;
+    setMode(null);
+    setRuntime(null);
+    setShowPracticeDifficultyPrompt(false);
+    setShowExitConfirm(false);
+    setStartingRun(false);
+    setSeedError(false);
+    rewardGrantedRef.current = false;
+    gameRef.current = null;
+    inputLogRef.current = [];
+    frozenClaimRef.current = null;
+    forfeitRequestedRef.current = false;
+    chunkDrainedRef.current = null;
+  }, []);
+
+  /**
+   * Read the seed the server issued for the run that is open.
+   *
+   * Returns null on any error — a reward run then stops and reports it rather
+   * than ever stepping from a seed the server did not issue. Retries until the
+   * returned runKey is recent (within ~15s), to avoid racing the server's
+   * `active_runs` row creation: the ticket burn that opens the run is
+   * fire-and-forget, so this poll is usually the thing *waiting* on that
+   * round-trip to settle.
+   */
+  const fetchRunSeed = useCallback(
+    async (jwt: string | undefined): Promise<number | null> => {
+      if (!jwt) return null;
+      const startedAt = Date.now();
+      const maxWaitMs = 10_000;
+      // Tight on purpose: the seed is written after the ticket burn settles, so
+      // a coarse interval would stack its own latency on top of the round trip
+      // once the row lands.
+      const pollIntervalMs = 150;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        try {
+          const res = await postEconomyWrite({ token: jwt, intent: "run-seed" });
+          const payload = res.data as
+            | { seed?: number; runKey?: number }
+            | undefined;
+          if (payload?.seed !== undefined && payload?.runKey) {
+            const runAgeMs = Date.now() - payload.runKey;
+            if (runAgeMs <= 15_000) return Number(payload.seed);
+            // Stale runKey (an older, already-played run): wait for the new
+            // one to be written before trusting the seed beside it.
+          }
+        } catch {
+          // Transient — retry.
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      }
+      return null;
+    },
     [],
   );
 
-  const returnToMenu = useCallback(() => {
-    setShowExitConfirm(false);
-    setMode(null);
-    shotRef.current = null;
-    setMovingBubble(null);
-  }, []);
-
-  const shoot = useCallback(() => {
-    if (statusRef.current !== "aiming") return;
-
-    const angle = aimRef.current;
-    shotRef.current = {
-      x: SHOOTER_X,
-      y: SHOOTER_Y,
-      vx: Math.sin(angle) * SHOT_SPEED,
-      vy: -Math.cos(angle) * SHOT_SPEED,
-      color: currentRef.current,
-    };
-    setMovingBubble(null);
-    setStatus("shooting");
-  }, []);
-
-  const resetCeilingClock = useCallback(() => {
-    ceilingSecondsRef.current = CEILING_SECONDS;
-    setCeilingSeconds(CEILING_SECONDS);
-  }, []);
-
-  /**
-   * Drop the ceiling on the clock, with no shot fired.
-   *
-   * Only ever applied while the player is aiming. Dropping mid-flight would
-   * slide the cluster out from under a bubble already in the air, and the shot
-   * is over in well under a second anyway, so a drop that lands on one is simply
-   * deferred by that.
-   */
-  const forceCeilingDrop = useCallback(() => {
-    if (statusRef.current !== "aiming") return;
-
-    const shifted = dropCeilingOnce(gridRef.current);
-    gridRef.current = shifted;
-
-    setGrid(shifted);
-    setCeilingRow((row) => row + 1);
-    setShotsLeft(SHOTS_PER_DROP);
-    resetCeilingClock();
-
-    if (hasCrossedTheLine(shifted)) {
-      setStatus("lost");
-    }
-  }, [resetCeilingClock]);
-
-  // The clock. Ticks only while the run is live; the drop it triggers resets
-  // both itself and the shot counter, so the two triggers stay independent.
-  useEffect(() => {
-    if (!mode) return;
-
-    const id = window.setInterval(() => {
-      if (statusRef.current === "won" || statusRef.current === "lost") return;
-
-      const remaining = ceilingSecondsRef.current - 1;
-      if (remaining > 0) {
-        ceilingSecondsRef.current = remaining;
-        setCeilingSeconds(remaining);
-        return;
-      }
-
-      resetCeilingClock();
-      forceCeilingDrop();
-    }, 1000);
-
-    return () => window.clearInterval(id);
-  }, [forceCeilingDrop, mode, resetCeilingClock]);
-
-  /**
-   * Settle a shot that has hit the ceiling or a bubble: snap it into the grid,
-   * pop any cluster it completed, drop whatever that left floating, apply the
-   * ceiling drop, then decide whether the run is still alive.
-   */
-  const resolveShot = useCallback(
-    (x: number, y: number, color: BubbleColor) => {
-    const ceiling = ceilingRowRef.current;
-    const landed = nearestEmptyCell(gridRef.current, x, y, ceiling);
-
-    // Nowhere to land means the field is full — the line has effectively been
-    // crossed, so the run is over.
-    if (!landed) {
-      setMovingBubble(null);
-      setStatus("lost");
-      return;
-    }
-
-    let working = gridRef.current.map((row) => [...row]);
-    working[landed[0]][landed[1]] = color;
-
-    let gained = 0;
-
-    const cluster = clusterOf(working, landed[0], landed[1], ceiling);
-    if (cluster.length >= MIN_CLUSTER) {
-      for (const [row, col] of cluster) working[row][col] = null;
-      gained += cluster.length * POINTS_PER_POP;
-    }
-
-    const floating = floatingCells(working, ceiling);
-    if (floating.length > 0) {
-      for (const [row, col] of floating) working[row][col] = null;
-      gained += floating.length * POINTS_PER_DROP;
-    }
-
-    const newScore = scoreRef.current + gained;
-    const remainingShots = shotsLeftRef.current - 1;
-    const dropCeiling = remainingShots <= 0;
-
-    if (dropCeiling) {
-      working = dropCeilingOnce(working);
-      setCeilingRow((row) => row + 1);
-      resetCeilingClock();
-    }
-
-    const crossedLine = hasCrossedTheLine(working);
-    const cleared = isBoardEmpty(working);
-
-    // A cleared screen is a stage complete: the next is dealt with the ceiling
-    // back at the top, so a run is a chain of screens rather than one long slide
-    // toward the line. The run is won on **points** — the target is set outright
-    // per difficulty in `session`, and because drops pay double a player can
-    // reach it well before the screens are used up.
-    const won = newScore >= difficultyRef.current.targetScore;
-
-    const finalGrid = cleared ? createBoard() : working;
-
-    setGrid(finalGrid);
-    setScore(newScore);
-
-    if (cleared) {
-      // The ceiling and its countdown restart with the new screen.
-      setCeilingRow(0);
-      setShotsLeft(SHOTS_PER_DROP);
-      resetCeilingClock();
-    } else {
-      setShotsLeft(dropCeiling ? SHOTS_PER_DROP : remainingShots);
-    }
-
-    // The shooter moves on to the bubble that was queued up, unless that shot
-    // just removed the last bubble of the queued colour.
-    //
-    // The queue is dealt a shot ahead, so it goes stale exactly when a pop takes
-    // the final bubbles of a colour: hold a Wheat, have Pumpkin queued behind it,
-    // clear the board's last Pumpkins, and the queued Pumpkin is now a colour
-    // with nothing on the board. It is re-dealt rather than handed over.
-    const nextCeiling = cleared ? 0 : dropCeiling ? ceiling + 1 : ceiling;
-    const queued = nextRef.current;
-    const incoming = coloursOnBoard(finalGrid).includes(queued)
-      ? queued
-      : pickNextColor(finalGrid, nextCeiling);
-
-    setCurrent(incoming);
-    setNext(pickNextColor(finalGrid, nextCeiling, incoming));
-
-    setMovingBubble(null);
-
-    if (won) {
-      setStatus("won");
-      return;
-    }
-
-    if (crossedLine) {
-      setStatus("lost");
-      return;
-    }
-
-    // The run carries on: hand control back to the player.
-    setStatus("aiming");
-    },
-    [resetCeilingClock],
-  );
-
-  // The flight loop. Reads only refs so it never restarts mid-shot.
-  useEffect(() => {
-    if (status !== "shooting") return;
-
-    let frame = 0;
-    let last = performance.now();
-
-    const step = (now: number) => {
-      const dt = Math.min((now - last) / 1000, 0.05);
-      last = now;
-
-      const shot = shotRef.current;
-      if (!shot) return;
-
-      let { x, y, vx, vy } = shot;
-
-      // Substepped so a shot can never tunnel.
-      //
-      // Advancing by `velocity * dt` in one go makes the physics depend on the
-      // frame rate: at 950 px/s a 16ms frame moves 15px, but a 50ms hitch (the
-      // dt clamp) moves 47px — more than a bubble's diameter — so the shot
-      // passes clean through the cluster and snaps to whatever cell it happens
-      // to stop beside. Measured against a solver that assumes continuous
-      // motion, that mismatch made 9 of 12 aimed shots land somewhere else
-      // entirely. Stepping in small increments makes every frame agree, and the
-      // result no longer changes with the machine the player is on.
-      const travel = Math.hypot(vx, vy) * dt;
-      const steps = Math.max(1, Math.ceil(travel / MAX_STEP_PX));
-      const stepDt = dt / steps;
-
-      let hit = false;
-
-      for (let index = 0; index < steps && !hit; index++) {
-        x += vx * stepDt;
-        y += vy * stepDt;
-
-        if (x < RADIUS) {
-          x = RADIUS;
-          vx = -vx;
-        } else if (x > PLAYFIELD_WIDTH - RADIUS) {
-          x = PLAYFIELD_WIDTH - RADIUS;
-          vx = -vx;
-        }
-
-        if (
-          y - RADIUS <= ceilingLimitY(ceilingRow) ||
-          touchesBubble(gridRef.current, x, y, ceilingRowRef.current)
-        ) {
-          hit = true;
-        }
-      }
-
-      if (hit) {
-        shotRef.current = null;
-        resolveShot(x, y, shot.color);
-        return;
-      }
-
-      shotRef.current = { x, y, vx, vy, color: shot.color };
-      // The moving bubble is the only thing that changes per frame.
-      setMovingBubble({ x, y, color: shot.color });
-
-      frame = requestAnimationFrame(step);
-    };
-
-    frame = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(frame);
-  }, [status, resolveShot]);
-
   const startSession = useCallback(
-    (
+    async (
       nextMode: RavenBubblesMode,
       practiceDifficultyOverride?: RavenBubblesDifficultyName,
     ) => {
       if (nextMode === "reward" && !hasRewardRun) return;
+      // From here a paid run is already being opened on the server (the confirm
+      // handler burned the ticket / spent the allowance before calling in), so
+      // flip the loading card immediately — before the seed round-trip below —
+      // so the menu never sits frozen while we wait.
+      if (nextMode === "reward") setStartingRun(true);
+      setSeedError(false);
 
       const chosenPracticeName =
         practiceDifficultyOverride ?? practiceDifficultyName;
@@ -958,41 +362,73 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
         RAVEN_BUBBLES_DIFFICULTIES.find(
           (difficulty) => difficulty.name === chosenPracticeName,
         ) ?? todaysDifficulty;
-
       const runDifficulty =
         nextMode === "reward" ? todaysDifficulty : selectedPracticeDifficulty;
 
-      const freshBoard = createBoard();
+      // Reward run: the seed is issued by the server at run-open and read back
+      // here — no local substitute, because the claim only mints against the
+      // issued seed. A failed read stops the run and says so. Practice: a
+      // local seed, because it is never verified.
+      let seed: number;
+      if (nextMode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
+        }
+        seed = issued;
+      } else {
+        seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+      }
+
+      // One runtime instance, shared by the loop (through `gameRef`) and the
+      // first render (through its snapshot): two `createRuntime` calls would be
+      // two games, and the claim would describe the one nobody played.
+      aimRef.current = 0;
+      firePendingRef.current = false;
+      touchAimingRef.current = false;
+      const fresh = createRuntime(runDifficulty, seed);
+      gameRef.current = fresh;
+      setRuntime({ ...fresh });
 
       setMode(nextMode);
-      setActiveDifficulty(runDifficulty);
       setShowPracticeDifficultyPrompt(false);
-      setGrid(freshBoard);
-      setCurrent(pickNextColor(freshBoard, 0));
-      setNext(pickNextColor(freshBoard, 0));
-      setScore(0);
-      setShotsLeft(SHOTS_PER_DROP);
-      resetCeilingClock();
-      setCeilingRow(0);
-      setStatus("aiming");
-      setAim(0);
-      shotRef.current = null;
-      setMovingBubble(null);
+      setShowExitConfirm(false);
+      setStartingRun(false);
       rewardGrantedRef.current = false;
+
+      // Fresh run, fresh proof: the log, the claim and the stream all belong
+      // to exactly one run, and a "Play Again" that inherited the previous
+      // run's cursor would post its first window at an index the worker's
+      // brand-new park has never heard of.
+      activeDifficultyRef.current = runDifficulty;
+      inputLogRef.current = [];
+      frozenClaimRef.current = null;
+      forfeitRequestedRef.current = false;
+      accumulatorRef.current = 0;
+      runStartedAtRef.current = Date.now();
+      chunkIndexRef.current = 0;
+      chunkBusyRef.current = false;
+      chunkBrokenRef.current = false;
+      chunkQueueRef.current = Promise.resolve();
+      chunkDrainedRef.current = null;
 
       if (nextMode === "reward") {
         portalService.send({
           type: "arcadeMinigame.started",
           name: "raven-bubbles" as any,
         });
+        startAttempt();
       }
     },
     [
+      bootstrap,
       hasRewardRun,
       portalService,
       practiceDifficultyName,
-      resetCeilingClock,
       todaysDifficulty,
+      fetchRunSeed,
     ],
   );
 
@@ -1004,25 +440,306 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     startRewardRun: () => startSession("reward"),
   });
 
-  const handleInGameExit = useCallback(() => {
-    if (status === "won" || status === "lost") {
-      returnToMenu();
+  // Keyboard: arrows stage the aim, Space latches a fire. The press is *not*
+  // fired here — the next step consumes it, so a press lands on exactly one
+  // step's byte (see `encodeTick`), and holding the arrow key still repeats
+  // the way it did against the live game's own key handler.
+  useEffect(() => {
+    if (!mode) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.code === "ArrowLeft") {
+        aimRef.current = clampAim(aimRef.current - 0.07);
+        event.preventDefault();
+      } else if (event.code === "ArrowRight") {
+        aimRef.current = clampAim(aimRef.current + 0.07);
+        event.preventDefault();
+      } else if (event.code === "Space") {
+        firePendingRef.current = true;
+        event.preventDefault();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      aimRef.current = 0;
+      firePendingRef.current = false;
+    };
+  }, [mode]);
+
+  // ── Game loop ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!mode || !runtime || runtime.gameOver) {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      lastFrameAtRef.current = null;
+      accumulatorRef.current = 0;
       return;
     }
 
-    setShowExitConfirm(true);
-  }, [returnToMenu, status]);
+    accumulatorRef.current = 0;
+    lastFrameAtRef.current = null;
 
-  // A win pays out once, through the shared Raven Coin wiring.
+    /**
+     * Queue one verification window behind the ones already on the wire.
+     *
+     * The chain is the whole point: the worker resumes a park only at exactly
+     * the cursor the next window belongs at, so two windows in flight at once
+     * would arrive in whichever order the network pleased and the second would
+     * void the park the first just built. Window 0 carries the run's
+     * difficulty — the only engine context the claim repeats — and every later
+     * window inherits the seed from the park, which the worker opened from the
+     * ledger rather than from this request.
+     */
+    const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
+      const send = async () => {
+        if (chunkBrokenRef.current) return;
+        const jwt = bootstrap?.jwt;
+        if (!jwt) return;
+
+        try {
+          const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json;charset=UTF-8",
+              accept: "application/json",
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({
+              intent: "verify-chunk",
+              nonce: writeNonce(),
+              chunkIndex,
+              inputs: encodeInputLog(bytes),
+              ...(chunkIndex === 0
+                ? { difficulty: activeDifficultyRef.current.name }
+                : {}),
+            }),
+          });
+          if (!res.ok) {
+            // Surface why the worker rejected it, and stop: windows are
+            // ordered, so the ones behind a refused window would be refused
+            // for the cursor rather than for their contents.
+            const detail = await res.text().catch(() => "");
+            console.warn(`[verify-chunk] ${res.status}`, detail);
+            chunkBrokenRef.current = true;
+          }
+        } catch {
+          // A dropped window cannot be re-sent out of order — the next window
+          // would arrive at a cursor the park no longer has — so the stream
+          // ends here and the claim has to replay the run itself, which a run
+          // this long will not fit in one request.
+          chunkBrokenRef.current = true;
+        }
+      };
+
+      chunkQueueRef.current = chunkQueueRef.current.then(send);
+    };
+
+    /**
+     * Queue every complete window the log has grown since the last one.
+     *
+     * A window is the unit: one is queued whenever a full one exists, whatever
+     * frame that happens to be — 600 steps is 9.6 seconds of play at 16ms a
+     * step, so the queue trails the log by seconds rather than by ticks.
+     */
+    const pumpVerificationChunks = () => {
+      if (mode !== "reward") return;
+      if (chunkBusyRef.current || chunkBrokenRef.current) return;
+
+      const start = chunkIndexRef.current * CHUNK_TICKS;
+      if (inputLogRef.current.length - start < CHUNK_TICKS) return;
+
+      const end = start + CHUNK_TICKS;
+      const chunkIndex = chunkIndexRef.current;
+      chunkIndexRef.current += 1;
+      postVerificationWindow(
+        chunkIndex,
+        Uint8Array.from(inputLogRef.current.slice(start, end)),
+      );
+
+      // One window on the wire at a time: the response is what proves the park
+      // took it, and the next window may only be built on a park that did.
+      chunkBusyRef.current = true;
+      void chunkQueueRef.current.finally(() => {
+        chunkBusyRef.current = false;
+      });
+    };
+
+    /**
+     * Freeze the claim the moment the run settles, then close the log behind
+     * it.
+     *
+     * Runs after the steps, against the settled game: the score recorded here
+     * already contains whatever step ended the run (the engine applies losses
+     * inside the step), so the claim's score, its log and its duration are all
+     * read from one state of the run rather than from a later frame.
+     *
+     * The tail-close matters more than it looks. The worker refuses a claim
+     * whose park holds less log than the claim asserts (`parked.total` must
+     * equal the claim's `ticks`), because such a claim's replay cannot finish
+     * inside one request — so every window still unwritten is queued behind
+     * the windows already on the wire, and `chunkDrainedRef` is what the
+     * payout effect waits on. A claim that overtakes its own tail would start
+     * the replay from tick zero and never reach the end.
+     */
+    const freezeClaim = () => {
+      const game = gameRef.current;
+      if (!game || frozenClaimRef.current) return;
+      if (!game.gameOver || !game.won || mode !== "reward") return;
+
+      frozenClaimRef.current = {
+        cabinet: "raven-bubbles",
+        score: game.score,
+        checkpoints: [],
+        elapsedMs: Date.now() - runStartedAtRef.current,
+        replay: {
+          difficulty: activeDifficultyRef.current.name,
+          ticks: inputLogRef.current.length,
+          inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
+        },
+      };
+
+      if (!chunkBrokenRef.current) {
+        const log = inputLogRef.current;
+        let start = chunkIndexRef.current * CHUNK_TICKS;
+        while (start < log.length) {
+          const end = Math.min(start + CHUNK_TICKS, log.length);
+          postVerificationWindow(
+            chunkIndexRef.current,
+            Uint8Array.from(log.slice(start, end)),
+          );
+          chunkIndexRef.current += 1;
+          start = end;
+        }
+      }
+      chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
+    };
+
+    const loop = (ts: number) => {
+      frameRef.current = requestAnimationFrame(loop);
+
+      const prevAt = lastFrameAtRef.current ?? ts;
+      lastFrameAtRef.current = ts;
+
+      let game = gameRef.current;
+      if (!game) return;
+
+      // Whole steps only, and never more simulated time than the tab was
+      // actually allowed to elapse (the brawler's own clamp): a backgrounded
+      // tab must not fast-forward the board on return.
+      accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // A forfeit from the QUIT dialog settles here, through the same door
+      // every other run end comes through — the loop, in place of `gameRef`,
+      // one frame after the button was pressed.
+      if (forfeitRequestedRef.current && !game.gameOver) {
+        forfeitRequestedRef.current = false;
+        game = {
+          ...game,
+          gameOver: true,
+          won: game.score >= game.difficulty.targetScore,
+          reason: "Run forfeited.",
+          shot: null,
+        };
+        gameRef.current = game;
+      }
+
+      // `game` is advanced *in place* through the loop. Reading the state once
+      // into a `const` before the loop and stepping that same value every
+      // iteration looks equivalent and is not: whenever a frame delivers more
+      // than one step of accumulated time — a stutter, a GC pause, a tab
+      // switch, anything the 250 ms clamp lets through — the second and later
+      // iterations re-step the *pre-loop* state, so the board stops advancing
+      // while the log keeps recording a byte per iteration. The claim then
+      // asserts a run that never happened, the worker's replay steps one tick
+      // per byte from a correctly advancing engine, and the two diverge on the
+      // first hiccup.
+      while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
+        // Sample the step's input, encode it, step under it — in that order,
+        // so the byte on the left is exactly the input the step ran under.
+        // Sampling afterwards would round a press and a step apart.
+        const fire = firePendingRef.current;
+        if (fire) firePendingRef.current = false;
+        const input = { aim: aimRef.current, fire };
+
+        inputLogRef.current.push(encodeTick(input));
+        game = tick(game, FIXED_STEP_MS, input);
+        gameRef.current = game;
+        accumulatorRef.current -= FIXED_STEP_MS;
+        pumpVerificationChunks();
+        if (game.gameOver) break;
+      }
+
+      // The run may have ended on the step above — freeze it before the
+      // render that announces it.
+      freezeClaim();
+
+      // Guarded the way `freezeClaim` guards: the loop above only steps a
+      // live game, so the ref cannot be null here — but it is typed
+      // nullable, and the render wants the *latest* value, after the loop's
+      // reassignments.
+      const latest = gameRef.current;
+      if (latest !== null) setRuntime({ ...latest });
+    };
+
+    frameRef.current = requestAnimationFrame(loop);
+    return () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      lastFrameAtRef.current = null;
+    };
+  }, [mode, runtime?.gameOver, bootstrap]);
+
+  // ── Reward submission ──────────────────────────────────────────────────────
   useEffect(() => {
-    if (status !== "won" || rewardGrantedRef.current || mode !== "reward") return;
+    if (
+      !runtime?.gameOver ||
+      !runtime.won ||
+      rewardGrantedRef.current ||
+      mode !== "reward"
+    ) {
+      return;
+    }
 
+    // The claim was frozen by the loop the instant the run settled — score,
+    // log and duration from one state. Absent means the win somehow happened
+    // without the loop settling, which cannot happen while the loop is
+    // running; it is still checked, because claiming with no log would burn
+    // the voucher for nothing — and the voucher is the player's ticket, not
+    // ours to spend.
+    const claim = frozenClaimRef.current;
+    if (!claim) {
+      console.error("[raven-bubbles] win with no frozen claim");
+      return;
+    }
     rewardGrantedRef.current = true;
-    portalService.send({
-      type: "arcadeMinigame.ravenCoinWon",
-      amount: RAVEN_BUBBLES_RAVEN_COIN_REWARD,
+
+    // The leaderboard score is written for every settled win — the board is
+    // the record of it.
+    submitScore({ score: runtime.score });
+
+    // The tail windows are still on the wire when this effect runs — the
+    // freeze, the tail and the `gameOver` that triggered this are all observed
+    // in the same frame. The claim may only land once the park holds the
+    // whole log: overtaking it makes the worker start the replay from tick
+    // zero, and a run this long cannot be re-simulated inside one request, so
+    // the refusal that follows would be of an honestly won coin.
+    void (chunkDrainedRef.current ?? Promise.resolve()).then(() => {
+      portalService.send({
+        type: "arcadeMinigame.ravenCoinWon",
+        amount: RAVEN_BUBBLES_RAVEN_COIN_REWARD,
+        verify: claim,
+      });
     });
-  }, [mode, portalService, status]);
+  }, [mode, portalService, runtime]);
+
+  // ── Unmount cleanup ────────────────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    };
+  }, []);
 
   const aimFromPoint = useCallback((clientX: number, clientY: number) => {
     const playfield = playfieldRef.current;
@@ -1034,7 +751,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     const dx = (clientX - rect.left) / s - SHOOTER_X;
     const dy = SHOOTER_Y - (clientY - rect.top) / s;
 
-    setAim(clampAim(Math.atan2(dx, dy)));
+    aimRef.current = clampAim(Math.atan2(dx, dy));
   }, []);
 
   const handlePointerMove = useCallback(
@@ -1052,15 +769,17 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
       aimFromPoint(event.clientX, event.clientY);
 
       // Touch players drag to aim and lift to fire, so a tap never shoots
-      // before they have pointed at anything.
+      // before they have pointed at anything. The press is latched, not fired:
+      // the next step consumes it (see the keyboard effect above), so pointer
+      // and keyboard are the same one-shot door.
       if (event.pointerType === "touch") {
         touchAimingRef.current = true;
         return;
       }
 
-      shoot();
+      firePendingRef.current = true;
     },
-    [aimFromPoint, shoot, status],
+    [aimFromPoint, status],
   );
 
   const handlePointerUp = useCallback(
@@ -1070,42 +789,25 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
       if (status !== "aiming") return;
 
       aimFromPoint(event.clientX, event.clientY);
-      shoot();
+      firePendingRef.current = true;
     },
-    [aimFromPoint, shoot, status],
+    [aimFromPoint, status],
   );
-
-  // Keyboard: arrows aim, space fires.
-  useEffect(() => {
-    if (!mode) return;
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.code === "ArrowLeft") {
-        setAim((previous) => clampAim(previous - 0.07));
-        event.preventDefault();
-      } else if (event.code === "ArrowRight") {
-        setAim((previous) => clampAim(previous + 0.07));
-        event.preventDefault();
-      } else if (event.code === "Space") {
-        shoot();
-        event.preventDefault();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [mode, shoot]);
 
   /**
    * Dotted aim guide, bounced off the walls, stopped by the first bubble, the
    * ceiling slab, or {@link MAX_GUIDE_PX}.
    *
    * The cap is what keeps it a guide. Traced to the ceiling it ran the full
-   * height of the board, which read as a laser sight rather than a hint at where
-   * the shot is pointed.
+   * height of the board, which read as a laser sight rather than a hint at
+   * where the shot is pointed.
+   *
+   * Traced from `aim` — the step's quantised angle — so the dots describe the
+   * same shot the byte carries. (This is the *render's* trace: trig is
+   * allowed here because nothing the worker replays ever runs it.)
    */
   const aimDots = useMemo(() => {
-    if (status !== "aiming") return [];
+    if (status !== "aiming" || !runtime) return [];
 
     const dots: { x: number; y: number }[] = [];
     let x = SHOOTER_X;
@@ -1125,8 +827,8 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
         dx = -dx;
       }
 
-      if (y - RADIUS <= ceilingLimitY(ceilingRow)) break;
-      if (touchesBubble(grid, x, y, ceilingRow)) break;
+      if (y - RADIUS <= ceilingLimitY(runtime.ceilingRow)) break;
+      if (touchesBubble(runtime.grid, x, y, runtime.ceilingRow)) break;
 
       dots.push({ x, y });
 
@@ -1135,11 +837,11 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
     }
 
     return dots;
-  }, [aim, ceilingRow, grid, status]);
+  }, [aim, runtime, status]);
 
   // ── Lobby ──────────────────────────────────────────────────────────────────
 
-  if (!mode) {
+  if (!mode || !runtime) {
     return (
       <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
@@ -1201,9 +903,9 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
 
           <button
             onClick={rewardRun.start}
-            disabled={!hasRewardRun}
+            disabled={!hasRewardRun || startingRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
-              hasRewardRun
+              hasRewardRun && !startingRun
                 ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                 : "bg-gray-300 text-gray-500 cursor-not-allowed"
             }`}
@@ -1245,6 +947,41 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
             >
               EXIT
             </button>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server and dealing today&apos;s
+                  bubbles. Hold tight — this only takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
+              </div>
+            </div>
           )}
 
           {showPracticeDifficultyPrompt && (
@@ -1296,12 +1033,14 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
           <div className="flex items-center gap-4">
             <div>
               <div className="text-xs font-semibold text-gray-600">SCORE</div>
-              <div className="text-2xl font-bold text-amber-800">{score}</div>
+              <div className="text-2xl font-bold text-amber-800">
+                {runtime.score}
+              </div>
             </div>
             <div>
               <div className="text-xs font-semibold text-gray-600">TARGET</div>
               <div className="text-2xl font-bold text-amber-800">
-                {activeDifficulty.targetScore}
+                {runtime.difficulty.targetScore}
               </div>
             </div>
           </div>
@@ -1316,7 +1055,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                   <div
                     key={index}
                     className={`h-3 w-3 rounded-full border border-black/30 ${
-                      index < shotsLeft ? "bg-red-500" : "bg-gray-300"
+                      index < runtime.shotsLeft ? "bg-red-500" : "bg-gray-300"
                     }`}
                   />
                 ))}
@@ -1325,9 +1064,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                   way the clock runs out, so dawdling is not a strategy. */}
               <div
                 className={`text-sm font-bold tabular-nums ${
-                  ceilingSeconds <= 5
-                    ? "text-red-600"
-                    : "text-amber-800"
+                  ceilingSeconds <= 5 ? "text-red-600" : "text-amber-800"
                 }`}
               >
                 {ceilingSeconds}s
@@ -1338,14 +1075,21 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
           <div className="flex items-center gap-3">
             <div className="text-center">
               <div className="text-xs font-semibold text-gray-600">NEXT</div>
-              <Bubble color={next} size={30} />
+              <Bubble color={runtime.next} size={30} />
             </div>
-            {mode === "practice" && (
+            {mode === "practice" && status !== "won" && status !== "lost" && (
               <Button onClick={() => startSession("practice")}>
                 Restart Practice
               </Button>
             )}
-            {onClose && <Button onClick={handleInGameExit}>Exit</Button>}
+            {status !== "won" && status !== "lost" && onClose && (
+              <button
+                onClick={() => setShowExitConfirm(true)}
+                className="px-3 py-1 text-xs bg-gray-700 text-slate-300 rounded hover:bg-gray-600"
+              >
+                QUIT RUN
+              </button>
+            )}
           </div>
         </div>
 
@@ -1369,7 +1113,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
           <div
             className="absolute left-0 right-0 bg-slate-700 border-b-4 border-amber-400/80"
             style={{
-              top: ceilingLimitY(ceilingRow) - CEILING_THICKNESS,
+              top: ceilingLimitY(runtime.ceilingRow) - CEILING_THICKNESS,
               height: CEILING_THICKNESS,
             }}
           />
@@ -1380,14 +1124,14 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
             style={{ top: DANGER_LINE_Y }}
           />
 
-          {grid.map((row, rowIndex) =>
+          {runtime.grid.map((row, rowIndex) =>
             row.map((cell, colIndex) =>
               cell ? (
                 <div
                   key={`${rowIndex}-${colIndex}`}
                   className="absolute"
                   style={{
-                    left: cellX(rowIndex, colIndex, ceilingRow) - RADIUS,
+                    left: cellX(rowIndex, colIndex, runtime.ceilingRow) - RADIUS,
                     top: cellY(rowIndex) - RADIUS,
                   }}
                 >
@@ -1410,15 +1154,15 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
             />
           ))}
 
-          {movingBubble && (
+          {runtime.shot && (
             <div
               className="absolute"
               style={{
-                left: movingBubble.x - RADIUS,
-                top: movingBubble.y - RADIUS,
+                left: runtime.shot.x - RADIUS,
+                top: runtime.shot.y - RADIUS,
               }}
             >
-              <Bubble color={movingBubble.color} />
+              <Bubble color={runtime.shot.color} />
             </div>
           )}
 
@@ -1430,7 +1174,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
               top: SHOOTER_Y - RADIUS,
             }}
           >
-            <Bubble color={current} />
+            <Bubble color={runtime.current} />
           </div>
           <div
             className="absolute bg-amber-200/80"
@@ -1457,7 +1201,8 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                   {status === "won" ? "Screens Cleared!" : "Bubbles Crossed the Line"}
                 </div>
                 <div className="mt-1 text-sm text-slate-200">
-                  {score} of {activeDifficulty.targetScore} points.
+                  {runtime.reason} {runtime.score} of{" "}
+                  {runtime.difficulty.targetScore} points.
                   {status === "won" && mode === "reward"
                     ? ` Reward granted: ${RAVEN_BUBBLES_RAVEN_COIN_REWARD} RavenCoin.`
                     : ""}
@@ -1469,7 +1214,7 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
                     </Button>
                   )}
                   {onClose && (
-                    <Button onClick={handleInGameExit}>Back to Arcade</Button>
+                    <Button onClick={returnToMenu}>Back to Arcade</Button>
                   )}
                 </div>
               </div>
@@ -1485,22 +1230,30 @@ export const RavenBubblesGame: React.FC<{ onClose?: () => void }> = ({
         </p>
       </div>
 
-      {showExitConfirm && (
+      {showExitConfirm && status !== "won" && status !== "lost" && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
           <div className="w-full max-w-sm bg-slate-900 rounded border border-white/30 p-5 text-white space-y-4">
-            <div className="font-bold text-lg">Exit Raven Bubbles?</div>
+            <div className="font-bold text-lg">Quit the run?</div>
             <div className="text-sm text-slate-300">
-              Your current progress will be lost.
+              {mode === "reward"
+                ? "Quitting will submit your current score and count the run as used."
+                : "Your progress will be lost."}
             </div>
             <div className="flex gap-3 justify-end">
-              <Button onClick={() => setShowExitConfirm(false)}>Cancel</Button>
+              <Button onClick={() => setShowExitConfirm(false)}>
+                KEEP PLAYING
+              </Button>
               <Button
                 onClick={() => {
                   setShowExitConfirm(false);
-                  onClose?.();
+                  // Settled by the loop on its next frame, through the same
+                  // door every other run end comes through — a direct
+                  // `setRuntime` here would flip the render while the loop
+                  // kept stepping a different object.
+                  forfeitRequestedRef.current = true;
                 }}
               >
-                Exit
+                QUIT
               </Button>
             </div>
           </div>

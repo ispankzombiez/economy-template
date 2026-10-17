@@ -199,6 +199,19 @@ import {
   stepGoblinInvadersReplay,
   validateGoblinInvadersReplay,
 } from "./goblinInvadersReplay.js";
+// Raven Bubbles' verifier — the streamed-tick shape once more, and the seeded
+// one: the engine's runtime RNG (the opening deal and every screen refill in
+// `createBoard`, and every queue deal in `pickNextColor`) draws from the seed
+// issued at run-open, exactly as Tetris's, Frogger's and Goblin Invaders'
+// rolls do, so the seed is read from `active_runs` and never from the claim.
+// See ravenBubblesReplay.js and the engine's header.
+import {
+  openRavenBubblesChunkReplay,
+  ravenBubblesOutcome,
+  startRavenBubblesReplay,
+  stepRavenBubblesReplay,
+  validateRavenBubblesReplay,
+} from "./ravenBubblesReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -3057,6 +3070,19 @@ const TICK_ENGINES = {
     // request.
     seeded: true,
   },
+  "raven-bubbles": {
+    validate: validateRavenBubblesReplay,
+    start: startRavenBubblesReplay,
+    openChunk: openRavenBubblesChunkReplay,
+    step: stepRavenBubblesReplay,
+    outcome: ravenBubblesOutcome,
+    // The whole field is this seed's: every `createBoard` deal (colour, clump
+    // size, placement), every screen refill, and every `pickNextColor` queue
+    // roll — so a seed the client chose is a board the client chose. Issued —
+    // read from `active_runs.seed` at chunk-0 and at the claim, never from the
+    // request.
+    seeded: true,
+  },
   "sunflower-brawler": {
     validate: validateReplay,
     start: startReplay,
@@ -3715,14 +3741,15 @@ const VERIFIED_CABINETS = new Set([
   "barley-breaker",
   "frogger",
   "goblin-invaders",
+  "raven-bubbles",
 ]);
 
 /**
  * Cabinets whose replays are *streamed* — the tick-simulated games that post
  * `verify-chunk` windows during play and park between requests (see
- * `openChunkReplay`). The brawler, Pac-Man, Tetris, Barley Breaker, Frogger
- * and Goblin Invaders are the six so far; all step through `TICK_ENGINES`,
- * which chooses the engine by this same cabinet name.
+ * `openChunkReplay`). The brawler, Pac-Man, Tetris, Barley Breaker, Frogger,
+ * Goblin Invaders and Raven Bubbles are the seven so far; all step through
+ * `TICK_ENGINES`, which chooses the engine by this same cabinet name.
  *
  * Membership in `VERIFIED_CABINETS` is about which *claim* route a cabinet
  * takes; this set is about the *chunk* route, and a cabinet can be verified
@@ -3738,6 +3765,7 @@ const STREAMED_CABINETS = new Set([
   "barley-breaker",
   "frogger",
   "goblin-invaders",
+  "raven-bubbles",
 ]);
 
 const INTENTS = {
@@ -3785,6 +3813,7 @@ const SEEDED_CABINETS = new Set([
   "sunflower-brawler",
   "frogger",
   "goblin-invaders",
+  "raven-bubbles",
 ]);
 
 /**
