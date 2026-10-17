@@ -171,13 +171,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     useState<TetrisDifficulty>(todaysDifficulty);
   const [practiceDifficultyName, setPracticeDifficultyName] =
     useState<TetrisDifficultyName>(todaysDifficulty.name);
-  // A one-line summary of what the verification stream did, shown on the
-  // game-over card when a claim did not go through. Diagnostic only: the run's
-  // outcome never depends on it, it just makes a client-side failure legible
-  // instead of something the player can only infer from a missing coin.
-  const [verifyDiag, setVerifyDiag] = useState<string | null>(null);
-
-// The simulation state lives in `gameRef`, not in React state: a step is
+  // The simulation state lives in `gameRef`, not in React state: a step is
   // driven from a fixed-step accumulator, and re-rendering between ticks would
   // mean the log and the game could disagree for a frame.
   const gameRef = useRef<TetrisRuntime | null>(null);
@@ -339,11 +333,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       // brand-new park has never heard of.
       activeDifficultyRef.current = runDifficulty;
       inputLogRef.current = [];
-      // The summary is per-run, so the line on the card has to be too. Resetting
-      // only the event log left the previous run's verdict standing — the card
-      // read "30/30 windows acked" over a run the worker had seen as a different
-      // length entirely, which is worse than showing nothing at all.
-      setVerifyDiag(null);
       frozenClaimRef.current = null;
       accumulatorRef.current = 0;
       runStartedAtRef.current = Date.now();
@@ -663,31 +652,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         note({ outcome: "tail-not-sent-stream-broken" });
       }
       chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
-
-      // Summarise the stream for the game-over card: how far it got, and the
-      // first thing that went wrong. Read after the drain so the count is final.
-      void chunkDrainedRef.current.then(() => {
-        const log = (window as unknown as { __verifyChunk?: unknown[] })
-          .__verifyChunk;
-        const entries = Array.isArray(log) ? (log as Record<string, unknown>[]) : [];
-        const acked = entries.filter((e) => e.outcome === "acked").length;
-        const failure = entries.find((e) => e.outcome !== "acked" && e.outcome !== "skipped-stream-already-broken");
-        const ticks = inputLogRef.current.length;
-        const needed = Math.ceil(ticks / CHUNK_TICKS);
-        // The tick count is stated outright. A bare "30/30" cannot be checked
-        // against anything the worker said, and two numbers that disagree is how
-        // a real fault got read as a stale card in the first place.
-        const tally = `${acked}/${needed} windows (${ticks} ticks)`;
-
-        setVerifyDiag(
-          failure
-            ? `${tally}; window ${failure.chunk ?? "?"} ${failure.outcome}` +
-                (failure.status ? ` (HTTP ${failure.status})` : "") +
-                (failure.error ? ` [${failure.error}]` : "") +
-                (failure.detail ? ` ${String(failure.detail).slice(0, 120)}` : "")
-            : tally,
-        );
-      });
     };
 
     const loop = (ts: number) => {
@@ -1380,11 +1344,6 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                   ? ` Reward granted: ${TETRIS_RAVEN_COIN_REWARD} RavenCoin.`
                   : ""}
               </div>
-              {verifyDiag && (
-                <div className="mt-1 text-[10px] leading-tight text-amber-200/90 break-all">
-                  verify: {verifyDiag}
-                </div>
-              )}
             </div>
           )}
 

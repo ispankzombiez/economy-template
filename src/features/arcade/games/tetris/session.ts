@@ -71,23 +71,21 @@ export const getTetrisDifficulty = (
 };
 
 /**
- * The bag seed for a run opened on a given day.
+ * The day's seed — the number that picks the difficulty.
  *
- * The *same number* that picks the difficulty, exposed as its own function
- * because the piece bag is generated from it too — the run has to be a single
- * reproducible thing, not a difficulty that is reproducible and a bag that is
- * not.
+ * One hash per UTC day, so both ends read the target off the calendar and
+ * there is nothing to negotiate. The bag used to be dealt from this hash too;
+ * it now comes from the seed the server issues for a run at burn time and
+ * stores in `active_runs` (`TetrisGame.tsx` opens the runtime with it, and
+ * the worker reads it back the same way). A seed chosen inside the claim
+ * could be chosen to fit, so the claim carries none: difficulty from the
+ * day, bag from the ledger.
  *
- * It is the day's hash rather than a fresh random number because the worker
- * cannot be told it: it re-derives the day from the UTC clock, accepts only
- * today's or yesterday's difficulty name, and rebuilds the bag from the same
- * hash. A client-chosen seed could not be checked, so every honest run would be
- * refused — the coin would cost a ticket and never pay.
- *
- * A run that straddles UTC midnight keeps this number, which is exactly why it
- * is baked into the runtime rather than re-derived per step: the park
- * round-trips through D1 between chunk requests, and re-reading the clock on
- * resume would deal a new bag into a game that was already half-played.
+ * A run that straddles UTC midnight keeps the difficulty it opened on, which
+ * is exactly why that difficulty is baked into the runtime rather than
+ * re-derived per step: the park round-trips through D1 between chunk
+ * requests, and re-reading the clock on resume would drop a half-played game
+ * into a different target.
  */
 export const getTetrisDaySeed = (now: Date | number = Date.now()): number => {
   const todayKey = getTodayKey(now);

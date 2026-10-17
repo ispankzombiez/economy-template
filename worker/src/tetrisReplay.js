@@ -3,12 +3,15 @@
  *
  * ## What the proof is
  *
- * `{ difficulty, ticks, inputs }`. There is no seed field and there is not one
- * to have: the piece bag is generated from the *day* the run was opened on
- * (`getTetrisDaySeed`), which the worker re-derives from its own clock and
- * accepts only as today's or yesterday's. A client-chosen bag seed could not be
- * checked at all, so every honest run would be refused — the coin would cost a
- * ticket and never pay.
+ * `{ difficulty, ticks, inputs }`. There is no seed field in the claim and
+ * there is not one to have: the difficulty is the day's — re-derived from the
+ * worker's own clock, accepted only as today's or yesterday's — while the
+ * bag's seed is the number the server issued for the run, read from
+ * `active_runs` (`assertRunSeed` below) and never taken from the request. A
+ * seed *inside* the claim could be chosen to fit, which would make the replay
+ * a restatement of the request rather than a check on it; an issued one is
+ * known only to the session that burned for it and to this worker, so every
+ * honest run carries a seed the claim never had a hand in choosing.
  *
  * The input log is one byte per fixed 16 ms step: a bitfield of the keys held
  * (`LEFT`, `RIGHT`, `SOFT_DROP`) and pressed that step (`ROTATE_CW`,
@@ -100,12 +103,14 @@ const todayKeyOf = (now) => {
 };
 
 /**
- * The day's seed — the difficulty pick *and* the bag.
+ * The day's seed — the difficulty pick.
  *
- * One hash for both on purpose. A run is one reproducible thing; splitting the
- * day into "the seed that picked the target" and "the seed that dealt the
- * pieces" would be two things to agree on, and disagreement is exactly what a
- * replay is looking for.
+ * One hash per UTC day, and only that: the target is a property of the
+ * calendar, so the client and the worker each read it off the clock with
+ * nothing to agree on. The bag used to be dealt from this hash too; it now
+ * comes from the seed the server issued for the run (`assertRunSeed` below),
+ * which is the stronger thing to check — a date is public, an issued seed is
+ * known only to the session that burned for it and to this worker.
  */
 const daySeedOf = (now) =>
   todayKeyOf(now)

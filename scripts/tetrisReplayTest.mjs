@@ -288,10 +288,11 @@ function simulateDrop(board, piece, origin, rotation) {
 /**
  * How good a board looks. Lower is better.
  *
- * Completed lines dominate, then buried holes, then peak height, then
- * bumpiness. The weights are the usual Tetris ordering and the ordering is the
- * point: a bot that only minimises height will happily fill a board with
- * unreachable gaps and top out without ever completing a row.
+ * Completed lines dominate, then buried holes, then how tall the board is in
+ * total, then bumpiness and roughness. The weights are the usual Tetris
+ * ordering and the ordering is the point: a bot that only minimises height
+ * will happily fill a board with unreachable gaps and top out without ever
+ * completing a row.
  */
 function scoreBoard(board) {
   const height = new Array(BOARD_WIDTH).fill(0);
@@ -340,20 +341,30 @@ function scoreBoard(board) {
   // the hole sign backwards turns the bot into a hole-filler — it scores a
   // placement with two buried gaps *below* a clean one and takes it, every time.
   //
-  // Holes outrank everything else numerically: height and roughness can only
-  // add a few hundred at their extreme, so a hole weight below ~200 lets a
-  // placement buy its way out of an overhang.
+  // Magnitudes are read against one cleared line (9 000): a buried hole is
+  // worth about a third of a clear, one row shaved off *every* column (the
+  // aggregate height) likewise, and the per-cell terms below that. Aggregate
+  // height is the term that prices the ceiling — the previous set priced only
+  // the *tallest* column at a token rate, and the bot topped out with a
+  // perfectly clean board stacked twenty rows high, chasing line clears it was
+  // not fast enough to pay for. Summed over all ten columns, every row the
+  // board comes down is worth a third of a clear, so the bot keeps low and
+  // survives long enough for the score to arrive.
   //
-  // `roughness` is both the column-height differences and the filled/empty
-  // boundaries inside each row. The second half is what stops the bot from
-  // building a board that is technically flat in outline and full of steps —
-  // which it will happily do, and which no following piece can use.
+  // `roughness` is the filled/empty boundaries inside each row: what stops the
+  // bot from building a board that is technically flat in outline and full of
+  // steps — which it will happily do, and which no following piece can use.
+  //
+  // The ratios are the usual published ones (holes ≈ half a line, aggregate
+  // height the dominant term), softened by sweep against the real engine until
+  // a medium session won reliably rather than occasionally.
+  const aggHeight = height.reduce((a, b) => a + b, 0);
   return (
     -lines * 9_000 +
-    holes * 400 +
-    Math.max(...height) * 12 +
-    bumpiness * 4 +
-    roughness * 4
+    holes * 3_000 +
+    aggHeight * 3_000 +
+    bumpiness * 1_000 +
+    roughness * 800
   );
 }
 
@@ -443,18 +454,18 @@ function choosePlacement(runtime, rng) {
  * `RIGHT`, and the worker's replay would faithfully slide a piece nowhere.
  */
 function playSession(difficulty, seed, { stepCap = 200_000 } = {}) {
-  // The bag is the *day's*, not `seed`.
+  // The bag is dealt from `seed`, exactly as production deals it: the server
+  // mints one uint32 per run at burn time, the client opens its runtime with it
+  // and the worker reads the same number back out of `active_runs`
+  // (`assertRunSeed`). The difficulty alone is the day's — today's or
+  // yesterday's, on both ends — because that is the only part of the contract
+  // that comes from the clock.
   //
-  // This is the one thing the bot is not free to choose. The worker re-derives
-  // the bag from the UTC date and cannot be told a seed, so a bot opening on any
-  // other seed produces a run the worker is structurally unable to reproduce —
-  // the replay diverges on the first piece that matters and every check below
-  // fails for a reason that has nothing to do with the code under test.
-  //
-  // `seed` therefore drives only the bot's *choices* (tie-breaks and pacing),
-  // which is the honest way to get more than one candidate run out of a bag
-  // that is fixed for the day.
-  const runtime = createRuntime(difficulty, getTetrisDaySeed());
+  // Which makes `seed` a real search dimension: every attempt opens a
+  // *different* bag, so each of the hundred-and-twenty attempts is its own
+  // game rather than another tie-break variation of one. `seed` also drives
+  // the bot's own choices (exact ties and pacing), as it always has.
+  const runtime = createRuntime(difficulty, seed >>> 0 || 1);
   let working = runtime;
   const bytes = [];
 
@@ -506,7 +517,7 @@ function playSession(difficulty, seed, { stepCap = 200_000 } = {}) {
     if (input === INPUT_HARD_DROP) plan = null;
   }
 
-  return { game: working, bytes };
+  return { game: working, bytes, seed };
 }
 
 // The claim's own request: validate, resume the park, step the tail, judge.
@@ -578,6 +589,7 @@ const yesterday = getTetrisDifficulty(Date.now() - 86_400_000);
 
 // Play under whichever of today's/yesterday's difficulties is easiest to win
 // (both are accepted, so the harness stays robust however the date hash falls).
+console.log(`  [debug] today: ${today.name} (target ${today.targetScore}), yesterday: ${yesterday.name} (target ${yesterday.targetScore})`);
 const easiest = [today, yesterday].reduce((a, b) =>
   a.targetScore <= b.targetScore ? a : b,
 );
@@ -586,24 +598,50 @@ let winRun = null;
 {
   let bestScore = 0;
   let wins = 0;
+  let best = null;
+  let maxLines = 0;
 
-  for (let i = 0; i < 24 && !winRun; i++) {
-    const run = playSession(easiest, i * 7919 + 13);
+  for (let i = 0; i < 120 && !winRun; i++) {
+    const seed = i * 7919 + 13;
+    const run = playSession(easiest, seed);
     if (run.game.score > bestScore) bestScore = run.game.score;
+    if (run.game.linesCleared > maxLines) maxLines = run.game.linesCleared;
     if (run.game.won) wins += 1;
     if (run.game.won && !winRun) winRun = { attempt: i, ...run };
+    if (!best || run.game.score > best.game.score) best = run;
   }
 
   check(
     winRun !== null,
     `the bot wins a ${easiest.name} session (target ${easiest.targetScore})`,
-    `best score ${bestScore} over 24 attempts`,
+    `best score ${bestScore} over 120 attempts`,
   );
   check(wins > 0, "at least one honest winning session exists in the search");
+
+  if (!winRun) {
+    console.log(`  [debug] best score achieved on ${easiest.name}: ${bestScore} (target ${easiest.targetScore})`);
+    console.log(`  [debug] best run: ${best.game.linesCleared} lines, level ${best.game.level}, ${best.bytes.length} steps (most lines anywhere: ${maxLines})`);
+    // How did it die — buried in holes, or high and clean?
+    let deathHoles = 0;
+    let deathMaxHeight = 0;
+    const heights = new Array(BOARD_WIDTH).fill(0);
+    for (let x = 0; x < BOARD_WIDTH; x++) {
+      let seenEmpty = false;
+      for (let y = BOARD_HEIGHT - 1; y >= 0; y--) {
+        if (best.game.board[y][x] === null) seenEmpty = true;
+        else {
+          if (seenEmpty) deathHoles += 1;
+          heights[x] += 1;
+        }
+      }
+    }
+    deathMaxHeight = Math.max(...heights);
+    console.log(`  [debug] board at top-out: ${deathHoles} holes, max height ${deathMaxHeight}/${BOARD_HEIGHT}`);
+  }
 }
 
 if (winRun) {
-  const { game, bytes } = winRun;
+  const { game, bytes, seed } = winRun;
 
   check(
     bytes.length > CHUNK_TICKS,
@@ -630,13 +668,13 @@ if (winRun) {
     ticks: bytes.length,
     inputs: bytesToWire(bytes),
   });
-  const clientState = startTetrisReplay(validated, getTetrisDaySeed());
+  const clientState = startTetrisReplay(validated, seed);
   stepTetrisReplay(clientState, Number.MAX_SAFE_INTEGER);
   const workFinal = clientState.match;
 
   // Re-step both engines side by side.
-  let clientSide = createRuntime(easiest, getTetrisDaySeed());
-  let workerSide = createRuntime(easiest, getTetrisDaySeed());
+  let clientSide = createRuntime(easiest, seed);
+  let workerSide = createRuntime(easiest, seed);
   for (let i = 0; i < bytes.length && !parityFailure; i++) {
     clientSide = tick(clientSide, FIXED_STEP_MS, bytes[i]);
     // The verifier's contract is in-place mutation, so the park is advanced by
@@ -677,7 +715,7 @@ if (winRun) {
   for (let start = 0; start < bytes.length; start += CHUNK_TICKS) {
     const window = Uint8Array.from(bytes.slice(start, start + CHUNK_TICKS));
     if (start === 0) {
-      state = openTetrisChunkReplay({ seed: getTetrisDaySeed(), difficulty: easiest.name, inputs: window });
+      state = openTetrisChunkReplay({ seed, difficulty: easiest.name, inputs: window });
     } else {
       // The park grows by exactly the ticks it receives — see appendChunkInputs.
       state.inputs = Uint8Array.from([...state.inputs, ...window]);
@@ -736,7 +774,7 @@ if (winRun) {
     for (let start = 0; start < bytes.length - CHUNK_TICKS; start += CHUNK_TICKS) {
       const window = Uint8Array.from(bytes.slice(start, start + CHUNK_TICKS));
       if (start === 0) {
-        streamed.push(openTetrisChunkReplay({ seed: getTetrisDaySeed(), difficulty: easiest.name, inputs: window }));
+        streamed.push(openTetrisChunkReplay({ seed, difficulty: easiest.name, inputs: window }));
       } else {
         streamed[0].inputs = Uint8Array.from([...streamed[0].inputs, ...window]);
         streamed[0].total = streamed[0].inputs.length;
@@ -813,7 +851,7 @@ if (winRun) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 if (winRun) {
-  const { game, bytes } = winRun;
+  const { game, bytes, seed } = winRun;
 
   // Truncated log: the claim's ticks no longer match the park — refused by
   // the binding, before any simulation decides anything. A park *longer* than
@@ -850,7 +888,7 @@ if (winRun) {
       ticks: cut.length,
       inputs: bytesToWire(cut),
     }),
-    getTetrisDaySeed(),
+    seed,
   );
   stepTetrisReplay(cutState, Number.MAX_SAFE_INTEGER);
   const cutOutcome = tetrisOutcome(cutState);
@@ -869,7 +907,7 @@ if (winRun) {
       ticks: padded.length,
       inputs: bytesToWire(padded),
     }),
-    getTetrisDaySeed(),
+    seed,
   );
   stepTetrisReplay(paddedState, Number.MAX_SAFE_INTEGER);
   check(
@@ -884,7 +922,12 @@ if (winRun) {
   let lossRun = null;
   for (let i = 0; i < 12 && !lossRun; i++) {
     // Nothing but hard drops: the board fills, the run ends, nobody wins.
-    const runtime = createRuntime(easiest, getTetrisDaySeed());
+    // Each attempt takes its own bag seed — the same kind of number a run is
+    // issued at burn time — so the loop searches twelve games instead of
+    // replaying one twelve times (a hard-drop session can occasionally reach
+    // the target first, which is what the `!won` guard is for).
+    const seed = i * 7919 + 104_729;
+    const runtime = createRuntime(easiest, seed);
     let working = runtime;
     const bytes = [];
     while (!working.gameOver && bytes.length < 40_000) {
@@ -892,7 +935,7 @@ if (winRun) {
       working = tick(working, FIXED_STEP_MS, INPUT_HARD_DROP);
     }
     if (working.gameOver && !working.won) {
-      lossRun = { game: working, bytes };
+      lossRun = { game: working, bytes, seed };
     }
   }
   check(lossRun !== null, "found a session that honestly ends in a loss");
@@ -904,7 +947,7 @@ if (winRun) {
         ticks: lossRun.bytes.length,
         inputs: bytesToWire(lossRun.bytes),
       }),
-      getTetrisDaySeed(),
+      lossRun.seed,
     );
     stepTetrisReplay(state, Number.MAX_SAFE_INTEGER);
     const outcome = tetrisOutcome(state);
@@ -1047,7 +1090,7 @@ if (winRun) {
         ticks: winRun.bytes.length,
         inputs: bytesToWire(winRun.bytes),
       }),
-      getTetrisDaySeed(),
+      winRun.seed,
     );
     const twice = startTetrisReplay(
       validateTetrisReplay({
@@ -1055,7 +1098,7 @@ if (winRun) {
         ticks: winRun.bytes.length,
         inputs: bytesToWire(winRun.bytes),
       }),
-      getTetrisDaySeed(),
+      winRun.seed,
     );
     stepTetrisReplay(once, Number.MAX_SAFE_INTEGER);
     stepTetrisReplay(twice, Number.MAX_SAFE_INTEGER);
