@@ -23,7 +23,7 @@ import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext, PortalMachineState } from "../adapters/portal";
 import { useBootstrap } from "lib/portal/BootstrapContext";
 import type { VerifiedRun } from "lib/portal/api";
-import { writeNonce, getEconomyWorkerUrl } from "lib/portal/api";
+import { writeNonce, getEconomyWorkerUrl, postEconomyWrite } from "lib/portal/api";
 import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
 import { encodeInputLog, inputMask } from "@nightshade/shared/anticheat/inputLog";
 import { NPCIcon } from "../adapters/NPCIcon";
@@ -386,6 +386,19 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
   const todaysDifficulty = useMemo(() => getSunflowerBrawlerDifficulty(), []);
 
   const [mode, setMode] = useState<SunflowerBrawlerMode | null>(null);
+  // True from the moment a reward run is confirmed until its match exists and
+  // the mode flips. Opening a paid run waits on a server round-trip (burn the
+  // ticket, then read back the issued seed), which is a second or two of real
+  // latency — so without this the lobby just sits there looking frozen, and the
+  // "START REWARD RUN" button stays live underneath, where a second click would
+  // open and burn a *second* run. This gates the button and shows a loading
+  // card so the wait reads as "starting", not "broken".
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The run is then never started: a claim only mints against the issued seed,
+  // so playing on from any local substitute would be a game the player can win
+  // and never be paid for. The card below says so plainly and offers a reload.
+  const [seedError, setSeedError] = useState(false);
   const [activeDifficulty, setActiveDifficulty] =
     useState<SunflowerBrawlerDifficulty>(todaysDifficulty);
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
@@ -644,8 +657,53 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
 
   // ── Session ────────────────────────────────────────────────────────────────
 
+  // Read the simulation seed the server issued for the run that is open.
+  // Returns null on any error — a reward run then refuses to start rather than
+  // ever simulating under a seed the server did not issue.
+  // Retries until the returned runKey is recent (within ~15s), to avoid racing
+  // the server's active_runs row creation (dispatchAction returns before the
+  // worker has written the new run's seed).
+  const fetchRunSeed = useCallback(
+    async (jwt: string | undefined): Promise<number | null> => {
+      if (!jwt) return null;
+      const startedAt = Date.now();
+      const maxWaitMs = 10_000;
+      // Tight on purpose: the seed is written after the ticket burn settles, so
+      // this poll is usually waiting on that round-trip. A coarse interval then
+      // adds its own latency on top once the row lands — up to a full interval
+      // of extra silence before the fight starts.
+      const pollIntervalMs = 150;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        try {
+          const res = await postEconomyWrite({
+            token: jwt,
+            intent: "run-seed",
+          });
+          // run-seed returns { seed, runKey, cabinet } directly in data
+          const payload = res.data as
+            | { seed?: number; runKey?: number }
+            | undefined;
+          if (payload?.seed && payload?.runKey) {
+            const runAgeMs = Date.now() - payload.runKey;
+            if (runAgeMs <= 15_000) {
+              // Fresh run (opened within the last 15s) — this is our seed.
+              return Number(payload.seed);
+            }
+            // Stale runKey (old run): wait for the new one to be written.
+          }
+        } catch {
+          // Ignore transient errors, retry.
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      }
+      return null;
+    },
+    [],
+  );
+
   const startSession = useCallback(
-    (
+    async (
       nextMode: SunflowerBrawlerMode,
       difficultyName?: SunflowerBrawlerDifficulty["name"],
     ) => {
@@ -656,6 +714,32 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
               (entry) => entry.name === difficultyName,
             ) ?? todaysDifficulty);
 
+      // From here the paid run is already being opened on the server (the
+      // confirm handler burned the ticket / spent the allowance before calling
+      // in), so flip the loading card immediately — before the seed round-trip
+      // below — so the lobby never sits frozen while we wait. Cleared once the
+      // match exists and the mode flips.
+      if (nextMode === "reward") setStartingRun(true);
+      setSeedError(false);
+
+      // Reward run: the simulation seed is *issued* by the server at run-open
+      // and read back here — never derived locally, because the worker replays
+      // the log under the issued seed and nothing else. If that round-trip
+      // fails, stop and say so: a local substitute would play fine and pay
+      // nothing. Practice: a local seed, because practice is never verified.
+      let seed: number;
+      if (nextMode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
+        }
+        seed = issued;
+      } else {
+        seed = (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
+      }
+
       const input = inputRef.current;
       input.left = false;
       input.right = false;
@@ -664,11 +748,6 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       input.attackBuf = 0;
       input.magicBuf = 0;
       held.releaseAll();
-
-      // Chosen before the match exists so the same value can be stored for the
-      // claim; see the comment on `createMatch` for why it is client-side for
-      // now and what has to change before replay is enforced.
-      const seed = (Date.now() ^ Math.floor(Math.random() * 0x100000000)) >>> 0;
 
       matchRef.current = createMatch({
         playerId,
@@ -681,16 +760,11 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         // function of (seed, inputs), and a wall-clock read inside the step
         // loop would make the same inputs replay to a different outcome.
         //
-        // `Date.now()` supplies variety between runs; the random half stops the
-        // seed being guessable from the clock alone.
-        //
-        // TEMPORARY — this is a **client-chosen** seed. It is reproducible
-        // (which is all Stage A and B need) but it is not *binding*: a client
-        // that picked its own seed could shop for a favourable one. That is
-        // harmless while replay only records a match rate, because a mismatch
-        // changes nothing. It stops being harmless the moment a mismatch
-        // refuses payout (Stage C) — at which point the worker must issue the
-        // seed at run-open and the client must use that instead.
+        // For a reward run this is the number the server issued at run-open
+        // (see above): the worker replays under the same column, so a seed the
+        // client picked would be a run the worker simulates differently — and
+        // a claim from it can only ever be refused. Practice deals its own,
+        // because there is no run to bind to.
         seed,
       });
       hudVersionRef.current = 0;
@@ -738,6 +812,10 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
       setShowPracticeDifficultyPrompt(false);
       setShowExitConfirm(false);
       setMode(nextMode);
+      // The lobby only renders while `mode` is null, so once it flips the
+      // loading card is gone regardless — but clear the flag anyway so a later
+      // return-to-menu never inherits a stale "starting" state.
+      setStartingRun(false);
 
       if (nextMode === "reward") {
         portalService.send({
@@ -746,7 +824,16 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
         });
       }
     },
-    [ensureSheets, held, playerId, playerSpec.npc, portalService, todaysDifficulty],
+    [
+      bootstrap,
+      ensureSheets,
+      fetchRunSeed,
+      held,
+      playerId,
+      playerSpec.npc,
+      portalService,
+      todaysDifficulty,
+    ],
   );
 
   const returnToMenu = useCallback(() => {
@@ -755,6 +842,7 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
     setHud(null);
     setShowExitConfirm(false);
     setMode(null);
+    setSeedError(false);
   }, []);
 
   // ── Input ──────────────────────────────────────────────────────────────────
@@ -1329,14 +1417,14 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             <button
               type="button"
               onClick={rewardRun.start}
-              disabled={!hasRewardRun}
+              disabled={!hasRewardRun || startingRun}
               className={`w-full rounded-lg px-4 py-3 text-base font-bold transition-all shadow-lg ${
-                hasRewardRun
+                hasRewardRun && !startingRun
                   ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                   : "cursor-not-allowed bg-gray-300 text-gray-500"
               }`}
             >
-              <div>START REWARD RUN</div>
+              <div>{startingRun ? "STARTING…" : "START REWARD RUN"}</div>
               <div className="mt-1 text-xs opacity-90">
                 {!hasRewardRun
                   ? "No reward runs left today — buy Play Tickets in the shop."
@@ -1379,6 +1467,41 @@ export const SunflowerBrawlerGame: React.FC<{ onClose?: () => void }> = ({
             <p className="shrink-0 text-center text-xs font-semibold text-red-600">
               {rewardRun.error}
             </p>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server. Hold tight — this only
+                  takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
+              </div>
+            </div>
           )}
 
           {onClose && (

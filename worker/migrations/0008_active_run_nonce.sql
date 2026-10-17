@@ -1,0 +1,35 @@
+-- Nightshade Arcade — the start token that ties a seed fetch to its own run-open.
+--
+-- ## Why this exists
+--
+-- `active_runs` is a single row per farm: opening a new run overwrites the old
+-- one. `run-seed` answers from that row, and before this column its only guard
+-- against answering with the *previous* run's seed was a freshness window on
+-- `opened_at` — which cannot tell "the run I just opened" from "the run I
+-- opened eleven seconds ago, still fresh". Fresh and mine are different facts,
+-- and only one of them was being checked.
+--
+-- ## How the race went
+--
+-- Two run-opens eleven seconds apart, and the second run's seed poll landing
+-- before the second row did: the poll read the first run's row inside its
+-- freshness window, took that seed as its own, and played the whole run under
+-- it. The claim then declared that seed while the ledger held the second run's
+-- number, so it was refused — correctly, and at the player's cost: a played
+-- run and a spent ticket, paid out to nobody, with nothing on screen to say so.
+--
+-- ## The fix
+--
+-- The client mints a random token at the moment it confirms a run-open and
+-- sends it with the open. The open stores it here. `run-seed` carries the same
+-- token and is answered only when it matches the row's. A poll that crosses a
+-- re-open does not match the row it finds, is refused, keeps asking, and
+-- accepts only the row that is its own. The client's freshness window stays
+-- as belt-and-braces, now guarding a row that is both recent and the caller's
+-- instead of being asked to prove both by the clock alone.
+--
+-- Null here means the row was opened by a client that predates the token; a
+-- seeded cabinet's seed fetch refuses rather than reads through it, for the
+-- same reason an unseeded seed is refused: a number that cannot be tied to the
+-- open that issued it is not this run's seed.
+ALTER TABLE active_runs ADD COLUMN run_nonce TEXT;

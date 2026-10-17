@@ -114,6 +114,22 @@ export type MinigameSessionValue = {
   ) => void;
   apiError: string | null;
   clearApiError: () => void;
+  /**
+   * Why the last **verified** win claim was refused, or `null` while none has
+   * been.
+   *
+   * Separate from `apiError` on purpose. `apiError` carries every dispatch's
+   * failure, including the expected daily "already used your free run" answer
+   * the visit-grant fires on every visit after the first — surfacing *that*
+   * loudly would train players to ignore the surface. This one is set only
+   * when a claim carrying replay proof was refused (or its continuation
+   * finished and disagreed), which is the one moment a player must be told:
+   * the coin was credited optimistically the instant they won, the rollback
+   * has already taken it back, and before this existed the refusal landed
+   * nowhere a player ever looks. The arcade turns it into a notice.
+   */
+  claimError: string | null;
+  clearClaimError: () => void;
 };
 
 const MinigameSessionContext = createContext<MinigameSessionValue | null>(null);
@@ -137,6 +153,7 @@ export function MinigameSessionProvider({
     normalizeMinigameFromApi(bootstrap.playerEconomy),
   );
   const [apiError, setApiError] = useState<string | null>(null);
+  const [claimError, setClaimError] = useState<string | null>(null);
 
   const runAfterLocalEconomyCommit = useCallback(
     (
@@ -179,7 +196,11 @@ export function MinigameSessionProvider({
       // it. Captured inside the branch rather than read off `input` in the
       // callback below, because there `input` has narrowed to the union of both
       // variants and `verify` is no longer visible on every member of it.
-      const verifiedReplay = "collectJobId" in input ? undefined : input.verify?.replay;
+      // `claimProof` is the same capture kept whole — proof present means this
+      // dispatch *is* a verified claim, which is what the refusal below has to
+      // distinguish from every other write's failure.
+      const claimProof = "collectJobId" in input ? undefined : input.verify;
+      const verifiedReplay = claimProof?.replay;
 
       void postPromise.then(
         (res) => {
@@ -217,6 +238,22 @@ export function MinigameSessionProvider({
                   mergeMinigameEconomyFromApi(prev, authoritative),
                 );
               },
+            }).then((verdict) => {
+              // Terminal disagreement only. `null` — never resolved — is the
+              // network going quiet or the chunk budget running out, and the
+              // loop treats that as telemetry by design: no verdict exists to
+              // report. `replay: false` is different in kind: the worker
+              // finished the replay, refused it, and minted nothing, while the
+              // player is still looking at the coin the optimistic update
+              // credited. Roll it back with the reason attached, exactly as
+              // the initial claim's own refusal does below.
+              if (verdict?.replay !== false) return;
+              setPlayerEconomy(rollback);
+              const reason =
+                typeof verdict.replayReason === "string"
+                  ? verdict.replayReason
+                  : "the replay disagreed with the claimed run";
+              setClaimError(`That run could not be verified: ${reason}`);
             });
           }
         },
@@ -224,6 +261,13 @@ export function MinigameSessionProvider({
           const message = err instanceof Error ? err.message : String(err);
           setPlayerEconomy(rollback);
           setApiError(message);
+          // A verified claim's refusal is the post-win failure that must not be
+          // swallowed. The coin above was credited the moment the player won,
+          // this rollback is taking it back, and until now the reason landed on
+          // `apiError` — surfaced only by the shop and settings panels nobody
+          // has open while standing at the cabinet they just played. `claimError`
+          // is the path the arcade notice takes instead.
+          if (claimProof) setClaimError(message);
         },
       );
     },
@@ -427,6 +471,7 @@ export function MinigameSessionProvider({
   );
 
   const clearApiError = useCallback(() => setApiError(null), []);
+  const clearClaimError = useCallback(() => setClaimError(null), []);
 
   const replacePlayerEconomy = useCallback(
     (next: MinigameSessionResponse["playerEconomy"]) => {
@@ -452,6 +497,8 @@ export function MinigameSessionProvider({
       replacePlayerEconomy,
       apiError,
       clearApiError,
+      claimError,
+      clearClaimError,
     }),
     [
       bootstrap.id,
@@ -468,6 +515,8 @@ export function MinigameSessionProvider({
       replacePlayerEconomy,
       apiError,
       clearApiError,
+      claimError,
+      clearClaimError,
     ],
   );
 

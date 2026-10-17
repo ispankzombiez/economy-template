@@ -209,6 +209,28 @@ export function writeNonce(): string {
 }
 
 /**
+ * The start token of the run this tab last opened, or `null` before it opened
+ * one.
+ *
+ * A seeded cabinet's `run-seed` asks for the seed of *its own* run, and
+ * `active_runs` is one row per farm: a second open overwrites the first, so a
+ * poll can cross a re-open and read the previous run's row while that row is
+ * still fresh. Freshness cannot separate the two — the previous run is fresh
+ * for exactly the window in which the mistake happens. The token can: it is
+ * minted when the open goes out, stored with the run on the server, presented
+ * when the seed is asked for, and matched there, so a poll is answered only by
+ * the row belonging to its own open. See `intentRunSeed` in the worker.
+ *
+ * Deliberately module state rather than a parameter. The confirm and the poll
+ * live in different layers — the adapter confirms, the game polls — so
+ * threading one value through every game's `startSession` would touch seven
+ * signatures for a fact there is only one of: this tab's latest open, which is
+ * also the row the ledger holds, by the same last-open-wins rule. Practice
+ * runs never open a run and never fetch a seed, so they never read it.
+ */
+let openRunNonce: string | null = null;
+
+/**
  * Send one write through the worker.
  *
  * Resolves the way the previous direct call did — same envelope, same thrown
@@ -247,6 +269,16 @@ export async function postEconomyWrite({
     );
   }
 
+  // A run-open mints this tab's start token; `run-seed` presents it — the two
+  // halves of one open, bound where both already pass through. Decided here,
+  // before the request goes out, because the confirm path dispatches the open
+  // and only *then* calls the game's `startSession`, so this is the earliest
+  // moment the token can exist and still precede the first poll. Claims carry
+  // none on purpose: they read the run from the ledger directly.
+  const isRunOpen = intent === "start-free-run" || intent === "start-ticket-run";
+  if (isRunOpen) openRunNonce = writeNonce();
+  const runNonce = isRunOpen || intent === "run-seed" ? openRunNonce : null;
+
   const response = await window.fetch(`${base}/economy/write`, {
     method: "POST",
     headers: {
@@ -257,6 +289,7 @@ export async function postEconomyWrite({
     body: JSON.stringify({
       intent,
       nonce: writeNonce(),
+      ...(runNonce !== null ? { runNonce } : {}),
       ...(actionId !== undefined ? { actionId } : {}),
       ...(amount !== undefined ? { amount } : {}),
       ...(score !== undefined ? { score } : {}),

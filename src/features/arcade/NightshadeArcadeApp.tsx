@@ -87,6 +87,8 @@ export const NightshadeArcadeApp: React.FC = () => {
     dispatchAction,
     farmId,
     playerData,
+    claimError,
+    clearClaimError,
   } = useMinigameSession();
   // The session's own VIP answer: `farm.vip.isVip`, as the economies API resolves
   // it. See `lib/portal/vip.ts`.
@@ -249,6 +251,32 @@ export const NightshadeArcadeApp: React.FC = () => {
       });
     }
   };
+
+  /**
+   * Tell the player when a win was refused.
+   *
+   * The claim that certifies a replay runs *after* `onWin` has already shown
+   * the celebration and credited the coin optimistically, so a refusal arrives
+   * as the rollback of something that looked settled. Until now its reason sat
+   * on `apiError`, which only the shop and the settings panel display — a
+   * player whose run was refused saw a win, then a balance that quietly
+   * disagreed with it, with nothing on screen to say which was lying.
+   *
+   * Reuses the arcade's one notice rather than adding a second popup: same
+   * modal the chest uses, `bad` tone, one button. It replaces whatever notice
+   * was showing, which is correct — a refused claim is the more urgent of the
+   * two. Dismissing it clears the error so the next refusal can speak again.
+   */
+  useEffect(() => {
+    if (!claimError) return;
+    setNotice({
+      title: "Your win was not credited",
+      body:
+        `${claimError}. Nothing was minted for that run — the coin shown on ` +
+        "the win has been taken back. Refresh the page, then play again.",
+      tone: "bad",
+    });
+  }, [claimError]);
 
   useEffect(() => {
     // Registry-driven: every entry in GAME_REGISTRY becomes launchable from a
@@ -512,7 +540,16 @@ export const NightshadeArcadeApp: React.FC = () => {
           behind the Dev Key. The one thing that still rides along is the chest
           leaderboard, and only for the "the pots are empty" message it belongs
           to — read-only, no second action, same question. */}
-      <NightshadeArcadeNotice notice={notice} onClose={() => setNotice(null)}>
+      <NightshadeArcadeNotice
+        notice={notice}
+        onClose={() => {
+          setNotice(null);
+          // Claim refusals are cleared here too: `claimError` must be able to
+          // change for the effect above to fire again, and a refusal already
+          // acknowledged with OK has said its piece.
+          clearClaimError();
+        }}
+      >
         {chestExhausted && notice === CHEST_SPENT_NOTICE && chestTally ? (
           <ArcadeChestLeaderboard
             entries={chestTally.entries}

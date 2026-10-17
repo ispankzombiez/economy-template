@@ -14,6 +14,8 @@ import { SquareIcon } from "components/ui/SquareIcon";
 import { ITEM_DETAILS } from "../adapters/itemDetails";
 import { startAttempt, submitScore } from "../adapters/portalUtil";
 import { useRewardRun } from "../adapters/rewardRun";
+import { useBootstrap } from "lib/portal/BootstrapContext";
+import { postEconomyWrite } from "lib/portal/api";
 import { useVipAccess } from "../adapters/useVipAccess";
 import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { PortalContext } from "../adapters/portal";
@@ -185,6 +187,7 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState, type: "full" });
+  const bootstrap = useBootstrap();
 
   const [sessionMode, setSessionMode] = useState<UnoMode | null>(null);
   const [gameState, setGameState] = useState<UnoState | null>(null);
@@ -192,6 +195,16 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   const [rewardSubmitted, setRewardSubmitted] = useState(false);
   const [rewardGranted, setRewardGranted] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  // True from the moment a reward run is confirmed until its deal exists.
+  // Opening a paid run waits on a server round-trip (burn the ticket, then
+  // read back the issued seed) — so without this the lobby just sits looking
+  // frozen, and "START REWARD RUN" stays live underneath, where a second
+  // click would burn a *second* run.
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The deal is never built from a local substitute: the claim only mints
+  // against the issued seed, so playing on would be a win that pays nothing.
+  const [seedError, setSeedError] = useState(false);
   // When player plays a Wild, we pause to let them pick a colour
   const [pendingWildCard, setPendingWildCard] = useState<UnoCard | null>(null);
   // Bot turn loop running flag
@@ -215,7 +228,48 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     [portalGameState, isVip],
   );
 
-  const getRunSeed = useCallback(() => {
+  /**
+   * Read the shuffle seed the server issued for the run that is open.
+   *
+   * Returns null on any error — a reward run then stops and reports it rather
+   * than ever dealing from a seed the server did not issue. Retries until the
+   * returned runKey is recent (within ~15s), to avoid racing the server's
+   * `active_runs` row creation: the ticket burn that opens the run is
+   * fire-and-forget, so this poll is usually the thing *waiting* on that
+   * round-trip to settle.
+   */
+  const fetchRunSeed = useCallback(
+    async (jwt: string | undefined): Promise<number | null> => {
+      if (!jwt) return null;
+      const startedAt = Date.now();
+      const maxWaitMs = 10_000;
+      // Tight on purpose: the seed is written after the ticket burn settles, so
+      // a coarse interval would stack its own latency on top of the round trip
+      // once the row lands.
+      const pollIntervalMs = 150;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        try {
+          const res = await postEconomyWrite({ token: jwt, intent: "run-seed" });
+          const payload = res.data as { seed?: number; runKey?: number } | undefined;
+          if (payload?.seed !== undefined && payload?.runKey) {
+            const runAgeMs = Date.now() - payload.runKey;
+            if (runAgeMs <= 15_000) return Number(payload.seed);
+            // Stale runKey (an older, already-played run): wait for the new
+            // one to be written before trusting the seed beside it.
+          }
+        } catch {
+          // Transient — retry.
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      }
+      return null;
+    },
+    [],
+  );
+
+  /** A local seed for practice runs, which are never verified. */
+  const getPracticeSeed = useCallback(() => {
     return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
   }, []);
 
@@ -224,6 +278,8 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     setSessionMode(null);
     setGameState(null);
     setPendingWildCard(null);
+    setStartingRun(false);
+    setSeedError(false);
     botTurnActiveRef.current = false;
     moveLogRef.current = [];
     runSeedRef.current = null;
@@ -232,16 +288,39 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   // ─── Session start ────────────────────────────────────────────────────────
 
   const startSession = useCallback(
-    (mode: UnoMode) => {
-      const seed = getRunSeed();
+    async (mode: UnoMode) => {
+      // From here a paid run is already being opened on the server (the confirm
+      // handler burned the ticket / spent the allowance before calling in), so
+      // flip the loading card immediately — before the seed round-trip below —
+      // so the lobby never sits frozen while we wait. Cleared once the deal
+      // exists and the mode flips.
+      if (mode === "reward") setStartingRun(true);
+      setSeedError(false);
 
-      setSessionMode(mode);
+      // Reward run: the shuffle seed is issued by the server at run-open and
+      // read back here — no local substitute, because the claim only mints
+      // against the issued seed. A failed read stops the run and says so.
+      // Practice: a local seed, because it is never verified.
+      //
       // The seed the deck is actually dealt from. Uno has no difficulty walk,
-      // so this seed *is* the run's — chosen here when the run opens, exactly
-      // like the other verified cabinets, and server-issued for all of them
-      // together in Stage C. Everything after the shuffle (bot colour picks,
+      // so this seed *is* the run's — issued by the server so a caller cannot
+      // shop a shuffle. Everything after the shuffle (bot colour picks,
       // refills) draws from the same stream, so the worker rebuilds this
       // exact game from the seed plus the player's choices.
+      let seed: number;
+      if (mode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
+        }
+        seed = issued;
+      } else {
+        seed = getPracticeSeed();
+      }
+
+      setSessionMode(mode);
       runSeedRef.current = seed;
       runStartedAtRef.current = Date.now();
       moveLogRef.current = [];
@@ -256,8 +335,14 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
         startAttempt();
         setRewardRunStarted(true);
       }
+
+      // Clear the flag after the mode has flipped: the lobby only renders while
+      // `sessionMode` is null, so once it flips the loading card is gone
+      // regardless — but a later return-to-menu must not inherit a stale
+      // "starting" state.
+      setStartingRun(false);
     },
-    [getRunSeed, portalService, rewardRunStarted],
+    [bootstrap, fetchRunSeed, getPracticeSeed, portalService, rewardRunStarted],
   );
 
   /**
@@ -457,7 +542,7 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
   const handlePlayAgain = useCallback(() => {
     if (sessionMode !== "practice") return;
 
-    const seed = getRunSeed();
+    const seed = getPracticeSeed();
     runSeedRef.current = seed;
     runStartedAtRef.current = Date.now();
     moveLogRef.current = [];
@@ -466,7 +551,7 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
     setRewardSubmitted(false);
     setRewardGranted(false);
     botTurnActiveRef.current = false;
-  }, [getRunSeed, sessionMode]);
+  }, [getPracticeSeed, sessionMode]);
 
   const sortedPlayerHand = useMemo(() => {
     const hand = gameState?.hands[0] ?? [];
@@ -623,28 +708,31 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
 
           <button
             onClick={rewardRun.start}
-            disabled={!hasRewardRun}
+            disabled={!hasRewardRun || startingRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
-              hasRewardRun
+              hasRewardRun && !startingRun
                 ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                 : "bg-gray-300 text-gray-500 cursor-not-allowed"
             }`}
           >
-            <div>START REWARD RUN</div>
+            <div>{startingRun ? "STARTING…" : "START REWARD RUN"}</div>
             <div className="mt-2 text-xs opacity-90">
               {!hasRewardRun
                 ? "No reward runs left today — buy Play Tickets in the shop."
-                : rewardRun.freeAvailable
-                  ? isVip
-                    ? "VIP: reward run available for Uno today."
-                    : "Reward run available for the arcade today."
-                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
+                : startingRun
+                  ? "Opening a reward run on the server…"
+                  : rewardRun.freeAvailable
+                    ? isVip
+                      ? "VIP: reward run available for Uno today."
+                      : "Reward run available for the arcade today."
+                    : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
           <button
             onClick={() => startSession("practice")}
-            className="w-full px-6 py-4 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg text-lg"
+            disabled={startingRun}
+            className="w-full px-6 py-4 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg text-lg disabled:bg-gray-400 disabled:cursor-not-allowed"
           >
             <div>START PRACTICE MODE</div>
             <div className="mt-2 text-xs font-semibold opacity-90">
@@ -667,6 +755,41 @@ export const UnoGame: React.FC<UnoGameProps> = ({ onClose }) => {
             >
               EXIT
             </button>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server and dealing the cards.
+                  Hold tight — this only takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </OuterPanel>

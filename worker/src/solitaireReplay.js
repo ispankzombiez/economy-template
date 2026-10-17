@@ -94,6 +94,82 @@ export class SolitaireReplayInputError extends Error {}
 const ONE_DAY_MS = 86_400_000;
 
 /**
+ * How far the client's `createSolvableDeal` may walk forward from the base seed
+ * before it gives up on finding a solvable deal.
+ *
+ * Mirrors the loop bound in the client's `engine.ts`. The two must agree
+ * exactly: this constant is the window inside which the worker accepts a
+ * claim's *resolved* seed, so a client that walked further than this bound
+ * would land on a seed the worker refuses.
+ */
+export const SOLITAIRE_SEED_WALK = 100;
+
+/**
+ * Bind a claim's *resolved* seed to the *base* seed the server issued when the
+ * run was opened.
+ *
+ * ## Why this is a window and not an equality
+ *
+ * Solitaire is the one seeded cabinet whose board is not dealt from the issued
+ * seed itself. `createSolvableDeal` walks `(base + i) >>> 0` forward — up to
+ * `SOLITAIRE_SEED_WALK` steps — until it lands on a solvable deal, and the
+ * claim names *that* seed, because the worker rebuilds the board with a single
+ * `createInitialState` rather than repeating the solver's hundred-pass search.
+ * So the seed the worker must bind is the resolved one, and the property it
+ * enforces is that the resolved seed is one the client's own walk could have
+ * reached from the issued base.
+ *
+ * ## What this closes
+ *
+ * Without it, the claim's seed is the client's to choose, and a chosen seed is
+ * a chosen board: a caller could search the whole 32-bit space for a deal its
+ * solver already knows a short path through, then bot the moves to a win. With
+ * it, the search space is the hundred seeds forward of a base the *server*
+ * drew — exactly the space an honest client searches, and no more.
+ *
+ * ## Why `>>> 0`
+ *
+ * The client's walk wraps at 2^32 (`(seed + i) >>> 0`), so this check wraps the
+ * same way. `(resolved - base) >>> 0` is the unsigned distance *forward*, which
+ * equals the walk step `i` for any base — including one near `0xffffffff`,
+ * where the walk crosses zero and a plain subtraction would go negative.
+ *
+ * @param {number} resolvedSeed  The claim's `replay.seed` — the deal's seed.
+ * @param {number|null} baseSeed  The seed the server issued for this run.
+ * @throws {SolitaireReplayInputError} when the run has no issued seed, or the
+ *   resolved seed is not reachable from it by the client's walk.
+ */
+export function assertIssuedSeed(resolvedSeed, baseSeed) {
+  // `typeof ... !== "number"` first on purpose: `Number(null)` is `0` and
+  // `Number(undefined)` is `NaN`, so a bare `Number()` coercion would turn a
+  // *missing* seed (a row written before the column existed) into a legitimate
+  // base of `0` and let a client-chosen deal bind to it. The type check rejects
+  // the absent seed — and any string or fraction — before it can be coerced.
+  if (
+    typeof baseSeed !== "number" ||
+    !Number.isInteger(baseSeed) ||
+    baseSeed < 0 ||
+    baseSeed > 0xffffffff
+  ) {
+    // Fails closed: a run opened before the column was populated has no seed to
+    // bind to, and a run verified against a seed the client chose is not a
+    // certified run. Refusing is the only answer that keeps that promise.
+    throw new SolitaireReplayInputError(
+      "this run has no server-issued seed, so its deal cannot be verified",
+    );
+  }
+
+  // `resolvedSeed` is the claim's `replay.seed`, already shape-checked to a
+  // clean 32-bit integer by `validateSolitaireReplay` before this is called.
+  const distance = (resolvedSeed - baseSeed) >>> 0;
+  if (distance >= SOLITAIRE_SEED_WALK) {
+    throw new SolitaireReplayInputError(
+      "the replay's seed was not issued for this run",
+    );
+  }
+}
+
+/**
  * Validate a claim's `replay` payload against what the worker itself derives.
  *
  * Everything re-derivable is re-derived: the difficulty's parameters come from

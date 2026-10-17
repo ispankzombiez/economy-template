@@ -38,6 +38,8 @@ import {
   MAX_GO_FISH_ACTIONS,
 } from "@nightshade/shared/anticheat/goFishLog";
 import type { VerifiedRun } from "lib/portal/api";
+import { postEconomyWrite } from "lib/portal/api";
+import { useBootstrap } from "lib/portal/BootstrapContext";
 
 const goFishPanelClassName =
   "mx-auto w-full max-w-[1100px] h-[min(92vh,860px)] overflow-hidden";
@@ -57,6 +59,7 @@ interface GoFishGameProps {
 
 export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
   const { portalService } = useContext(PortalContext);
+  const bootstrap = useBootstrap();
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState, type: "full" });
 
@@ -66,6 +69,21 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
   const [rewardSubmitted, setRewardSubmitted] = useState(false);
   const [rewardGranted, setRewardGranted] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
+  /**
+   * True while a reward run's server-issued shuffle seed is being fetched.
+   *
+   * The ticket/allowance is already spent before `startSession` runs, and the
+   * seed is written only after that spend settles, so there is a real wait — a
+   * second or two — between confirming and having a deal to show. This flips
+   * the menu into a "starting" card for that wait, so the menu never sits
+   * frozen under a tap that appears to have done nothing (and cannot be
+   * double-tapped into opening — and paying for — a second run).
+   */
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The deal is never built from a local substitute: the claim only mints
+  // against the issued seed, so playing on would be a win that pays nothing.
+  const [seedError, setSeedError] = useState(false);
 
   /**
    * The run's proof, captured as it happens rather than reconstructed after.
@@ -80,7 +98,47 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
   const runSeedRef = useRef<number | null>(null);
   const runStartedAtRef = useRef<number>(0);
 
-  const getRunSeed = useCallback(() => {
+  /**
+   * Read the shuffle seed the server issued for the run that is open.
+   *
+   * Returns null on any error — a reward run then stops and reports it rather
+   * than ever dealing from a seed the server did not issue. Retries until the
+   * returned runKey is recent (within ~15s), to avoid racing the server's
+   * `active_runs` row creation: the burn that opens the run is fire-and-forget,
+   * so this poll is usually the thing *waiting* on that round-trip to settle.
+   */
+  const fetchRunSeed = useCallback(
+    async (jwt: string | undefined): Promise<number | null> => {
+      if (!jwt) return null;
+      const startedAt = Date.now();
+      const maxWaitMs = 10_000;
+      // Tight on purpose: the seed is written after the burn settles, so a
+      // coarse interval would stack its own latency on top of the round trip
+      // once the row lands.
+      const pollIntervalMs = 150;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        try {
+          const res = await postEconomyWrite({ token: jwt, intent: "run-seed" });
+          const payload = res.data as { seed?: number; runKey?: number } | undefined;
+          if (payload?.seed !== undefined && payload?.runKey) {
+            const runAgeMs = Date.now() - payload.runKey;
+            if (runAgeMs <= 15_000) return Number(payload.seed);
+            // Stale runKey (an older, already-played run): wait for the new
+            // one to be written before trusting the seed beside it.
+          }
+        } catch {
+          // Transient — retry.
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      }
+      return null;
+    },
+    [],
+  );
+
+  /** A local seed for practice runs, which are never verified. */
+  const getPracticeSeed = useCallback(() => {
     return (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
   }, []);
 
@@ -88,6 +146,8 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
     setShowQuitConfirm(false);
     setSessionMode(null);
     setGameState(null);
+    setStartingRun(false);
+    setSeedError(false);
     moveLogRef.current = [];
     runSeedRef.current = null;
   }, []);
@@ -98,8 +158,31 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
   );
 
   const startSession = useCallback(
-    (mode: GoFishMode) => {
-      const seed = getRunSeed();
+    async (mode: GoFishMode) => {
+      // From here a paid run is already being opened on the server (the confirm
+      // handler burned the ticket / spent the allowance before calling in), so
+      // flip the loading card immediately — before the seed round-trip below —
+      // so the menu never sits frozen while we wait. Cleared once the deal
+      // exists and the mode flips.
+      if (mode === "reward") setStartingRun(true);
+      setSeedError(false);
+
+      // Reward run: the shuffle seed is issued by the server at run-open and
+      // read back here — no local substitute, because the claim only mints
+      // against the issued seed. A failed read stops the run and says so.
+      // Practice: a local seed, because it is never verified.
+      let seed: number;
+      if (mode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
+        }
+        seed = issued;
+      } else {
+        seed = getPracticeSeed();
+      }
 
       setSessionMode(mode);
       setRewardSubmitted(false);
@@ -107,9 +190,8 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
       moveLogRef.current = [];
       // The seed the deck is actually dealt from: Go Fish has no difficulty
       // walk (no solver search to walk forward from a base seed like
-      // Solitaire's), so this seed *is* the run's — chosen here when the run
-      // opens, exactly like the other two verified cabinets, and
-      // server-issued for all of them together in Stage C.
+      // Solitaire's), so this seed *is* the run's — dealt directly from it,
+      // server-issued for a reward run so a caller cannot shop a shuffle.
       runSeedRef.current = seed;
       runStartedAtRef.current = Date.now();
       setGameState(createInitialState(seed));
@@ -119,8 +201,14 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
         startAttempt();
         setRewardRunStarted(true);
       }
+
+      // Clear the flag after the mode has flipped: the lobby only renders while
+      // `sessionMode` is null, so once it flips the loading card is gone
+      // regardless — but a later return-to-menu must not inherit a stale
+      // "starting" state.
+      setStartingRun(false);
     },
-    [getRunSeed, portalService, rewardRunStarted],
+    [portalService, rewardRunStarted, bootstrap, fetchRunSeed, getPracticeSeed],
   );
 
   /**
@@ -250,13 +338,13 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
       return;
     }
 
-    const seed = getRunSeed();
+    const seed = getPracticeSeed();
     runSeedRef.current = seed;
     runStartedAtRef.current = Date.now();
     moveLogRef.current = [];
     setGameState(createInitialState(seed));
     setShowQuitConfirm(false);
-  }, [getRunSeed, sessionMode]);
+  }, [getPracticeSeed, sessionMode]);
 
   if (!gameState || !sessionMode) {
     return (
@@ -294,28 +382,33 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
 
           <button
             onClick={rewardRun.start}
-            disabled={!hasRewardRun}
+            disabled={!hasRewardRun || startingRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
-              hasRewardRun
+              hasRewardRun && !startingRun
                 ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                 : "bg-gray-300 text-gray-500 cursor-not-allowed"
             }`}
           >
-            <div>START REWARD RUN</div>
+            <div>{startingRun ? "STARTING…" : "START REWARD RUN"}</div>
             <div className="mt-2 text-xs opacity-90">
               {!hasRewardRun
                 ? "No reward runs left today — buy Play Tickets in the shop."
-                : rewardRun.freeAvailable
-                  ? isVip
-                    ? "VIP: reward run available for Go Fish today."
-                    : "Reward run available for the arcade today."
-                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
+                : startingRun
+                  ? "Dealing your run…"
+                  : rewardRun.freeAvailable
+                    ? isVip
+                      ? "VIP: reward run available for Go Fish today."
+                      : "Reward run available for the arcade today."
+                    : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
           <button
             onClick={() => startSession("practice")}
-            className="w-full px-6 py-4 bg-blue-500 text-white font-bold rounded-lg hover:bg-blue-600 active:scale-95 transition-all shadow-lg text-lg"
+            disabled={startingRun}
+            className={`w-full px-6 py-4 bg-blue-500 text-white font-bold rounded-lg active:scale-95 transition-all shadow-lg text-lg ${
+              startingRun ? "opacity-50 cursor-not-allowed" : "hover:bg-blue-600"
+            }`}
           >
             <div>START PRACTICE MODE</div>
             <div className="mt-2 text-xs font-semibold opacity-90">
@@ -338,6 +431,41 @@ export const GoFishGame: React.FC<GoFishGameProps> = ({ onClose }) => {
             >
               EXIT
             </button>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server and dealing your cards.
+                  Hold tight — this only takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
+              </div>
+            </div>
           )}
         </div>
       </OuterPanel>

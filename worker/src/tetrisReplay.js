@@ -572,7 +572,7 @@ function validateTetrisReplay(replay) {
     }
   }
 
-  return { difficulty, inputs };
+  return { difficulty, inputs, total: inputs.length };
 }
 
 /**
@@ -602,8 +602,16 @@ function startTetrisReplay(validated, seed) {
  * out. Better to refuse the run and say why.
  */
 function assertRunSeed(seed) {
-  const numeric = Number(seed);
-  if (!Number.isInteger(numeric) || numeric < 0 || numeric > 0xffffffff) {
+  // `typeof` first on purpose: `Number(null)` is 0, and `Number("")` is 0 —
+  // coercing before checking would turn a run with *no* seed into the guessable
+  // seed 0 and sail past the very refusal this function exists to make.
+  const numeric = typeof seed === "number" ? seed : Number(seed);
+  if (
+    typeof seed !== "number" ||
+    !Number.isInteger(numeric) ||
+    numeric < 0 ||
+    numeric > 0xffffffff
+  ) {
     throw new ReplayInputError(
       "This run has no server-issued seed; it was opened before seeding and cannot be verified.",
     );

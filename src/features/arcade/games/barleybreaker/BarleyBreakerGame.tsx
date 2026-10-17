@@ -19,6 +19,11 @@ import { useVipAccess } from "../adapters/useVipAccess";
 import { useRewardRun } from "../adapters/rewardRun";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
+import { useBootstrap } from "lib/portal/BootstrapContext";
+import type { VerifiedRun } from "lib/portal/api";
+import { writeNonce, getEconomyWorkerUrl } from "lib/portal/api";
+import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
+import { encodeInputLog } from "@nightshade/shared/anticheat/inputLog";
 import {
   BARLEY_BREAKER_DIFFICULTIES,
   BARLEY_BREAKER_RAVEN_COIN_REWARD,
@@ -27,36 +32,26 @@ import {
   BarleyBreakerMode,
   getBarleyBreakerDifficulty,
   isBarleyBreakerRewardRunAvailable,
-  PowerUpType,
 } from "./session";
+import {
+  ARENA_HEIGHT,
+  ARENA_WIDTH,
+  BALL_SIZE,
+  CEILING_MARGIN,
+  FIXED_STEP_MS,
+  PADDLE_HEIGHT,
+  PADDLE_Y,
+  createRuntime,
+  encodeTick,
+  getPaddleWidth,
+  tick,
+  type BarleyBreakerRuntime,
+} from "./engine";
 
 const _portalState = (state: PortalMachineState) => state.context.state;
 
 const panelClassName =
   "mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden";
-
-const ARENA_WIDTH = 760;
-const ARENA_HEIGHT = 560;
-const SIDE_GUTTER = 24;
-const CEILING_MARGIN = 20;
-const BRICK_FIELD_TOP = 52;
-const PADDLE_Y = 506;
-const PADDLE_WIDTH = 96;
-const WIDE_PADDLE_WIDTH = 130;
-const PADDLE_HEIGHT = 16;
-const PADDLE_SPEED = 540;
-const BALL_SIZE = 18;
-const BALL_WAVE_SPEED_STEP = 18;
-const BALL_WAVE_SPEED_CAP = 72;
-const WIDE_PADDLE_DURATION_MS = 18000;
-const SLOW_BALL_DURATION_MS = 12000;
-const SLOW_BALL_MULTIPLIER = 0.82;
-const DROP_SPEED = 140;
-const BRICK_COLS = 13;
-const BRICK_WIDTH = 50;
-const BRICK_HEIGHT = 18;
-const BRICK_GAP = 4;
-const MAX_BOUNCE_ANGLE = Math.PI / 3;
 
 /**
  * The floor on how far a *short window* may shrink the arena.
@@ -78,270 +73,13 @@ const INTERCEPTED_CODES = new Set([
   "Space",
 ]);
 
-const WAVE_TEMPLATES = [
-  [
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-    "XXXXXXXXXXXXX",
-  ],
-  [
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-    "XXXXXX.XXXXXX",
-  ],
-  [
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-    "XXXXX...XXXXX",
-  ],
-  [
-    "....XXXXX....",
-    "...XXXXXXX...",
-    "..XXXXXXXXX..",
-    ".XXXXXXXXXXX.",
-    ".XXXXXXXXXXX.",
-    "..XXXXXXXXX..",
-    "...XXXXXXX...",
-    "....XXXXX....",
-  ],
-  [
-    "XXXXXXXXXXXXX",
-    "X...XXXXX...X",
-    "X..XXXXXXX..X",
-    "X.XXXXXXXXX.X",
-    "X.XXXXXXXXX.X",
-    "X..XXXXXXX..X",
-    "X...XXXXX...X",
-    "XXXXXXXXXXXXX",
-  ],
-] as const;
-
-type Brick = {
-  id: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  hp: number;
-  maxHp: number;
-  points: number;
-  alive: boolean;
-};
-
-type Ball = {
-  id: number;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  stuck: boolean;
-};
-
-type Drop = {
-  id: number;
-  type: PowerUpType;
-  x: number;
-  y: number;
-  vy: number;
-};
-
-type Runtime = {
-  paddleX: number;
-  balls: Ball[];
-  bricks: Brick[];
-  drops: Drop[];
-  score: number;
-  lives: number;
-  wave: number;
-  widePaddleMs: number;
-  slowBallMs: number;
-  speedMultiplier: number;
-  gameOver: boolean;
-  won: boolean;
-  reason?: string;
-};
-
-const clamp = (value: number, min: number, max: number) =>
-  Math.max(min, Math.min(max, value));
-
-const getBrickPoints = (row: number) => {
-  if (row < 2) return 40;
-  if (row < 4) return 30;
-  if (row < 6) return 20;
-  return 10;
-};
-
-const getWaveBallSpeed = (
-  difficulty: BarleyBreakerDifficulty,
-  wave: number,
-) => {
-  return (
-    difficulty.baseBallSpeed +
-    Math.min(BALL_WAVE_SPEED_CAP, (wave - 1) * BALL_WAVE_SPEED_STEP)
-  );
-};
-
-const getPaddleWidth = (runtime: Runtime) => {
-  return runtime.widePaddleMs > 0 ? WIDE_PADDLE_WIDTH : PADDLE_WIDTH;
-};
-
-/**
- * The paddle's travel, in arena pixels.
- *
- * One clamp for both input paths: the tick below and the touch bar's scrub
- * handler both land here, so a dragged finger and a held arrow key stop at the
- * same two walls rather than the touch path growing a second, looser range.
- */
-const clampPaddleX = (x: number, paddleWidth: number) =>
-  clamp(x, SIDE_GUTTER, ARENA_WIDTH - SIDE_GUTTER - paddleWidth);
-
-const getTemplateForWave = (wave: number) => {
-  return WAVE_TEMPLATES[(wave - 1) % WAVE_TEMPLATES.length];
-};
-
-/**
- * Spread a multiball across the reference ball's heading.
- *
- * The original's feel is that the ball you were already watching keeps its
- * momentum and simply *becomes several*. So the heading is taken from a live
- * ball rather than invented, and the new balls are rotated a few degrees either
- * side of it: enough to separate them within a frame or two, not so much that
- * they read as a different shot. Offsets are in radians about the reference
- * heading, applied in order so consecutive drops peel off alternately.
- *
- * `offset` is in radians; the caller passes the index so the spread does not
- * restart from the same side every time.
- */
-const MULTIBALL_FAN = [-0.34, 0.34, -0.68, 0.68, -1.02, 1.02, -1.36, 1.36];
-
-const fanAngle = (heading: number, index: number): number => {
-  const offset = MULTIBALL_FAN[index % MULTIBALL_FAN.length];
-  // Reflect rather than accumulate, so a long run of multiballs keeps fanning
-  // outwards instead of winding the whole volley round to the back of the room.
-  return heading + offset * (1 + Math.floor(index / MULTIBALL_FAN.length));
-};
-
-/**
- * The heading a ball is currently travelling, in the same convention the
- * paddle launch uses: 0 is straight up.
- */
-const ballHeading = (ball: Ball): number => {
-  const speed = Math.hypot(ball.vx, ball.vy);
-  if (speed < 0.001) return -Math.PI / 2;
-  const angle = Math.atan2(ball.vx, -ball.vy);
-  return Number.isFinite(angle) ? angle : -Math.PI / 2;
-};
-
-const getPseudoRandom = (
-  wave: number,
-  row: number,
-  col: number,
-  salt: number,
-) => {
-  const value =
-    Math.sin(wave * 971 + row * 173 + col * 271 + salt * 37) * 43758.5453;
-  return value - Math.floor(value);
-};
-
-const getWeightedPowerUp = (
-  wave: number,
-  score: number,
-  brickId: number,
-): PowerUpType => {
-  const roll = getPseudoRandom(wave, score, brickId, 19) * 10;
-
-  if (roll < 4) return "wide-paddle";
-  if (roll < 7) return "slow-ball";
-  if (roll < 9) return "multiball";
-  return "extra-life";
-};
-
-const createWaveBricks = (
-  wave: number,
-  difficulty: BarleyBreakerDifficulty,
-): Brick[] => {
-  const template = getTemplateForWave(wave);
-  const totalWidth = BRICK_COLS * BRICK_WIDTH + (BRICK_COLS - 1) * BRICK_GAP;
-  const startX = Math.floor((ARENA_WIDTH - totalWidth) / 2);
-  const bricks: Brick[] = [];
-  let id = 1;
-
-  template.forEach((rowPattern, row) => {
-    rowPattern.split("").forEach((cell, col) => {
-      if (cell !== "X") return;
-
-      const strongBrick =
-        wave > 1 &&
-        getPseudoRandom(wave, row, col, difficulty.baseBallSpeed) <
-          difficulty.strongBrickChance;
-      const hp = strongBrick ? 2 : 1;
-
-      bricks.push({
-        id: id++,
-        x: startX + col * (BRICK_WIDTH + BRICK_GAP),
-        y: BRICK_FIELD_TOP + row * (BRICK_HEIGHT + BRICK_GAP),
-        width: BRICK_WIDTH,
-        height: BRICK_HEIGHT,
-        hp,
-        maxHp: hp,
-        points: getBrickPoints(row),
-        alive: true,
-      });
-    });
-  });
-
-  return bricks;
-};
-
-const createHeldBall = (paddleX: number, paddleWidth: number): Ball => ({
-  id: Date.now() + Math.floor(Math.random() * 100000),
-  x: paddleX + paddleWidth / 2 - BALL_SIZE / 2,
-  y: PADDLE_Y - BALL_SIZE - 4,
-  vx: 0,
-  vy: 0,
-  stuck: true,
-});
-
-const createInitialRuntime = (difficulty: BarleyBreakerDifficulty): Runtime => {
-  const paddleX = ARENA_WIDTH / 2 - PADDLE_WIDTH / 2;
-
-  return {
-    paddleX,
-    balls: [createHeldBall(paddleX, PADDLE_WIDTH)],
-    bricks: createWaveBricks(1, difficulty),
-    drops: [],
-    score: 0,
-    lives: difficulty.startingLives,
-    wave: 1,
-    widePaddleMs: 0,
-    slowBallMs: 0,
-    speedMultiplier: 1,
-    gameOver: false,
-    won: false,
-  };
-};
-
 export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
   onClose,
 }) => {
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState });
+  const bootstrap = useBootstrap();
 
   const hasRewardRun = useMemo(
     () => isBarleyBreakerRewardRunAvailable({ game: portalGameState, isVip }),
@@ -353,7 +91,7 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
   const isTouchDevice = useIsTouchDevice();
 
   const [mode, setMode] = useState<BarleyBreakerMode | null>(null);
-  const [runtime, setRuntime] = useState<Runtime | null>(null);
+  const [runtime, setRuntime] = useState<BarleyBreakerRuntime | null>(null);
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
     useState(false);
   const [practiceDifficultyName, setPracticeDifficultyName] =
@@ -365,6 +103,50 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
 
   const pressedKeysRef = useRef(new Set<string>());
 
+  // ── The run, its proof log, and the streamed verification ─────────────────
+  //
+  // The simulation state lives in `gameRef`, not in React state: a step is
+  // read from the settled previous step and produces the next one, possibly
+  // several times per frame, and the input log must be written exactly once
+  // per step — both are side effects, and running them inside a `setState`
+  // updater would double-write them under StrictMode's double-invoke. React
+  // state carries a per-frame *snapshot* for rendering only (the same
+  // arrangement as `SunflowerBrawlerGame.tsx`'s `matchRef` and `PacManGame.tsx`'s
+  // `gameRef`, whose chunk plumbing below is mirrored one-for-one).
+  const gameRef = useRef<BarleyBreakerRuntime | null>(null);
+
+  /** One byte per 16ms step: the input the step was taken *under*. */
+  const inputLogRef = useRef<number[]>([]);
+
+  /** Real time not yet spent on whole `FIXED_STEP_MS` steps. */
+  const accumulatorRef = useRef(0);
+
+  const frameRef = useRef<number | null>(null);
+  const lastFrameAtRef = useRef<number | null>(null);
+
+  /** When the current run opened — the claim's `elapsedMs`. */
+  const runStartedAtRef = useRef<number>(0);
+
+  /** The run's difficulty, readable from inside the loop effect. */
+  const activeDifficultyRef = useRef<BarleyBreakerDifficulty>(todaysDifficulty);
+
+  /** The claim, frozen the instant the run settles — see `freezeClaim`. */
+  const frozenClaimRef = useRef<VerifiedRun | null>(null);
+
+  // Input is *parked* for the next step rather than applied to state: an event
+  // that lands between steps (a launch keydown, a finger moving on the touch
+  // bar) cannot be replayed, but a value consumed at step N can — the step
+  // encodes it into the log before the engine reads it, and the worker's
+  // replay feeds the same byte to the same `tick`.
+  const launchPendingRef = useRef(false);
+  const scrubPendingRef = useRef<number | null>(null);
+
+  const chunkIndexRef = useRef(0);
+  const chunkBusyRef = useRef(false);
+  const chunkBrokenRef = useRef(false);
+  const chunkQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chunkDrainedRef = useRef<Promise<void> | null>(null);
+
   const returnToMenu = useCallback(() => {
     pressedKeysRef.current.clear();
     setMode(null);
@@ -372,6 +154,12 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
     setShowPracticeDifficultyPrompt(false);
     setShowExitConfirm(false);
     rewardGrantedRef.current = false;
+    gameRef.current = null;
+    inputLogRef.current = [];
+    frozenClaimRef.current = null;
+    launchPendingRef.current = false;
+    scrubPendingRef.current = null;
+    chunkDrainedRef.current = null;
   }, []);
 
   const startSession = useCallback(
@@ -390,13 +178,36 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
       const difficulty =
         nextMode === "reward" ? todaysDifficulty : selectedPracticeDifficulty;
 
+      // One runtime instance, shared by the loop (through `gameRef`) and the
+      // first render (through its snapshot): two `createRuntime` calls would be
+      // two games, and the claim would describe the one nobody played.
+      const fresh = createRuntime(difficulty);
+      gameRef.current = fresh;
+      setRuntime({ ...fresh });
+
       pressedKeysRef.current.clear();
       setActiveDifficulty(difficulty);
       setMode(nextMode);
-      setRuntime(createInitialRuntime(difficulty));
       setShowPracticeDifficultyPrompt(false);
       setShowExitConfirm(false);
       rewardGrantedRef.current = false;
+      launchPendingRef.current = false;
+      scrubPendingRef.current = null;
+
+      // Fresh run, fresh proof: the log, the claim and the stream all belong
+      // to exactly one run, and a "Play Again" that inherited the previous
+      // run's cursor would post its first window at an index the worker's
+      // brand-new park has never heard of.
+      activeDifficultyRef.current = difficulty;
+      inputLogRef.current = [];
+      frozenClaimRef.current = null;
+      accumulatorRef.current = 0;
+      runStartedAtRef.current = Date.now();
+      chunkIndexRef.current = 0;
+      chunkBusyRef.current = false;
+      chunkBrokenRef.current = false;
+      chunkQueueRef.current = Promise.resolve();
+      chunkDrainedRef.current = null;
 
       if (nextMode === "reward") {
         portalService.send({
@@ -420,43 +231,17 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
     startRewardRun: () => startSession("reward"),
   });
 
-  const launchBall = useCallback(() => {
-    setRuntime((previous) => {
-      if (!previous || previous.gameOver) return previous;
-
-      const speed =
-        getWaveBallSpeed(activeDifficulty, previous.wave) *
-        previous.speedMultiplier;
-      let launched = false;
-
-      const balls = previous.balls.map((ball, index) => {
-        if (!ball.stuck) return ball;
-
-        launched = true;
-        const direction = index % 2 === 0 ? 1 : -1;
-        return {
-          ...ball,
-          vx: speed * 0.55 * direction,
-          vy: -Math.sqrt(
-            Math.max(speed * speed - Math.pow(speed * 0.55, 2), 1),
-          ),
-          stuck: false,
-        };
-      });
-
-      if (!launched) return previous;
-
-      return {
-        ...previous,
-        balls,
-      };
-    });
-  }, [activeDifficulty]);
+  // A launch is not an event that lands *between* steps any more — the next
+  // step has to consume it, because that is what the log records and what the
+  // replay re-runs (see `engine.ts` on why `launchBall` moved into the tick).
+  const requestLaunch = useCallback(() => {
+    launchPendingRef.current = true;
+  }, []);
 
   // The touch bar's fire button stands in for `Space`. The keyboard is the one
   // place that already knows how to launch, so the button dispatches the same
-  // `keydown`/`keyup` pair the key itself sends and the handler above runs it —
-  // no second launch path to keep in step with the first.
+  // `keydown`/`keyup` pair the key itself sends and the handler above marks the
+  // launch pending — no second launch path to keep in step with the first.
   const launchFromTouch = useCallback(() => {
     for (const type of ["keydown", "keyup"] as const) {
       window.dispatchEvent(
@@ -472,331 +257,15 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
 
   // `TouchMoveBar` reports where the finger is across the strip as an absolute
   // 0..1 ratio, and that maps straight onto the paddle's travel — absolute
-  // rather than the per-frame nudge the polled `ArrowLeft`/`ArrowRight` give,
+  // rather than the per-step nudge the polled `ArrowLeft`/`ArrowRight` give,
   // because a paddle that creeps sideways is a paddle that is always behind the
-  // ball. This only writes `paddleX`; the tick then carries the held ball with
-  // it, so nothing downstream learns there is a second input path.
+  // ball. The ratio is parked for the *next* step instead of being written into
+  // React state: the step encodes it (bit 7 + 7 bits of position, see
+  // `engine.ts`), applies it as the same absolute position, and the replay
+  // reproduces it byte for byte.
   const scrubPaddle = useCallback((ratio: number) => {
-    setRuntime((previous) => {
-      if (!previous || previous.gameOver) return previous;
-
-      const paddleWidth = getPaddleWidth(previous);
-      const leftmost = SIDE_GUTTER;
-      const rightmost = ARENA_WIDTH - SIDE_GUTTER - paddleWidth;
-
-      return {
-        ...previous,
-        paddleX: clampPaddleX(
-          leftmost + ratio * (rightmost - leftmost),
-          paddleWidth,
-        ),
-      };
-    });
+    scrubPendingRef.current = Math.max(0, Math.min(1, ratio));
   }, []);
-
-  const tick = useCallback(
-    (dtMs: number) => {
-      setRuntime((previous) => {
-        if (!previous || previous.gameOver) return previous;
-
-        const dt = dtMs / 1000;
-        const currentPaddleWidth = getPaddleWidth(previous);
-        const movingLeft =
-          pressedKeysRef.current.has("ArrowLeft") ||
-          pressedKeysRef.current.has("KeyA");
-        const movingRight =
-          pressedKeysRef.current.has("ArrowRight") ||
-          pressedKeysRef.current.has("KeyD");
-        const direction = (movingRight ? 1 : 0) - (movingLeft ? 1 : 0);
-        const paddleX = clampPaddleX(
-          previous.paddleX + direction * PADDLE_SPEED * dt,
-          currentPaddleWidth,
-        );
-
-        let score: number = previous.score;
-        let lives: number = previous.lives;
-        let won: boolean = previous.won;
-        let gameOver: boolean = previous.gameOver;
-        let reason: string | undefined = previous.reason;
-        let wave: number = previous.wave;
-        let widePaddleMs: number = Math.max(0, previous.widePaddleMs - dtMs);
-        let slowBallMs: number = Math.max(0, previous.slowBallMs - dtMs);
-        let drops: Drop[] = previous.drops.map((drop) => ({
-          ...drop,
-          y: drop.y + drop.vy * dt,
-        }));
-        let bricks = previous.bricks.map((brick) => ({ ...brick }));
-        let balls: Ball[] = [];
-        const paddleWidth = currentPaddleWidth;
-        const paddleRight = paddleX + paddleWidth;
-        let collectedWide = false;
-        let collectedSlow = false;
-        let collectedMultiball = false;
-        let collectedExtraLife = false;
-
-        for (const sourceBall of previous.balls) {
-          const ball = { ...sourceBall };
-
-          if (ball.stuck) {
-            balls.push({
-              ...ball,
-              x: paddleX + paddleWidth / 2 - BALL_SIZE / 2,
-              y: PADDLE_Y - BALL_SIZE - 4,
-            });
-            continue;
-          }
-
-          let nextX = ball.x + ball.vx * dt;
-          let nextY = ball.y + ball.vy * dt;
-          let nextVx = ball.vx;
-          let nextVy = ball.vy;
-
-          if (nextX <= SIDE_GUTTER) {
-            nextX = SIDE_GUTTER;
-            nextVx = Math.abs(nextVx);
-          }
-          if (nextX + BALL_SIZE >= ARENA_WIDTH - SIDE_GUTTER) {
-            nextX = ARENA_WIDTH - SIDE_GUTTER - BALL_SIZE;
-            nextVx = -Math.abs(nextVx);
-          }
-          if (nextY <= CEILING_MARGIN) {
-            nextY = CEILING_MARGIN;
-            nextVy = Math.abs(nextVy);
-          }
-
-          const overlapsPaddle =
-            nextX < paddleRight &&
-            nextX + BALL_SIZE > paddleX &&
-            nextY < PADDLE_Y + PADDLE_HEIGHT &&
-            nextY + BALL_SIZE > PADDLE_Y;
-          if (
-            nextVy > 0 &&
-            overlapsPaddle &&
-            ball.y + BALL_SIZE <= PADDLE_Y + 6
-          ) {
-            const speed = Math.hypot(nextVx, nextVy);
-            const paddleCenter = paddleX + paddleWidth / 2;
-            const ballCenter = nextX + BALL_SIZE / 2;
-            const normalizedImpact = clamp(
-              (ballCenter - paddleCenter) / (paddleWidth / 2),
-              -1,
-              1,
-            );
-            const angle = normalizedImpact * MAX_BOUNCE_ANGLE;
-            nextVx = speed * Math.sin(angle);
-            nextVy = -Math.max(120, Math.abs(speed * Math.cos(angle)));
-            nextY = PADDLE_Y - BALL_SIZE - 1;
-          }
-
-          let hitBrickIndex = -1;
-          for (let index = 0; index < bricks.length; index++) {
-            const brick = bricks[index];
-            if (!brick.alive) continue;
-
-            const intersectsBrick =
-              nextX < brick.x + brick.width &&
-              nextX + BALL_SIZE > brick.x &&
-              nextY < brick.y + brick.height &&
-              nextY + BALL_SIZE > brick.y;
-            if (!intersectsBrick) continue;
-
-            hitBrickIndex = index;
-            const overlapLeft = nextX + BALL_SIZE - brick.x;
-            const overlapRight = brick.x + brick.width - nextX;
-            const overlapTop = nextY + BALL_SIZE - brick.y;
-            const overlapBottom = brick.y + brick.height - nextY;
-            const overlapX = Math.min(overlapLeft, overlapRight);
-            const overlapY = Math.min(overlapTop, overlapBottom);
-
-            if (overlapX < overlapY) {
-              nextVx = -nextVx;
-            } else {
-              nextVy = -nextVy;
-            }
-            break;
-          }
-
-          if (hitBrickIndex >= 0) {
-            const brick = bricks[hitBrickIndex];
-            brick.hp -= 1;
-
-            if (brick.hp <= 0) {
-              brick.alive = false;
-              score += brick.points;
-
-              if (
-                getPseudoRandom(wave, hitBrickIndex, score, brick.id) <
-                activeDifficulty.powerUpChance
-              ) {
-                drops.push({
-                  id:
-                    Date.now() +
-                    hitBrickIndex +
-                    Math.floor(Math.random() * 1000),
-                  type: getWeightedPowerUp(wave, score, brick.id),
-                  x: brick.x + brick.width / 2 - 14,
-                  y: brick.y + brick.height / 2 - 14,
-                  vy: DROP_SPEED,
-                });
-              }
-            }
-          }
-
-          if (nextY > ARENA_HEIGHT + BALL_SIZE) {
-            continue;
-          }
-
-          balls.push({
-            ...ball,
-            x: nextX,
-            y: nextY,
-            vx: nextVx,
-            vy: nextVy,
-          });
-        }
-
-        drops = drops.filter((drop) => drop.y < ARENA_HEIGHT + 32);
-        drops = drops.filter((drop) => {
-          const caught =
-            drop.x < paddleRight &&
-            drop.x + 28 > paddleX &&
-            drop.y < PADDLE_Y + PADDLE_HEIGHT &&
-            drop.y + 28 > PADDLE_Y;
-          if (!caught) return true;
-
-          if (drop.type === "wide-paddle") {
-            collectedWide = true;
-          }
-          if (drop.type === "slow-ball") {
-            collectedSlow = true;
-          }
-          if (drop.type === "extra-life") {
-            collectedExtraLife = true;
-          }
-          if (drop.type === "multiball") {
-            collectedMultiball = true;
-          }
-          return false;
-        });
-
-        if (collectedWide) {
-          widePaddleMs = WIDE_PADDLE_DURATION_MS;
-        }
-        if (collectedSlow) {
-          slowBallMs = SLOW_BALL_DURATION_MS;
-        }
-        if (collectedExtraLife) {
-          lives = Math.min(activeDifficulty.startingLives + 1, lives + 1);
-        }
-        if (collectedMultiball && balls.length > 0) {
-          // Fan out from a ball that is actually moving, and **keep every ball
-          // already on the table with its own velocity untouched**.
-          //
-          // This used to rebuild the array from scratch into exactly three
-          // balls aimed at fixed angles, which threw away both the momentum and
-          // the count: collecting a second multiball with eight balls out in
-          // play collapsed them to three, and every ball in the volley snapped
-          // to a heading the player never hit. "All balls follow the inertia of
-          // the ball that was already travelling" is the whole point of the
-          // pickup, so the heading is read off a live ball and each new one is
-          // rotated a few degrees off it.
-          const live = balls.filter((ball) => !ball.stuck);
-          const referenceBall = live[0] ?? balls[0];
-          const speed = Math.max(
-            160,
-            Math.hypot(referenceBall.vx, referenceBall.vy) ||
-              getWaveBallSpeed(activeDifficulty, wave),
-          );
-
-          // Two extra balls per pickup. No cap: the ceiling that used to sit at
-          // three is what stopped a good position from paying off, and every
-          // ball is just another 12-line loop in the tick.
-          const extrasPerPickup = 2;
-          // Seeded off the highest id already on the table rather than the
-          // clock: two multiball drops can land on the same frame, and
-          // `Date.now()` would then hand both the same id and React would drop
-          // a ball from the list as a duplicate key.
-          let nextId = balls.reduce((max, ball) => Math.max(max, ball.id), 0) + 1;
-
-          balls = [
-            ...balls,
-            ...Array.from({ length: extrasPerPickup }, (_, index) => {
-              const heading = fanAngle(ballHeading(referenceBall), index);
-              const ball: Ball = {
-                id: nextId++,
-                x: referenceBall.x,
-                y: referenceBall.y,
-                vx: Math.sin(heading) * speed,
-                vy: -Math.cos(heading) * speed,
-                stuck: false,
-              };
-              return ball;
-            }),
-          ];
-        }
-
-        const nextSpeedMultiplier = slowBallMs > 0 ? SLOW_BALL_MULTIPLIER : 1;
-        if (nextSpeedMultiplier !== previous.speedMultiplier) {
-          const ratio = nextSpeedMultiplier / previous.speedMultiplier;
-          balls = balls.map((ball) =>
-            ball.stuck
-              ? ball
-              : {
-                  ...ball,
-                  vx: ball.vx * ratio,
-                  vy: ball.vy * ratio,
-                },
-          );
-        }
-
-        if (score >= activeDifficulty.targetScore) {
-          won = true;
-          gameOver = true;
-          reason = "Target score reached";
-        }
-
-        const remainingBricks = bricks.filter((brick) => brick.alive);
-        if (!gameOver && remainingBricks.length === 0) {
-          wave += 1;
-          bricks = createWaveBricks(wave, activeDifficulty);
-          drops = [];
-          widePaddleMs = 0;
-          slowBallMs = 0;
-          balls = [createHeldBall(paddleX, PADDLE_WIDTH)];
-        }
-
-        if (!gameOver && balls.length === 0) {
-          lives -= 1;
-
-          if (lives <= 0) {
-            gameOver = true;
-            won = false;
-            reason = "Out of lives";
-          } else {
-            balls = [createHeldBall(paddleX, PADDLE_WIDTH)];
-          }
-        }
-
-        return {
-          ...previous,
-          paddleX,
-          balls,
-          bricks,
-          drops,
-          score,
-          lives,
-          wave,
-          widePaddleMs,
-          slowBallMs,
-          speedMultiplier: nextSpeedMultiplier,
-          gameOver,
-          won,
-          reason,
-        };
-      });
-    },
-    [activeDifficulty],
-  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -805,8 +274,8 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
 
       pressedKeysRef.current.add(event.code);
 
-      if (event.code === "Space" && mode && runtime && !showExitConfirm) {
-        launchBall();
+      if (event.code === "Space" && mode && gameRef.current && !showExitConfirm) {
+        launchPendingRef.current = true;
       }
     };
 
@@ -821,44 +290,272 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [launchBall, mode, runtime, showExitConfirm]);
+  }, [mode, showExitConfirm]);
 
+  // ── Game loop ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mode || showExitConfirm || runtime?.gameOver) return;
+    if (!mode || !runtime || runtime.gameOver || showExitConfirm) {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      lastFrameAtRef.current = null;
+      accumulatorRef.current = 0;
+      return;
+    }
 
-    let frame = 0;
-    let previousTime = performance.now();
+    accumulatorRef.current = 0;
+    lastFrameAtRef.current = null;
 
-    const loop = (now: number) => {
-      const dtMs = Math.min(32, now - previousTime);
-      previousTime = now;
-      tick(dtMs);
-      frame = window.requestAnimationFrame(loop);
+    /**
+     * Queue one verification window behind the ones already on the wire.
+     *
+     * The chain is the whole point: the worker resumes a park only at exactly
+     * the cursor the next window belongs at, so two windows in flight at once
+     * would arrive in whichever order the network pleased and the second would
+     * void the park the first just built. Window 0 carries the run's
+     * difficulty — the only engine context a zero-RNG run needs — and every
+     * later window inherits it from the park.
+     */
+    const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
+      const send = async () => {
+        if (chunkBrokenRef.current) return;
+        const jwt = bootstrap?.jwt;
+        if (!jwt) return;
+
+        try {
+          const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json;charset=UTF-8",
+              accept: "application/json",
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({
+              intent: "verify-chunk",
+              nonce: writeNonce(),
+              chunkIndex,
+              inputs: encodeInputLog(bytes),
+              ...(chunkIndex === 0
+                ? { difficulty: activeDifficultyRef.current.name }
+                : {}),
+            }),
+          });
+          if (!res.ok) {
+            // Surface why the worker rejected it, and stop: windows are
+            // ordered, so the ones behind a refused window would be refused
+            // for the cursor rather than for their contents.
+            const detail = await res.text().catch(() => "");
+            console.warn(`[verify-chunk] ${res.status}`, detail);
+            chunkBrokenRef.current = true;
+          }
+        } catch {
+          // A dropped window cannot be re-sent out of order — the next window
+          // would arrive at a cursor the park no longer has — so the stream
+          // ends here and the claim has to replay the run itself, which a run
+          // this long will not fit in one request.
+          chunkBrokenRef.current = true;
+        }
+      };
+
+      chunkQueueRef.current = chunkQueueRef.current.then(send);
     };
 
-    frame = window.requestAnimationFrame(loop);
+    /**
+     * Queue every complete window the log has grown since the last one.
+     *
+     * A window is the unit: one is queued whenever a full one exists, whatever
+     * frame that happens to be — 600 steps is 9.6 seconds of play at 16ms a
+     * step, so the queue trails the log by seconds rather than by ticks.
+     */
+    const pumpVerificationChunks = () => {
+      if (mode !== "reward") return;
+      if (chunkBusyRef.current || chunkBrokenRef.current) return;
 
+      const start = chunkIndexRef.current * CHUNK_TICKS;
+      if (inputLogRef.current.length - start < CHUNK_TICKS) return;
+
+      const end = start + CHUNK_TICKS;
+      const chunkIndex = chunkIndexRef.current;
+      chunkIndexRef.current += 1;
+      postVerificationWindow(
+        chunkIndex,
+        Uint8Array.from(inputLogRef.current.slice(start, end)),
+      );
+
+      // One window on the wire at a time: the response is what proves the park
+      // took it, and the next window may only be built on a park that did.
+      chunkBusyRef.current = true;
+      void chunkQueueRef.current.finally(() => {
+        chunkBusyRef.current = false;
+      });
+    };
+
+    /**
+     * Freeze the claim the moment the run settles, then close the log behind
+     * it.
+     *
+     * Runs after the steps, against the settled game: the score recorded here
+     * already contains whatever step ended the run (the engine applies wins
+     * and losses inside the step), so the claim's score, its log and its
+     * duration are all read from one state of the run rather than from a later
+     * frame.
+     *
+     * The tail-close matters more than it looks. The worker refuses a claim
+     * whose park holds less log than the claim asserts (`parked.total` must
+     * equal the claim's `ticks`), because such a claim's replay cannot finish
+     * inside one request — so every window still unwritten is queued behind
+     * the windows already on the wire, and `chunkDrainedRef` is what the
+     * payout effect waits on. A claim that overtakes its own tail would start
+     * the replay from tick zero and never reach the end.
+     */
+    const freezeClaim = () => {
+      const game = gameRef.current;
+      if (!game || frozenClaimRef.current) return;
+      if (!game.gameOver || !game.won || mode !== "reward") return;
+
+      frozenClaimRef.current = {
+        cabinet: "barley-breaker",
+        score: game.score,
+        checkpoints: [],
+        elapsedMs: Date.now() - runStartedAtRef.current,
+        replay: {
+          difficulty: activeDifficultyRef.current.name,
+          ticks: inputLogRef.current.length,
+          inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
+        },
+      };
+
+      if (!chunkBrokenRef.current) {
+        const log = inputLogRef.current;
+        let start = chunkIndexRef.current * CHUNK_TICKS;
+        while (start < log.length) {
+          const end = Math.min(start + CHUNK_TICKS, log.length);
+          postVerificationWindow(
+            chunkIndexRef.current,
+            Uint8Array.from(log.slice(start, end)),
+          );
+          chunkIndexRef.current += 1;
+          start = end;
+        }
+      }
+      chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
+    };
+
+    const loop = (ts: number) => {
+      frameRef.current = requestAnimationFrame(loop);
+
+      const prevAt = lastFrameAtRef.current ?? ts;
+      lastFrameAtRef.current = ts;
+
+      let game = gameRef.current;
+      if (!game) return;
+
+      // Whole steps only, and never more simulated time than the tab was
+      // actually allowed to elapse (the brawler's own clamp): a backgrounded
+      // tab must not fast-forward the board on return.
+      accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // `game` is advanced *in place* through the loop. Reading the state once
+      // into a `const` before the loop and stepping that same value every
+      // iteration looks equivalent and is not: whenever a frame delivers more
+      // than one step of accumulated time — a stutter, a GC pause, a tab
+      // switch, anything the 250 ms clamp lets through — the second and later
+      // iterations re-step the *pre-loop* state, so the board stops advancing
+      // while the log keeps recording a byte per iteration. The claim then
+      // asserts a run that never happened, the worker's replay steps one tick
+      // per byte from a correctly advancing engine, and the two diverge on the
+      // first hiccup.
+      while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
+        // Sample the step's input, encode it, step under it — in that order,
+        // so the byte on the left is exactly the input the step ran under.
+        // Sampling afterwards would round a press and a step apart.
+        const scrub = scrubPendingRef.current;
+        scrubPendingRef.current = null;
+        // A scrub byte cannot carry the launch bit (bit 7 owns the byte), so
+        // a launch pending behind a dragging finger rides the next keyboard
+        // byte — the pending flag is only consumed when it goes out.
+        const launch = scrub === null && launchPendingRef.current;
+        if (launch) launchPendingRef.current = false;
+
+        const movingLeft =
+          pressedKeysRef.current.has("ArrowLeft") ||
+          pressedKeysRef.current.has("KeyA");
+        const movingRight =
+          pressedKeysRef.current.has("ArrowRight") ||
+          pressedKeysRef.current.has("KeyD");
+        const input = {
+          dir: ((movingRight ? 1 : 0) - (movingLeft ? 1 : 0)) as -1 | 0 | 1,
+          launch,
+          scrub,
+        };
+
+        inputLogRef.current.push(encodeTick(input));
+        game = tick(game, FIXED_STEP_MS, input);
+        gameRef.current = game;
+        accumulatorRef.current -= FIXED_STEP_MS;
+        pumpVerificationChunks();
+        if (game.gameOver) break;
+      }
+
+      // The run may have ended on the step above — freeze it before the
+      // render that announces it.
+      freezeClaim();
+
+      // Guarded the way `freezeClaim` guards: the loop above only steps a
+      // live game, so the ref cannot be null here — but it is typed
+      // nullable, and the render wants the *latest* value, after the loop's
+      // reassignments.
+      const latest = gameRef.current;
+      if (latest !== null) setRuntime({ ...latest });
+    };
+
+    frameRef.current = requestAnimationFrame(loop);
     return () => {
-      window.cancelAnimationFrame(frame);
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+      lastFrameAtRef.current = null;
     };
-  }, [mode, runtime?.gameOver, showExitConfirm, tick]);
+  }, [mode, runtime?.gameOver, showExitConfirm, bootstrap]);
 
+  // ── Reward grant ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (
-      mode !== "reward" ||
       !runtime?.gameOver ||
       !runtime.won ||
-      rewardGrantedRef.current
+      rewardGrantedRef.current ||
+      mode !== "reward"
     ) {
+      return;
+    }
+    rewardGrantedRef.current = true;
+
+    // The claim was frozen by the loop the instant the run settled — score,
+    // log and duration from one state. Absent means the win somehow happened
+    // without the loop settling, which cannot happen while the loop is
+    // running; it is still checked, because claiming with no log would burn
+    // the voucher for nothing — and the voucher is the player's ticket, not
+    // ours to spend.
+    const claim = frozenClaimRef.current;
+    if (!claim) {
+      rewardGrantedRef.current = false;
+      console.error("[barley-breaker] win with no frozen claim");
       return;
     }
 
     submitScore({ score: runtime.score });
-    portalService.send({
-      type: "arcadeMinigame.ravenCoinWon",
-      amount: BARLEY_BREAKER_RAVEN_COIN_REWARD,
+
+    // The tail windows are still on the wire when this effect runs — the
+    // freeze, the tail and the `gameOver` that triggered this are all observed
+    // in the same frame. The claim may only land once the park holds the
+    // whole log: overtaking it makes the worker start the replay from tick
+    // zero, and a run this long cannot be re-simulated inside one request, so
+    // the refusal that follows would be of an honestly won coin.
+    void (chunkDrainedRef.current ?? Promise.resolve()).then(() => {
+      portalService.send({
+        type: "arcadeMinigame.ravenCoinWon",
+        amount: BARLEY_BREAKER_RAVEN_COIN_REWARD,
+        verify: claim,
+      });
     });
-    rewardGrantedRef.current = true;
   }, [mode, portalService, runtime]);
 
   const brickSummary = useMemo(() => {
@@ -1275,7 +972,7 @@ export const BarleyBreakerGame: React.FC<{ onClose?: () => void }> = ({
               target score to win the run.
             </div>
             <div className="flex gap-2">
-              <Button onClick={launchBall}>LAUNCH</Button>
+              <Button onClick={requestLaunch}>LAUNCH</Button>
               <Button onClick={() => setShowExitConfirm(true)}>EXIT</Button>
             </div>
           </div>

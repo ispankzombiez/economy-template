@@ -215,7 +215,7 @@ const snapshot = (m) => JSON.parse(JSON.stringify(m));
 
 /** The worker's half, the way it really runs: slice, park as JSON, resume. */
 function replayChunked(claim, chunk) {
-  let state = startReplay(claim);
+  let state = startReplay(claim, claim.seed);
   let parks = 0;
   while (!isReplayComplete(state)) {
     stepReplay(state, chunk);
@@ -265,7 +265,7 @@ for (const { ticks, seed, variant } of SCENARIOS) {
     `froze at ${claim.ticks} ticks`,
   );
 
-  const one = startReplay(claim);
+  const one = startReplay(claim, claim.seed);
   stepReplay(one, one.total);
   const oneOutcome = replayOutcome(one);
 

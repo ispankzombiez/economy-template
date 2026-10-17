@@ -131,9 +131,11 @@ const {
   getSolitaireDifficulty,
   // Worker verifier
   SolitaireReplayInputError,
+  assertIssuedSeed,
   runSolitaireReplay,
   solitaireReplayOutcome,
   validateSolitaireReplay,
+  SOLITAIRE_SEED_WALK,
   // Codec
   MAX_SOLITAIRE_ACTIONS,
   SOLITAIRE_OPS,
@@ -469,6 +471,84 @@ const yesterday = getSolitaireDifficulty(Date.now() - 86_400_000);
   expectInputError({ ...base, difficulty: today.name, seed: -1 }, "a negative seed is refused");
   expectInputError({ ...base, difficulty: today.name, actions: "" }, "an empty action log is refused");
   expectInputError({ ...base, difficulty: today.name, actions: "AAEC" }, "a malformed (odd-byte) log is refused");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// B2. The issued-seed binding: a claim's deal seed must be one the server's
+//     base seed could have walked to.
+//
+// This is the window check that keeps a claim from naming a seed it shopped
+// for across the whole 32-bit space. The client's `createSolvableDeal` walks
+// `(base + i) >>> 0` forward for i in [0, 100), so the binding accepts exactly
+// that window and refuses everything else — including a base that is absent
+// altogether (a run opened before the seed column existed), which must fail
+// closed rather than coerce to `0` and bind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+{
+  const expectBindingError = (resolved, base, label) => {
+    try {
+      assertIssuedSeed(resolved, base);
+      check(false, label, "did not throw");
+    } catch (error) {
+      check(
+        error instanceof SolitaireReplayInputError,
+        label,
+        `wrong error type: ${error}`,
+      );
+    }
+  };
+  const expectBindingOk = (resolved, base, label) => {
+    try {
+      assertIssuedSeed(resolved, base);
+      check(true, label);
+    } catch (error) {
+      check(false, label, `unexpected throw: ${error}`);
+    }
+  };
+
+  const base = 1_000_000_000;
+
+  // The honest cases: the walk stopped on its first try (resolved === base), or
+  // landed forward inside the window.
+  expectBindingOk(base, base, "the base seed itself binds (a deal on the first try)");
+  expectBindingOk(base + 1, base, "one step forward binds");
+  expectBindingOk(
+    base + (SOLITAIRE_SEED_WALK - 1),
+    base,
+    "the last in-window seed binds",
+  );
+
+  // Just past the window: no honest walk reaches this, so it can only be a seed
+  // the caller chose.
+  expectBindingError(
+    base + SOLITAIRE_SEED_WALK,
+    base,
+    "a seed one past the walk window is refused",
+  );
+  expectBindingError(base + 10_000, base, "a far-forward (shopped) seed is refused");
+  expectBindingError(base - 1, base, "a seed behind the base is refused (the walk goes forward only)");
+  expectBindingError(0, base, "an unrelated seed is refused");
+
+  // The run has no issued seed at all: `null`/`undefined` must be rejected as
+  // missing, not coerced to `0` and bound.
+  expectBindingError(base, null, "a run whose issued seed is null fails closed");
+  expectBindingError(base, undefined, "an undefined base fails closed");
+  expectBindingError(base, "1000", "a non-numeric base fails closed");
+
+  // The 2^32 wraparound the client's `(seed + i) >>> 0` performs: a base near
+  // the top of the range walks across zero, and the binding must follow.
+  const nearTop = 0xfffffffe;
+  expectBindingOk(
+    (nearTop + 3) >>> 0,
+    nearTop,
+    "a seed across the 2^32 wrap binds (the walk wraps too)",
+  );
+  expectBindingError(
+    (nearTop + SOLITAIRE_SEED_WALK) >>> 0,
+    nearTop,
+    "a wrapped seed past the window is refused",
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -138,22 +138,73 @@ export function validateReplay(replay) {
 /**
  * Open a replay: validate the claim, then build the match it will step.
  *
- * The match comes from the same three constants the client opened with. The RNG
- * is seeded here and nowhere else, so the worker's stream and the client's are
- * the same stream — which is the entire reason Stage A moved every
- * `Math.random` out of the simulation.
+ * The match comes from the same three constants the client opened with, but its
+ * RNG is seeded from the **issued** seed — the number this worker drew when the
+ * run opened (`active_runs.seed`), passed by the caller and never read back out
+ * of the claim. The claim's own `seed` field is the browser's word; a seed the
+ * client picks is one the client can also satisfy, which would make the replay
+ * a restatement of the request rather than a check on it. The two are compared
+ * rather than reconciled: a claim whose declared seed is not the issued one did
+ * not play the run the ledger holds, and is refused by name.
  *
+ * @param {{ seed: unknown, playerId: unknown, difficulty: unknown,
+ *           ticks: unknown, inputs: unknown }} replay The claim's `replay` field.
+ * @param {unknown} issuedSeed The seed the server issued for this run.
  * @returns {{ match: object, inputs: Uint8Array, cursor: number, total: number }}
- * @throws {ReplayInputError} when the submission cannot describe a run.
+ * @throws {ReplayInputError} when the submission cannot describe a run, or its
+ *   seed was not the one issued.
  */
-export function startReplay(replay) {
+export function startReplay(replay, issuedSeed) {
   const { seed, playerId, difficulty, inputs, total } = validateReplay(replay);
   return {
-    match: createMatch({ playerId, difficulty, input: emptyInput(), seed }),
+    match: createMatch({
+      playerId,
+      difficulty,
+      input: emptyInput(),
+      seed: bindIssuedSeed(seed, issuedSeed),
+    }),
     inputs,
     cursor: 0,
     total,
   };
+}
+
+/**
+ * The issued seed, or a refusal.
+ *
+ * Two refusals, for two different facts. A run opened before `active_runs.seed`
+ * existed has no seed at all — there is no fallback to a day hash or a client
+ * value, because verifying against a seed anyone could work out is the exact
+ * outcome the column exists to prevent; better to refuse and say why. A run
+ * whose ledger seed disagrees with the seed the claim declares is a client that
+ * played something other than what it was issued — seed shopping, or a stale
+ * bundle — and is refused just as plainly rather than being papered over with a
+ * score mismatch nobody can debug.
+ *
+ * The `typeof` guard first, deliberately: `Number(null)` is `0`, and a null
+ * ledger column must refuse rather than silently become seed 0.
+ *
+ * @param {number} declaredSeed The seed the claim says it played from.
+ * @param {unknown} issuedSeed The ledger's seed for this run.
+ * @returns {number} The issued seed.
+ * @throws {ReplayInputError} when the run has no issued seed, or the claim's
+ *   seed is not it.
+ */
+function bindIssuedSeed(declaredSeed, issuedSeed) {
+  if (
+    typeof issuedSeed !== "number" ||
+    !Number.isInteger(issuedSeed) ||
+    issuedSeed < 0 ||
+    issuedSeed > 0xffffffff
+  ) {
+    throw new ReplayInputError(
+      "This run has no server-issued seed; it was opened before seeding and cannot be verified.",
+    );
+  }
+  if (declaredSeed !== issuedSeed) {
+    throw new ReplayInputError("the replay's seed was not issued for this run");
+  }
+  return issuedSeed;
 }
 
 /**

@@ -24,6 +24,15 @@ import { NPC_WEARABLES } from "lib/npcs";
 import { PortalContext } from "../adapters/portal";
 import { PortalMachineState } from "../adapters/portal";
 import { useRewardRun } from "../adapters/rewardRun";
+import { useBootstrap } from "lib/portal/BootstrapContext";
+import type { VerifiedRun } from "lib/portal/api";
+import {
+  writeNonce,
+  getEconomyWorkerUrl,
+  postEconomyWrite,
+} from "lib/portal/api";
+import { CHUNK_TICKS } from "@nightshade/shared/anticheat/replayBudget";
+import { encodeInputLog } from "@nightshade/shared/anticheat/inputLog";
 import {
   getGoblinInvadersDifficulty,
   isGoblinInvadersRewardRunAvailable,
@@ -33,21 +42,25 @@ import {
   GoblinInvadersDifficultyName,
   GoblinInvadersMode,
 } from "./session";
+import {
+  ARENA_HEIGHT,
+  ARENA_WIDTH,
+  ENEMY_HEIGHT,
+  ENEMY_WIDTH,
+  FIXED_STEP_MS,
+  MYSTERY_SHIP_HEIGHT,
+  MYSTERY_SHIP_WIDTH,
+  MYSTERY_SHIP_Y,
+  PLAYER_SIZE,
+  PLAYER_Y,
+  SHIELD_CELL_SIZE,
+  createRuntime,
+  encodeTick,
+  tick,
+  type GoblinInvadersRuntime,
+} from "./engine";
 
 const _portalState = (state: PortalMachineState) => state.context.state;
-
-const ARENA_WIDTH = 760;
-const ARENA_HEIGHT = 560;
-const PLAYER_Y = ARENA_HEIGHT - 48;
-const PLAYER_SPEED = 420;
-const PLAYER_SIZE = 42; // collision box (kept as-is; gameplay is tuned to it)
-
-const PLAYER_SHOT_SPEED = 620;
-const ENEMY_SHOT_SPEED = 260;
-const ENEMY_ROWS = 5;
-const ENEMY_COLS = 11;
-const ENEMY_WIDTH = 34;
-const ENEMY_HEIGHT = 34;
 
 /**
  * How big the bumpkin is *drawn*, in pixels of visible character height.
@@ -66,23 +79,7 @@ const ENEMY_HEIGHT = 34;
  * hitboxes are affected.
  */
 const PLAYER_RENDER_HEIGHT = ENEMY_HEIGHT;
-const ENEMY_POINTS_LOW = 10;
-const ENEMY_POINTS_MID = 20;
-const ENEMY_POINTS_TOP = 30;
-const ENEMY_STEP_DISTANCE = 12;
-const ENEMY_DROP_DISTANCE = 18;
-const ENEMY_STEP_INTERVAL_MIN_MS = 70;
-const ENEMY_MAX_ACTIVE_SHOTS = 3;
-const SHIELD_COUNT = 4;
-const SHIELD_CELL_SIZE = 6;
-const SHIELD_CELL_HP = 3;
-const MYSTERY_SHIP_WIDTH = 52;
-const MYSTERY_SHIP_HEIGHT = 30;
-const MYSTERY_SHIP_SPEED = 110;
-const MYSTERY_SHIP_Y = 18;
-const MYSTERY_SHIP_RESPAWN_MIN_MS = 9000;
-const MYSTERY_SHIP_RESPAWN_MAX_MS = 16000;
-const LIFE_LOSS_PAUSE_MS = 1800;
+
 const PLAYER_BLINK_INTERVAL_MS = 120;
 
 /**
@@ -97,6 +94,9 @@ const PLAYER_BLINK_INTERVAL_MS = 120;
  */
 const MIN_STAGE_SCALE = 0.38;
 
+const panelClassName =
+  "mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden";
+
 const INTERCEPTED_CODES = new Set([
   "ArrowLeft",
   "ArrowRight",
@@ -104,64 +104,6 @@ const INTERCEPTED_CODES = new Set([
   "KeyD",
   "Space",
 ]);
-
-type Projectile = {
-  id: number;
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-};
-
-type Enemy = {
-  id: number;
-  x: number;
-  y: number;
-  row: number;
-  col: number;
-  alive: boolean;
-};
-
-type ShieldCell = {
-  id: number;
-  x: number;
-  y: number;
-  hp: number;
-};
-
-type MysteryShip = {
-  active: boolean;
-  x: number;
-  direction: 1 | -1;
-  respawnMs: number;
-};
-
-type GoblinInvadersRuntime = {
-  playerX: number;
-  /**
-   * Where the touch bar is asking the ship to be, chased by the tick at
-   * `PLAYER_SPEED` rather than applied outright. `null` when nothing is chasing.
-   */
-  playerTargetX: number | null;
-  /** Which way the player's bumpkin portrait faces, so it can turn. */
-  playerFacing: "left" | "right";
-  score: number;
-  lives: number;
-  wave: number;
-  enemies: Enemy[];
-  playerShots: Projectile[];
-  enemyShots: Projectile[];
-  shieldCells: ShieldCell[];
-  mysteryShip: MysteryShip;
-  enemyDirection: 1 | -1;
-  enemyStepTimerMs: number;
-  respawnPauseMs: number;
-  enemyFireCooldownMs: number;
-  shotCooldownMs: number;
-  gameOver: boolean;
-  won: boolean;
-  reason?: string;
-};
 
 type TiledTileLayer = {
   type: "tilelayer";
@@ -243,155 +185,13 @@ const buildArenaBackgroundDataUrl = (
   return scaledCanvas.toDataURL("image/png");
 };
 
-const createWaveEnemies = (wave: number): Enemy[] => {
-  const xGap = 58;
-  const yGap = 42;
-  const formationWidth = ENEMY_WIDTH + (ENEMY_COLS - 1) * xGap;
-  const xStart = Math.floor((ARENA_WIDTH - formationWidth) / 2);
-  const yStart = 46 + Math.min(70, (wave - 1) * 10);
-  let id = wave * 1000;
-
-  const enemies: Enemy[] = [];
-
-  for (let row = 0; row < ENEMY_ROWS; row++) {
-    for (let col = 0; col < ENEMY_COLS; col++) {
-      enemies.push({
-        id: id++,
-        x: xStart + col * xGap,
-        y: yStart + row * yGap,
-        row,
-        col,
-        alive: true,
-      });
-    }
-  }
-
-  return enemies;
-};
-
-const createShieldCells = (): ShieldCell[] => {
-  const cells: ShieldCell[] = [];
-  const shieldCols = 14;
-  const shieldRows = 8;
-  const shieldWidth = shieldCols * SHIELD_CELL_SIZE;
-  const totalShieldWidth = SHIELD_COUNT * shieldWidth;
-  const spacing = Math.floor(
-    (ARENA_WIDTH - totalShieldWidth) / (SHIELD_COUNT + 1),
-  );
-  const top = PLAYER_Y - 94;
-  let id = 1;
-
-  for (let shieldIndex = 0; shieldIndex < SHIELD_COUNT; shieldIndex++) {
-    const left = spacing + shieldIndex * (shieldWidth + spacing);
-
-    for (let row = 0; row < shieldRows; row++) {
-      for (let col = 0; col < shieldCols; col++) {
-        const outsideTopCorners =
-          row === 0 && (col < 2 || col > shieldCols - 3);
-        const notch = row >= shieldRows - 2 && col >= 5 && col <= 8;
-        const thinBottomCorners =
-          row === shieldRows - 1 && (col <= 2 || col >= 11);
-
-        if (outsideTopCorners || notch || thinBottomCorners) {
-          continue;
-        }
-
-        cells.push({
-          id: id++,
-          x: left + col * SHIELD_CELL_SIZE,
-          y: top + row * SHIELD_CELL_SIZE,
-          hp: SHIELD_CELL_HP,
-        });
-      }
-    }
-  }
-
-  return cells;
-};
-
-const getMysteryShipRespawnMs = () => {
-  return (
-    MYSTERY_SHIP_RESPAWN_MIN_MS +
-    Math.floor(
-      Math.random() *
-        (MYSTERY_SHIP_RESPAWN_MAX_MS - MYSTERY_SHIP_RESPAWN_MIN_MS),
-    )
-  );
-};
-
-const createMysteryShip = (): MysteryShip => ({
-  active: false,
-  x: -MYSTERY_SHIP_WIDTH,
-  direction: 1,
-  respawnMs: getMysteryShipRespawnMs(),
-});
-
-const createInitialRuntime = (): GoblinInvadersRuntime => ({
-  playerX: ARENA_WIDTH / 2 - PLAYER_SIZE / 2,
-  playerTargetX: null,
-  playerFacing: "right",
-  score: 0,
-  lives: 3,
-  wave: 1,
-  enemies: createWaveEnemies(1),
-  playerShots: [],
-  enemyShots: [],
-  shieldCells: createShieldCells(),
-  mysteryShip: createMysteryShip(),
-  enemyDirection: 1,
-  enemyStepTimerMs: 0,
-  respawnPauseMs: 0,
-  enemyFireCooldownMs: 0,
-  shotCooldownMs: 0,
-  gameOver: false,
-  won: false,
-});
-
-const clamp = (value: number, min: number, max: number) => {
-  return Math.max(min, Math.min(max, value));
-};
-
-/**
- * The ship's travel, in arena pixels.
- *
- * One clamp for both input paths: the tick below and the touch bar's scrub
- * handler both land here, so a dragged finger and a held arrow key stop at the
- * same two walls rather than the touch path growing a second, looser range.
- */
-const clampPlayerX = (x: number) => clamp(x, 0, ARENA_WIDTH - PLAYER_SIZE);
-
-const getEnemyPoints = (row: number) => {
-  if (row === 0) return ENEMY_POINTS_TOP;
-  if (row <= 2) return ENEMY_POINTS_MID;
-  return ENEMY_POINTS_LOW;
-};
-
-const getMysteryShipPoints = () => {
-  const values = [50, 100, 150, 300];
-  return values[Math.floor(Math.random() * values.length)];
-};
-
-const getBottomShooters = (enemies: Enemy[]) => {
-  const bottomByColumn = new Map<number, Enemy>();
-
-  for (const enemy of enemies) {
-    if (!enemy.alive) continue;
-
-    const existing = bottomByColumn.get(enemy.col);
-    if (!existing || enemy.row > existing.row) {
-      bottomByColumn.set(enemy.col, enemy);
-    }
-  }
-
-  return Array.from(bottomByColumn.values());
-};
-
 export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
   onClose,
 }) => {
   const { portalService } = useContext(PortalContext);
   const portalGameState = useSelector(portalService, _portalState);
   const isVip = useVipAccess({ game: portalGameState });
+  const bootstrap = useBootstrap();
 
   const hasRewardRun = useMemo(
     () => isGoblinInvadersRewardRunAvailable({ game: portalGameState, isVip }),
@@ -412,26 +212,72 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     useState<GoblinInvadersDifficulty>(todaysDifficulty);
   const [practiceDifficultyName, setPracticeDifficultyName] =
     useState<GoblinInvadersDifficultyName>(todaysDifficulty.name);
+  // True from the moment a reward run is confirmed until its first step is
+  // taken. Opening a paid run waits on a server round-trip (burn the ticket,
+  // then read back the issued seed) — so without this the menu just sits
+  // looking frozen, and "START REWARD RUN" stays live underneath, where a
+  // second click would burn a *second* run.
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The run is never started from a local substitute: the claim only mints
+  // against the issued seed, so playing on would be a win that pays nothing.
+  const [seedError, setSeedError] = useState(false);
 
-  const pressedKeysRef = useRef<Record<string, boolean>>({});
   const rewardGrantedRef = useRef(false);
+
+  const pressedKeysRef = useRef(new Set<string>());
+  /** A Space press latched until the next keyboard step consumes it. */
+  const firePendingRef = useRef(false);
+  /** The last touch scrub ratio, consumed by the next step that can carry it. */
+  const scrubPendingRef = useRef<number | null>(null);
+
+  // ── The run, its proof log, and the streamed verification ─────────────────
+  //
+  // The simulation state lives in `gameRef`, not in React state: a step is
+  // read from the settled previous step and produces the next one, possibly
+  // several times per frame, and the input log must be written exactly once
+  // per step — both are side effects, and running them inside a `setState`
+  // updater would double-write them under StrictMode's double-invoke. React
+  // state carries a per-frame *snapshot* for rendering only (the same
+  // arrangement as `FroggerGame.tsx`'s `gameRef`, whose chunk plumbing below
+  // is mirrored one-for-one).
+  const gameRef = useRef<GoblinInvadersRuntime | null>(null);
+
+  /** One byte per 16ms step: the input the step was taken *under*. */
+  const inputLogRef = useRef<number[]>([]);
+
+  /** Real time not yet spent on whole `FIXED_STEP_MS` steps. */
+  const accumulatorRef = useRef(0);
+
   const frameRef = useRef<number | null>(null);
   const lastFrameAtRef = useRef<number | null>(null);
 
-  const returnToMenu = useCallback(() => {
-    setShowExitConfirm(false);
-    setMode(null);
-    setRuntime(null);
-  }, []);
+  /** When the current run opened — the claim's `elapsedMs`. */
+  const runStartedAtRef = useRef<number>(0);
 
-  const handleInGameExit = useCallback(() => {
-    if (runtime?.gameOver) {
-      returnToMenu();
-      return;
-    }
+  /** The run's difficulty, readable from inside the loop effect. */
+  const activeDifficultyRef = useRef<GoblinInvadersDifficulty>(todaysDifficulty);
 
-    setShowExitConfirm(true);
-  }, [returnToMenu, runtime?.gameOver]);
+  /** The claim, frozen the instant the run settles — see `freezeClaim`. */
+  const frozenClaimRef = useRef<VerifiedRun | null>(null);
+
+  /**
+   * The QUIT dialog's forfeit, requested by the button and settled by the
+   * loop.
+   *
+   * The game ends *inside* a step — deaths, wins and forfeits all pass
+   * through `gameRef` so the frozen claim, its log and the render's snapshot
+   * are read from one state of the run. A direct `setRuntime` here would flip
+   * the render while the loop kept stepping a different object, and the claim
+   * would describe the run nobody played.
+   */
+  const forfeitRequestedRef = useRef(false);
+
+  const chunkIndexRef = useRef(0);
+  const chunkBusyRef = useRef(false);
+  const chunkBrokenRef = useRef(false);
+  const chunkQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const chunkDrainedRef = useRef<Promise<void> | null>(null);
 
   const playerParts =
     portalGameState.bumpkin?.equipped ?? NPC_WEARABLES["pumpkin' pete"];
@@ -439,29 +285,137 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
   /** Centering box for the portrait, whose own width is measured at runtime. */
   const portrait = useMemo(() => bumpkinPortraitBox(PLAYER_RENDER_HEIGHT), []);
 
+  const returnToMenu = useCallback(() => {
+    pressedKeysRef.current.clear();
+    firePendingRef.current = false;
+    scrubPendingRef.current = null;
+    setMode(null);
+    setRuntime(null);
+    setShowPracticeDifficultyPrompt(false);
+    setShowExitConfirm(false);
+    setStartingRun(false);
+    setSeedError(false);
+    rewardGrantedRef.current = false;
+    gameRef.current = null;
+    inputLogRef.current = [];
+    frozenClaimRef.current = null;
+    forfeitRequestedRef.current = false;
+    chunkDrainedRef.current = null;
+  }, []);
+
+  /**
+   * Read the seed the server issued for the run that is open.
+   *
+   * Returns null on any error — a reward run then stops and reports it rather
+   * than ever stepping from a seed the server did not issue. Retries until the
+   * returned runKey is recent (within ~15s), to avoid racing the server's
+   * `active_runs` row creation: the ticket burn that opens the run is
+   * fire-and-forget, so this poll is usually the thing *waiting* on that
+   * round-trip to settle.
+   */
+  const fetchRunSeed = useCallback(
+    async (jwt: string | undefined): Promise<number | null> => {
+      if (!jwt) return null;
+      const startedAt = Date.now();
+      const maxWaitMs = 10_000;
+      // Tight on purpose: the seed is written after the ticket burn settles, so
+      // a coarse interval would stack its own latency on top of the round trip
+      // once the row lands.
+      const pollIntervalMs = 150;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        try {
+          const res = await postEconomyWrite({ token: jwt, intent: "run-seed" });
+          const payload = res.data as
+            | { seed?: number; runKey?: number }
+            | undefined;
+          if (payload?.seed !== undefined && payload?.runKey) {
+            const runAgeMs = Date.now() - payload.runKey;
+            if (runAgeMs <= 15_000) return Number(payload.seed);
+            // Stale runKey (an older, already-played run): wait for the new
+            // one to be written before trusting the seed beside it.
+          }
+        } catch {
+          // Transient — retry.
+        }
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+      }
+      return null;
+    },
+    [],
+  );
+
   const startSession = useCallback(
-    (
+    async (
       nextMode: GoblinInvadersMode,
       practiceDifficultyOverride?: GoblinInvadersDifficultyName,
     ) => {
       if (nextMode === "reward" && !hasRewardRun) return;
+      // From here a paid run is already being opened on the server (the confirm
+      // handler burned the ticket / spent the allowance before calling in), so
+      // flip the loading card immediately — before the seed round-trip below —
+      // so the menu never sits frozen while we wait.
+      if (nextMode === "reward") setStartingRun(true);
+      setSeedError(false);
 
       const selectedPracticeDifficultyName =
         practiceDifficultyOverride ?? practiceDifficultyName;
-
       const selectedPracticeDifficulty =
         GOBLIN_INVADERS_DIFFICULTIES.find(
           (difficulty) => difficulty.name === selectedPracticeDifficultyName,
         ) ?? todaysDifficulty;
-
-      const runDifficulty =
+      const difficulty =
         nextMode === "reward" ? todaysDifficulty : selectedPracticeDifficulty;
 
+      // Reward run: the seed is issued by the server at run-open and read back
+      // here — no local substitute, because the claim only mints against the
+      // issued seed. A failed read stops the run and says so. Practice: a
+      // local seed, because it is never verified.
+      let seed: number;
+      if (nextMode === "reward") {
+        const issued = await fetchRunSeed(bootstrap?.jwt);
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
+        }
+        seed = issued;
+      } else {
+        seed = (Date.now() ^ Math.floor(Math.random() * 0xffffffff)) >>> 0;
+      }
+
+      // One runtime instance, shared by the loop (through `gameRef`) and the
+      // first render (through its snapshot): two `createRuntime` calls would be
+      // two games, and the claim would describe the one nobody played.
+      pressedKeysRef.current.clear();
+      firePendingRef.current = false;
+      scrubPendingRef.current = null;
+      const fresh = createRuntime(difficulty, seed);
+      gameRef.current = fresh;
+      setRuntime({ ...fresh });
+
+      setActiveDifficulty(difficulty);
       setMode(nextMode);
-      rewardGrantedRef.current = false;
       setShowPracticeDifficultyPrompt(false);
-      setActiveDifficulty(runDifficulty);
-      setRuntime(createInitialRuntime());
+      setShowExitConfirm(false);
+      setStartingRun(false);
+      rewardGrantedRef.current = false;
+
+      // Fresh run, fresh proof: the log, the claim and the stream all belong
+      // to exactly one run, and a "Play Again" that inherited the previous
+      // run's cursor would post its first window at an index the worker's
+      // brand-new park has never heard of.
+      activeDifficultyRef.current = difficulty;
+      inputLogRef.current = [];
+      frozenClaimRef.current = null;
+      forfeitRequestedRef.current = false;
+      accumulatorRef.current = 0;
+      runStartedAtRef.current = Date.now();
+      chunkIndexRef.current = 0;
+      chunkBusyRef.current = false;
+      chunkBrokenRef.current = false;
+      chunkQueueRef.current = Promise.resolve();
+      chunkDrainedRef.current = null;
 
       if (nextMode === "reward") {
         portalService.send({
@@ -471,11 +425,19 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
         startAttempt();
       }
     },
-    [hasRewardRun, portalService, practiceDifficultyName, todaysDifficulty],
+    [
+      bootstrap,
+      hasRewardRun,
+      practiceDifficultyName,
+      portalService,
+      todaysDifficulty,
+      fetchRunSeed,
+    ],
   );
 
   // Free run first, then 1 burned Play Ticket per attempt — with the "are you
-  // sure?" box in between.
+  // sure?" box in between. `hasRewardRun` is kept as the availability check so
+  // the button and the store can never disagree.
   const rewardRun = useRewardRun({
     game: portalGameState,
     minigame: "goblin-invaders",
@@ -484,32 +446,10 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     startRewardRun: () => startSession("reward"),
   });
 
-  const handleShoot = useCallback(() => {
-    setRuntime((previous) => {
-      if (!previous || previous.gameOver) return previous;
-      if (previous.respawnPauseMs > 0) return previous;
-      if (previous.playerShots.length > 0) return previous;
-
-      const shot: Projectile = {
-        id: Date.now() + Math.floor(Math.random() * 10000),
-        x: previous.playerX + PLAYER_SIZE / 2 - 2,
-        y: PLAYER_Y - 8,
-        vx: 0,
-        vy: -PLAYER_SHOT_SPEED,
-      };
-
-      return {
-        ...previous,
-        playerShots: [...previous.playerShots, shot],
-        shotCooldownMs: 0,
-      };
-    });
-  }, []);
-
   // The touch bar's fire button stands in for `Space`. The keyboard is the one
   // place that already knows how to shoot — it owns the one-shot-in-flight rule
-  // and the respawn pause — so the button dispatches the same `keydown`/`keyup`
-  // pair the key itself sends and the handler above runs it. No second fire
+  // and the respawn pause, so the button dispatches the same `keydown`/`keyup`
+  // pair the key itself sends and the handler above latches it. No second fire
   // path, and therefore nothing to keep in step with the first.
   const shootFromTouch = useCallback(() => {
     for (const type of ["keydown", "keyup"] as const) {
@@ -525,25 +465,11 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
   }, []);
 
   // `TouchMoveBar` reports where the finger sits across the strip as an
-  // absolute 0..1 ratio, and that maps straight onto the ship's travel —
-  // absolute rather than the per-frame creep the polled
-  // `ArrowLeft`/`ArrowRight` give, because this cabinet is about parking under
-  // a column to line a shot up, and a ship that walks there at a fixed rate
-  // arrives after the column has already stepped. This only writes `playerX`,
-  // through the same `clampPlayerX` the keyboard path clamps with, so nothing
-  // downstream learns there is a second input path.
+  // absolute 0..1 ratio, latched for the next step to consume — a scrub byte,
+  // not a runtime write, so the ratio the step moves under is exactly the one
+  // the log records (see `encodeTick`).
   const scrubPlayer = useCallback((ratio: number) => {
-    setRuntime((previous) => {
-      if (!previous || previous.gameOver) return previous;
-
-      // Sets a *target*, not the position. The tick walks toward it at
-      // `PLAYER_SPEED`, so the ship can still be parked under the finger but
-      // cannot cross the arena between two frames.
-      return {
-        ...previous,
-        playerTargetX: clampPlayerX(ratio * (ARENA_WIDTH - PLAYER_SIZE)),
-      };
-    });
+    scrubPendingRef.current = Math.max(0, Math.min(1, ratio));
   }, []);
 
   useEffect(() => {
@@ -572,20 +498,24 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     const onKeyDown = (event: KeyboardEvent) => {
       if (!INTERCEPTED_CODES.has(event.code)) return;
 
-      pressedKeysRef.current[event.code] = true;
+      pressedKeysRef.current.add(event.code);
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
 
+      // Latched rather than fired here: the step consumes it, so a press lands
+      // on exactly one step's byte — and a `Space` pair dispatched by the touch
+      // FIRE button (both events synchronous, possibly between two steps) is
+      // still caught, which a pure per-step poll of the key would miss.
       if (event.code === "Space") {
-        handleShoot();
+        firePendingRef.current = true;
       }
     };
 
     const onKeyUp = (event: KeyboardEvent) => {
       if (!INTERCEPTED_CODES.has(event.code)) return;
 
-      pressedKeysRef.current[event.code] = false;
+      pressedKeysRef.current.delete(event.code);
       event.preventDefault();
       event.stopPropagation();
       event.stopImmediatePropagation();
@@ -597,483 +527,248 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     return () => {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
-      pressedKeysRef.current = {};
+      pressedKeysRef.current.clear();
+      firePendingRef.current = false;
+      scrubPendingRef.current = null;
     };
-  }, [handleShoot, mode]);
+  }, [mode]);
 
-  const tick = useCallback(
-    (previous: GoblinInvadersRuntime, dtMs: number): GoblinInvadersRuntime => {
-      if (previous.gameOver) return previous;
-
-      if (previous.respawnPauseMs > 0) {
-        return {
-          ...previous,
-          respawnPauseMs: Math.max(0, previous.respawnPauseMs - dtMs),
-        };
-      }
-
-      const dt = dtMs / 1000;
-      const leftPressed =
-        !!pressedKeysRef.current.ArrowLeft || !!pressedKeysRef.current.KeyA;
-      const rightPressed =
-        !!pressedKeysRef.current.ArrowRight || !!pressedKeysRef.current.KeyD;
-
-      let playerX = previous.playerX;
-      // Facing follows the last horizontal input and is sticky, so the portrait
-      // keeps looking the way the player was last going instead of snapping back
-      // to centre whenever the key is released.
-      let playerFacing = previous.playerFacing;
-      let playerTargetX = previous.playerTargetX;
-
-      if (leftPressed || rightPressed) {
-        // A held key is a direct order, so it cancels any touch target that was
-        // still being chased — otherwise the ship would keep drifting toward a
-        // finger position the player had already steered away from.
-        playerTargetX = null;
-      }
-
-      if (leftPressed) {
-        playerX -= PLAYER_SPEED * dt;
-        playerFacing = "left";
-      }
-      if (rightPressed) {
-        playerX += PLAYER_SPEED * dt;
-        playerFacing = "right";
-      }
-
-      // Chase the touch target at the keyboard's own speed.
-      //
-      // The scrub reports where the finger is, and applying that directly tele-
-      // ports the ship: a thumb flicked across the strip crossed all 718px
-      // between frames, which made lining up a shot on a column impossible and
-      // read as the ship teleporting. Moving at `PLAYER_SPEED` keeps absolute
-      // positioning — the ship still ends up under the finger — while giving it
-      // the same handling as the keyboard.
-      if (!leftPressed && !rightPressed && playerTargetX !== null) {
-        const distance = playerTargetX - playerX;
-        const step = PLAYER_SPEED * dt;
-        if (Math.abs(distance) <= step) {
-          playerX = playerTargetX;
-          playerTargetX = null;
-        } else {
-          playerX += Math.sign(distance) * step;
-          playerFacing = distance < 0 ? "left" : "right";
-        }
-      }
-
-      playerX = clampPlayerX(playerX);
-
-      let shieldCells = previous.shieldCells;
-      let mysteryShip = previous.mysteryShip;
-
-      const aliveEnemies = previous.enemies.filter((enemy) => enemy.alive);
-      const aliveCount = aliveEnemies.length;
-      const defeatedCount = previous.enemies.length - aliveCount;
-      let enemyDirection = previous.enemyDirection;
-      let enemyStepTimerMs = previous.enemyStepTimerMs + dtMs;
-
-      const lowestEnemyY = aliveEnemies.reduce((maximum, enemy) => {
-        return Math.max(maximum, enemy.y + ENEMY_HEIGHT);
-      }, 0);
-      const descentPressure = Math.max(0, (lowestEnemyY - 180) / 8);
-
-      const stepIntervalMs = clamp(
-        1080 -
-          activeDifficulty.baseEnemySpeed * 7 -
-          (previous.wave - 1) * 70 -
-          defeatedCount * 10 -
-          descentPressure,
-        ENEMY_STEP_INTERVAL_MIN_MS,
-        1000,
-      );
-
-      let enemies = previous.enemies;
-
-      // Space Invaders style movement: formation advances in timed steps.
-      while (enemyStepTimerMs >= stepIntervalMs) {
-        enemyStepTimerMs -= stepIntervalMs;
-
-        const aliveNow = enemies.filter((enemy) => enemy.alive);
-        const willTouchWall = aliveNow.some((enemy) => {
-          const nextX = enemy.x + enemyDirection * ENEMY_STEP_DISTANCE;
-          return nextX <= 8 || nextX + ENEMY_WIDTH >= ARENA_WIDTH - 8;
-        });
-
-        if (willTouchWall) {
-          enemyDirection = enemyDirection === 1 ? -1 : 1;
-          enemies = enemies.map((enemy) => {
-            if (!enemy.alive) return enemy;
-
-            return {
-              ...enemy,
-              y: enemy.y + ENEMY_DROP_DISTANCE,
-            };
-          });
-          continue;
-        }
-
-        enemies = enemies.map((enemy) => {
-          if (!enemy.alive) return enemy;
-
-          return {
-            ...enemy,
-            x: enemy.x + enemyDirection * ENEMY_STEP_DISTANCE,
-          };
-        });
-      }
-
-      // Invaders chew through shields when they descend into them.
-      shieldCells = shieldCells.filter((cell) => {
-        return !enemies.some(
-          (enemy) =>
-            enemy.alive &&
-            cell.x < enemy.x + ENEMY_WIDTH &&
-            cell.x + SHIELD_CELL_SIZE > enemy.x &&
-            cell.y < enemy.y + ENEMY_HEIGHT &&
-            cell.y + SHIELD_CELL_SIZE > enemy.y,
-        );
-      });
-
-      if (mysteryShip.active) {
-        const nextX =
-          mysteryShip.x + mysteryShip.direction * MYSTERY_SHIP_SPEED * dt;
-        const outOfBounds =
-          (mysteryShip.direction === 1 &&
-            nextX > ARENA_WIDTH + MYSTERY_SHIP_WIDTH) ||
-          (mysteryShip.direction === -1 &&
-            nextX + MYSTERY_SHIP_WIDTH < -MYSTERY_SHIP_WIDTH);
-
-        mysteryShip = outOfBounds
-          ? {
-              active: false,
-              x: -MYSTERY_SHIP_WIDTH,
-              direction: 1,
-              respawnMs: getMysteryShipRespawnMs(),
-            }
-          : {
-              ...mysteryShip,
-              x: nextX,
-            };
-      } else {
-        const respawnMs = mysteryShip.respawnMs - dtMs;
-        if (respawnMs <= 0) {
-          const direction: 1 | -1 = Math.random() < 0.5 ? 1 : -1;
-          mysteryShip = {
-            active: true,
-            direction,
-            x: direction === 1 ? -MYSTERY_SHIP_WIDTH : ARENA_WIDTH,
-            respawnMs: getMysteryShipRespawnMs(),
-          };
-        } else {
-          mysteryShip = {
-            ...mysteryShip,
-            respawnMs,
-          };
-        }
-      }
-
-      const enemyReachedPlayer = enemies.some(
-        (enemy) => enemy.alive && enemy.y + ENEMY_HEIGHT >= PLAYER_Y - 6,
-      );
-
-      let playerShots = previous.playerShots.map((shot) => ({
-        ...shot,
-        x: shot.x + shot.vx * dt,
-        y: shot.y + shot.vy * dt,
-      }));
-      playerShots = playerShots.filter(
-        (shot) => shot.y > -20 && shot.x > -20 && shot.x < ARENA_WIDTH + 20,
-      );
-
-      let enemyShots = previous.enemyShots.map((shot) => ({
-        ...shot,
-        x: shot.x + shot.vx * dt,
-        y: shot.y + shot.vy * dt,
-      }));
-      enemyShots = enemyShots.filter(
-        (shot) =>
-          shot.y < ARENA_HEIGHT + 30 &&
-          shot.x > -30 &&
-          shot.x < ARENA_WIDTH + 30,
-      );
-
-      // Classic Space Invaders: player shot cancels enemy shots on contact.
-      const cancelledPlayerShots = new Set<number>();
-      const cancelledEnemyShots = new Set<number>();
-      for (const pShot of playerShots) {
-        for (const eShot of enemyShots) {
-          const collides =
-            pShot.x < eShot.x + 14 &&
-            pShot.x + 4 > eShot.x &&
-            pShot.y < eShot.y + 20 &&
-            pShot.y + 18 > eShot.y;
-          if (collides) {
-            cancelledPlayerShots.add(pShot.id);
-            cancelledEnemyShots.add(eShot.id);
-          }
-        }
-      }
-      if (cancelledPlayerShots.size > 0) {
-        playerShots = playerShots.filter(
-          (s) => !cancelledPlayerShots.has(s.id),
-        );
-        enemyShots = enemyShots.filter((s) => !cancelledEnemyShots.has(s.id));
-      }
-
-      let score = previous.score;
-
-      const aliveEnemyMap = new Map<number, Enemy>();
-      enemies.forEach((enemy) => {
-        if (enemy.alive) {
-          aliveEnemyMap.set(enemy.id, enemy);
-        }
-      });
-
-      const survivingPlayerShots: Projectile[] = [];
-
-      for (const shot of playerShots) {
-        let hit = false;
-
-        for (const cell of shieldCells) {
-          const intersectsShield =
-            shot.x < cell.x + SHIELD_CELL_SIZE &&
-            shot.x + 12 > cell.x &&
-            shot.y < cell.y + SHIELD_CELL_SIZE &&
-            shot.y + 16 > cell.y;
-
-          if (!intersectsShield) continue;
-
-          hit = true;
-          shieldCells = shieldCells
-            .map((shieldCell) => {
-              if (shieldCell.id !== cell.id) return shieldCell;
-              return {
-                ...shieldCell,
-                hp: shieldCell.hp - 1,
-              };
-            })
-            .filter((shieldCell) => shieldCell.hp > 0);
-          break;
-        }
-
-        if (hit) {
-          continue;
-        }
-
-        if (mysteryShip.active) {
-          const hitMysteryShip =
-            shot.x < mysteryShip.x + MYSTERY_SHIP_WIDTH &&
-            shot.x + 12 > mysteryShip.x &&
-            shot.y < MYSTERY_SHIP_Y + MYSTERY_SHIP_HEIGHT &&
-            shot.y + 16 > MYSTERY_SHIP_Y;
-
-          if (hitMysteryShip) {
-            hit = true;
-            score += getMysteryShipPoints();
-            mysteryShip = {
-              active: false,
-              x: -MYSTERY_SHIP_WIDTH,
-              direction: 1,
-              respawnMs: getMysteryShipRespawnMs(),
-            };
-            continue;
-          }
-        }
-
-        for (const enemy of aliveEnemyMap.values()) {
-          const intersects =
-            shot.x < enemy.x + ENEMY_WIDTH &&
-            shot.x + 12 > enemy.x &&
-            shot.y < enemy.y + ENEMY_HEIGHT &&
-            shot.y + 16 > enemy.y;
-
-          if (intersects) {
-            hit = true;
-            aliveEnemyMap.delete(enemy.id);
-            score += getEnemyPoints(enemy.row);
-            break;
-          }
-        }
-
-        if (!hit) {
-          survivingPlayerShots.push(shot);
-        }
-      }
-
-      enemies = enemies.map((enemy) => ({
-        ...enemy,
-        alive: aliveEnemyMap.has(enemy.id),
-      }));
-
-      let lives = previous.lives;
-      const survivingEnemyShots: Projectile[] = [];
-      let tookHit = false;
-
-      for (const shot of enemyShots) {
-        if (tookHit) {
-          continue;
-        }
-
-        let absorbedByShield = false;
-        for (const cell of shieldCells) {
-          const intersectsShield =
-            shot.x < cell.x + SHIELD_CELL_SIZE &&
-            shot.x + 12 > cell.x &&
-            shot.y < cell.y + SHIELD_CELL_SIZE &&
-            shot.y + 16 > cell.y;
-
-          if (!intersectsShield) continue;
-
-          shieldCells = shieldCells
-            .map((shieldCell) => {
-              if (shieldCell.id !== cell.id) return shieldCell;
-              return {
-                ...shieldCell,
-                hp: shieldCell.hp - 1,
-              };
-            })
-            .filter((shieldCell) => shieldCell.hp > 0);
-          absorbedByShield = true;
-          break;
-        }
-
-        if (absorbedByShield) {
-          continue;
-        }
-
-        const hitPlayer =
-          shot.x < playerX + PLAYER_SIZE &&
-          shot.x + 12 > playerX &&
-          shot.y < PLAYER_Y + PLAYER_SIZE &&
-          shot.y + 16 > PLAYER_Y;
-
-        if (hitPlayer) {
-          lives -= 1;
-          tookHit = true;
-          continue;
-        }
-
-        survivingEnemyShots.push(shot);
-      }
-
-      let enemyFireCooldownMs = previous.enemyFireCooldownMs + dtMs;
-      const fireInterval = Math.max(
-        180,
-        activeDifficulty.baseEnemyFireMs -
-          previous.wave * 100 -
-          defeatedCount * 10,
-      );
-
-      if (
-        enemyFireCooldownMs >= fireInterval &&
-        survivingEnemyShots.length < ENEMY_MAX_ACTIVE_SHOTS
-      ) {
-        const fireCandidates = getBottomShooters(enemies);
-
-        if (fireCandidates.length > 0) {
-          const source =
-            fireCandidates[Math.floor(Math.random() * fireCandidates.length)];
-          survivingEnemyShots.push({
-            id: Date.now() + Math.floor(Math.random() * 10000),
-            x: source.x + ENEMY_WIDTH / 2 - 6,
-            y: source.y + ENEMY_HEIGHT - 2,
-            vx: 0,
-            vy: ENEMY_SHOT_SPEED,
-          });
-        }
-
-        enemyFireCooldownMs = 0;
-      }
-
-      let wave = previous.wave;
-      const allEnemiesCleared = enemies.every((enemy) => !enemy.alive);
-
-      if (allEnemiesCleared && score < activeDifficulty.targetScore) {
-        wave += 1;
-        enemies = createWaveEnemies(wave);
-        shieldCells = createShieldCells();
-        enemyStepTimerMs = 0;
-      }
-
-      const won = score >= activeDifficulty.targetScore;
-      const lost =
-        !won &&
-        (lives <= 0 ||
-          enemyReachedPlayer ||
-          (wave > activeDifficulty.maxWaves && allEnemiesCleared));
-
-      const reason = won
-        ? "Target score reached"
-        : lives <= 0
-          ? "Out of lives"
-          : enemyReachedPlayer
-            ? "Invaders reached your line"
-            : wave > activeDifficulty.maxWaves && allEnemiesCleared
-              ? "Wave limit reached"
-              : undefined;
-
-      const respawnPauseMs = tookHit && lives > 0 ? LIFE_LOSS_PAUSE_MS : 0;
-
-      return {
-        ...previous,
-        playerX,
-        playerFacing,
-        playerTargetX,
-        score,
-        lives,
-        wave,
-        enemies,
-        playerShots: survivingPlayerShots,
-        enemyShots: tookHit ? [] : survivingEnemyShots,
-        shieldCells,
-        mysteryShip,
-        enemyDirection,
-        enemyStepTimerMs,
-        respawnPauseMs,
-        enemyFireCooldownMs,
-        shotCooldownMs: Math.max(0, previous.shotCooldownMs - dtMs),
-        gameOver: won || lost,
-        won,
-        reason,
-      };
-    },
-    [activeDifficulty],
-  );
-
+  // ── Game loop ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mode || !runtime || runtime.gameOver) {
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
       lastFrameAtRef.current = null;
+      accumulatorRef.current = 0;
       return;
     }
 
-    const loop = (timestamp: number) => {
-      const previousAt = lastFrameAtRef.current ?? timestamp;
-      const dtMs = Math.min(50, Math.max(8, timestamp - previousAt));
-      lastFrameAtRef.current = timestamp;
+    accumulatorRef.current = 0;
+    lastFrameAtRef.current = null;
 
-      setRuntime((previous) => {
-        if (!previous) return previous;
-        return tick(previous, dtMs);
+    /**
+     * Queue one verification window behind the ones already on the wire.
+     *
+     * The chain is the whole point: the worker resumes a park only at exactly
+     * the cursor the next window belongs at, so two windows in flight at once
+     * would arrive in whichever order the network pleased and the second would
+     * void the park the first just built. Window 0 carries the run's
+     * difficulty — the only engine context the claim repeats — and every later
+     * window inherits the seed from the park, which the worker opened from the
+     * ledger rather than from this request.
+     */
+    const postVerificationWindow = (chunkIndex: number, bytes: Uint8Array) => {
+      const send = async () => {
+        if (chunkBrokenRef.current) return;
+        const jwt = bootstrap?.jwt;
+        if (!jwt) return;
+
+        try {
+          const res = await fetch(getEconomyWorkerUrl() + "/economy/write", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json;charset=UTF-8",
+              accept: "application/json",
+              Authorization: `Bearer ${jwt}`,
+            },
+            body: JSON.stringify({
+              intent: "verify-chunk",
+              nonce: writeNonce(),
+              chunkIndex,
+              inputs: encodeInputLog(bytes),
+              ...(chunkIndex === 0
+                ? { difficulty: activeDifficultyRef.current.name }
+                : {}),
+            }),
+          });
+          if (!res.ok) {
+            // Surface why the worker rejected it, and stop: windows are
+            // ordered, so the ones behind a refused window would be refused
+            // for the cursor rather than for their contents.
+            const detail = await res.text().catch(() => "");
+            console.warn(`[verify-chunk] ${res.status}`, detail);
+            chunkBrokenRef.current = true;
+          }
+        } catch {
+          // A dropped window cannot be re-sent out of order — the next window
+          // would arrive at a cursor the park no longer has — so the stream
+          // ends here and the claim has to replay the run itself, which a run
+          // this long will not fit in one request.
+          chunkBrokenRef.current = true;
+        }
+      };
+
+      chunkQueueRef.current = chunkQueueRef.current.then(send);
+    };
+
+    /**
+     * Queue every complete window the log has grown since the last one.
+     *
+     * A window is the unit: one is queued whenever a full one exists, whatever
+     * frame that happens to be — 600 steps is 9.6 seconds of play at 16ms a
+     * step, so the queue trails the log by seconds rather than by ticks.
+     */
+    const pumpVerificationChunks = () => {
+      if (mode !== "reward") return;
+      if (chunkBusyRef.current || chunkBrokenRef.current) return;
+
+      const start = chunkIndexRef.current * CHUNK_TICKS;
+      if (inputLogRef.current.length - start < CHUNK_TICKS) return;
+
+      const end = start + CHUNK_TICKS;
+      const chunkIndex = chunkIndexRef.current;
+      chunkIndexRef.current += 1;
+      postVerificationWindow(
+        chunkIndex,
+        Uint8Array.from(inputLogRef.current.slice(start, end)),
+      );
+
+      // One window on the wire at a time: the response is what proves the park
+      // took it, and the next window may only be built on a park that did.
+      chunkBusyRef.current = true;
+      void chunkQueueRef.current.finally(() => {
+        chunkBusyRef.current = false;
       });
+    };
 
+    /**
+     * Freeze the claim the moment the run settles, then close the log behind
+     * it.
+     *
+     * Runs after the steps, against the settled game: the score recorded here
+     * already contains whatever step ended the run (the engine applies deaths
+     * inside the step), so the claim's score, its log and its duration are all
+     * read from one state of the run rather than from a later frame.
+     *
+     * The tail-close matters more than it looks. The worker refuses a claim
+     * whose park holds less log than the claim asserts (`parked.total` must
+     * equal the claim's `ticks`), because such a claim's replay cannot finish
+     * inside one request — so every window still unwritten is queued behind
+     * the windows already on the wire, and `chunkDrainedRef` is what the
+     * payout effect waits on. A claim that overtakes its own tail would start
+     * the replay from tick zero and never reach the end.
+     */
+    const freezeClaim = () => {
+      const game = gameRef.current;
+      if (!game || frozenClaimRef.current) return;
+      if (!game.gameOver || !game.won || mode !== "reward") return;
+
+      frozenClaimRef.current = {
+        cabinet: "goblin-invaders",
+        score: game.score,
+        checkpoints: [],
+        elapsedMs: Date.now() - runStartedAtRef.current,
+        replay: {
+          difficulty: activeDifficultyRef.current.name,
+          ticks: inputLogRef.current.length,
+          inputs: encodeInputLog(Uint8Array.from(inputLogRef.current)),
+        },
+      };
+
+      if (!chunkBrokenRef.current) {
+        const log = inputLogRef.current;
+        let start = chunkIndexRef.current * CHUNK_TICKS;
+        while (start < log.length) {
+          const end = Math.min(start + CHUNK_TICKS, log.length);
+          postVerificationWindow(
+            chunkIndexRef.current,
+            Uint8Array.from(log.slice(start, end)),
+          );
+          chunkIndexRef.current += 1;
+          start = end;
+        }
+      }
+      chunkDrainedRef.current = chunkQueueRef.current.catch(() => {});
+    };
+
+    const loop = (ts: number) => {
       frameRef.current = requestAnimationFrame(loop);
+
+      const prevAt = lastFrameAtRef.current ?? ts;
+      lastFrameAtRef.current = ts;
+
+      let game = gameRef.current;
+      if (!game) return;
+
+      // Whole steps only, and never more simulated time than the tab was
+      // actually allowed to elapse (the brawler's own clamp): a backgrounded
+      // tab must not fast-forward the board on return.
+      accumulatorRef.current += Math.min(ts - prevAt, 250);
+
+      // A forfeit from the QUIT dialog settles here, through the same door
+      // every other run end comes through — the loop, in place of `gameRef`,
+      // one frame after the button was pressed.
+      if (forfeitRequestedRef.current && !game.gameOver) {
+        forfeitRequestedRef.current = false;
+        game = {
+          ...game,
+          gameOver: true,
+          won: game.score >= activeDifficultyRef.current.targetScore,
+          reason: "Run forfeited.",
+        };
+        gameRef.current = game;
+      }
+
+      // `game` is advanced *in place* through the loop. Reading the state once
+      // into a `const` before the loop and stepping that same value every
+      // iteration looks equivalent and is not: whenever a frame delivers more
+      // than one step of accumulated time — a stutter, a GC pause, a tab
+      // switch, anything the 250 ms clamp lets through — the second and later
+      // iterations re-step the *pre-loop* state, so the board stops advancing
+      // while the log keeps recording a byte per iteration. The claim then
+      // asserts a run that never happened, the worker's replay steps one tick
+      // per byte from a correctly advancing engine, and the two diverge on the
+      // first hiccup.
+      while (accumulatorRef.current >= FIXED_STEP_MS && !game.gameOver) {
+        // Sample the step's input, encode it, step under it — in that order,
+        // so the byte on the left is exactly the input the step ran under.
+        // Sampling afterwards would round a press and a step apart.
+        const scrub = scrubPendingRef.current;
+        scrubPendingRef.current = null;
+        // A scrub byte cannot carry the fire bit (bit 7 owns the byte), so a
+        // fire pending behind a dragging finger rides the next keyboard byte —
+        // the pending flag is only consumed when it goes out.
+        const fire = scrub === null && firePendingRef.current;
+        if (fire) firePendingRef.current = false;
+
+        const keys = pressedKeysRef.current;
+        const movingLeft = keys.has("ArrowLeft") || keys.has("KeyA");
+        const movingRight = keys.has("ArrowRight") || keys.has("KeyD");
+        const input = {
+          dir: ((movingRight ? 1 : 0) - (movingLeft ? 1 : 0)) as -1 | 0 | 1,
+          fire,
+          scrub,
+        };
+
+        inputLogRef.current.push(encodeTick(input));
+        game = tick(game, FIXED_STEP_MS, input);
+        gameRef.current = game;
+        accumulatorRef.current -= FIXED_STEP_MS;
+        pumpVerificationChunks();
+        if (game.gameOver) break;
+      }
+
+      // The run may have ended on the step above — freeze it before the
+      // render that announces it.
+      freezeClaim();
+
+      // Guarded the way `freezeClaim` guards: the loop above only steps a
+      // live game, so the ref cannot be null here — but it is typed
+      // nullable, and the render wants the *latest* value, after the loop's
+      // reassignments.
+      const latest = gameRef.current;
+      if (latest !== null) setRuntime({ ...latest });
     };
 
     frameRef.current = requestAnimationFrame(loop);
-
     return () => {
-      if (frameRef.current !== null) {
-        cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
       lastFrameAtRef.current = null;
     };
-  }, [mode, runtime, tick]);
+  }, [mode, runtime?.gameOver, bootstrap]);
 
+  // ── Reward submission ──────────────────────────────────────────────────────
   useEffect(() => {
     if (
       !runtime?.gameOver ||
@@ -1084,17 +779,49 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
       return;
     }
 
-    submitScore({ score: runtime.score });
-    portalService.send({
-      type: "arcadeMinigame.ravenCoinWon",
-      amount: GOBLIN_INVADERS_RAVEN_COIN_REWARD,
-    });
+    // The claim was frozen by the loop the instant the run settled — score,
+    // log and duration from one state. Absent means the win somehow happened
+    // without the loop settling, which cannot happen while the loop is
+    // running; it is still checked, because claiming with no log would burn
+    // the voucher for nothing — and the voucher is the player's ticket, not
+    // ours to spend.
+    const claim = frozenClaimRef.current;
+    if (!claim) {
+      console.error("[goblin-invaders] win with no frozen claim");
+      return;
+    }
     rewardGrantedRef.current = true;
+
+    // The leaderboard score is written for every settled run — a loss still
+    // played, and the board is the record of it.
+    submitScore({ score: runtime.score });
+
+    // The tail windows are still on the wire when this effect runs — the
+    // freeze, the tail and the `gameOver` that triggered this are all observed
+    // in the same frame. The claim may only land once the park holds the
+    // whole log: overtaking it makes the worker start the replay from tick
+    // zero, and a run this long cannot be re-simulated inside one request, so
+    // the refusal that follows would be of an honestly won coin.
+    void (chunkDrainedRef.current ?? Promise.resolve()).then(() => {
+      portalService.send({
+        type: "arcadeMinigame.ravenCoinWon",
+        amount: GOBLIN_INVADERS_RAVEN_COIN_REWARD,
+        verify: claim,
+      });
+    });
   }, [mode, portalService, runtime]);
 
+  // ── Unmount cleanup ────────────────────────────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+    };
+  }, []);
+
+  // ── Menu ──────────────────────────────────────────────────────────────────
   if (!mode || !runtime) {
     return (
-      <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
+      <OuterPanel className={panelClassName}>
         <div className="flex h-full flex-col gap-6 overflow-y-auto p-6">
           <div className="text-center space-y-2">
             <h2 className="text-4xl font-bold">GOBLIN INVADERS</h2>
@@ -1153,9 +880,9 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
 
           <button
             onClick={rewardRun.start}
-            disabled={!hasRewardRun}
+            disabled={!hasRewardRun || startingRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
-              hasRewardRun
+              hasRewardRun && !startingRun
                 ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                 : "bg-gray-300 text-gray-500 cursor-not-allowed"
             }`}
@@ -1197,6 +924,41 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             >
               EXIT
             </button>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server and seeding today&apos;s
+                  invaders. Hold tight — this only takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
+              </div>
+            </div>
           )}
 
           {showPracticeDifficultyPrompt && (
@@ -1251,7 +1013,7 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
     Math.floor(runtime.respawnPauseMs / PLAYER_BLINK_INTERVAL_MS) % 2 === 0;
 
   return (
-    <OuterPanel className="mx-auto w-full max-w-[1100px] h-[min(95vh,900px)] overflow-hidden">
+    <OuterPanel className={panelClassName}>
       <InnerPanel className="w-full h-full p-3 md:p-4 bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white overflow-auto">
         <div className="max-w-6xl mx-auto h-full flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
@@ -1421,9 +1183,8 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
           {/* Goblin Invaders was keyboard-only, which made the cabinet
               unplayable on a phone. `TouchMoveBar` is deliberately not a second
               input path: its fire button sends the `Space` pair the keyboard
-              already handles, and its scrub maps the finger onto the same
-              `clampPlayerX` range the `ArrowLeft`/`ArrowRight` poll moves
-              within, so the ship behaves identically whichever one drives it.
+              already handles, and its scrub is latched into the next step's
+              byte, so the ship behaves identically whichever one drives it.
               It is a *sibling* of the stage rather than a child of it, which is
               the point: `FitStage` sums the height of the board's siblings, so
               the bar's height is already being held back from the arena and
@@ -1470,7 +1231,20 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
                 Restart Practice Run
               </Button>
             )}
-            {onClose && <Button onClick={handleInGameExit}>Exit</Button>}
+            {runtime.gameOver && (
+              <Button onClick={returnToMenu}>MENU</Button>
+            )}
+            {runtime.gameOver && onClose && (
+              <Button onClick={() => onClose()}>Exit</Button>
+            )}
+            {!runtime.gameOver && (
+              <button
+                onClick={() => setShowExitConfirm(true)}
+                className="px-3 py-1 text-xs bg-gray-700 text-slate-300 rounded hover:bg-gray-600"
+              >
+                QUIT RUN
+              </button>
+            )}
           </div>
 
           <div className="text-xs text-slate-300">
@@ -1481,24 +1255,30 @@ export const GoblinInvadersGame: React.FC<{ onClose?: () => void }> = ({
             for cover and shoot the mystery ship for bonus points.
           </div>
 
-          {showExitConfirm && (
+          {showExitConfirm && !runtime.gameOver && (
             <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
               <div className="w-full max-w-sm bg-slate-900 rounded border border-white/30 p-5 text-white space-y-4">
-                <div className="font-bold text-lg">Exit Goblin Invaders?</div>
+                <div className="font-bold text-lg">Quit the run?</div>
                 <div className="text-sm text-slate-300">
-                  Your current progress will be lost.
+                  {mode === "reward"
+                    ? "Quitting will submit your current score and count the run as used."
+                    : "Your progress will be lost."}
                 </div>
                 <div className="flex gap-3 justify-end">
                   <Button onClick={() => setShowExitConfirm(false)}>
-                    Cancel
+                    KEEP PLAYING
                   </Button>
                   <Button
                     onClick={() => {
                       setShowExitConfirm(false);
-                      onClose?.();
+                      // Settled by the loop on its next frame, through the same
+                      // door every other run end comes through — a direct
+                      // `setRuntime` here would flip the render while the loop
+                      // kept stepping a different object.
+                      forfeitRequestedRef.current = true;
                     }}
                   >
-                    Exit
+                    QUIT
                   </Button>
                 </div>
               </div>

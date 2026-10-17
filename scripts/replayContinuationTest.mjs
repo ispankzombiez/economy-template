@@ -163,14 +163,16 @@ const snapshot = (m) => JSON.parse(JSON.stringify(m));
 
 /** The worker's half: one claim, replayed in a single pass. */
 function replayInOnePass(claim) {
-  const state = startReplay(claim);
+  // The worker passes the ledger's issued seed beside the claim — for an
+  // honest run they are the same number, which is what the engine now asserts.
+  const state = startReplay(claim, claim.seed);
   stepReplay(state, state.total);
   return state;
 }
 
 /** The worker's half, the way it really runs: chunk, park, resume. */
 function replayChunked(claim, chunk) {
-  let state = startReplay(claim);
+  let state = startReplay(claim, claim.seed);
   let parks = 0;
   while (!isReplayComplete(state)) {
     stepReplay(state, chunk);
@@ -261,7 +263,7 @@ for (const [ticks, seed, variant] of SCENARIOS) {
 
 {
   const claim = runFor(TICKS_LONG, 4242, 0);
-  const good = startReplay(claim);
+  const good = startReplay(claim, claim.seed);
   stepReplay(good, CHUNK_TICKS);
   const park = {
     state: JSON.parse(JSON.stringify(good.match)),
@@ -333,9 +335,9 @@ for (const [ticks, seed, variant] of SCENARIOS) {
 {
   const claim = runFor(1200, 31337, 1);
 
-  const rejects = (bad, label, want) => {
+  const rejects = (bad, label, want, issued = claim.seed) => {
     try {
-      startReplay(bad);
+      startReplay(bad, issued);
       check(false, label, "no error thrown");
     } catch (error) {
       check(
@@ -361,11 +363,28 @@ for (const [ticks, seed, variant] of SCENARIOS) {
     "implausibly long",
   );
 
+  // The issued-seed binding: the claim's own seed field is checked against the
+  // number the server drew at run-open, not used as the seed. A claim that
+  // declares a seed the ledger did not issue, or a run with no issued seed at
+  // all (a row from before the column existed), must both refuse by name —
+  // these are the refusals that make the client-chosen-seed model impossible.
+  rejects(
+    { ...claim, seed: claim.seed + 1 },
+    "startReplay refuses a claim whose seed was not the one issued for the run",
+    "not issued",
+  );
+  rejects(
+    claim,
+    "startReplay refuses a run with no server-issued seed (no fallback)",
+    "no server-issued seed",
+    null,
+  );
+
   // The positive control: the same claim still starts. Without it the checks
   // above could pass because *every* submission is being refused.
   let started = false;
   try {
-    startReplay(claim);
+    startReplay(claim, claim.seed);
     started = true;
   } catch {
     started = false;

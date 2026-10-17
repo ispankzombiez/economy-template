@@ -26,7 +26,6 @@ import ravenCoinIcon from "../../assets/RavenCoin.webp";
 import { useBootstrap } from "lib/portal/BootstrapContext";
 import { getEconomyWorkerUrl, writeNonce, postEconomyWrite } from "lib/portal/api";
 import {
-  getTetrisDaySeed,
   getTetrisDifficulty,
   getTetrisPracticeSeed,
   isTetrisRewardRunAvailable,
@@ -134,9 +133,13 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const isVip = useVipAccess({ game: portalGameState });
   const bootstrap = useBootstrap();
 
+  // Controls hasRewardRun recomputation after a win so the
+  // portalGameState (ticket balance, daily mint ledger) is read fresh.
+  const [justWon, setJustWon] = useState(0);
+
   const hasRewardRun = useMemo(
     () => isTetrisRewardRunAvailable({ game: portalGameState, isVip }),
-    [portalGameState, isVip],
+    [portalGameState, isVip, justWon],
   );
 
   const todaysDifficulty = useMemo(() => getTetrisDifficulty(), []);
@@ -151,6 +154,19 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const [showPracticeDifficultyPrompt, setShowPracticeDifficultyPrompt] =
     useState(false);
   const [showExitConfirm, setShowExitConfirm] = useState(false);
+  // True from the moment a reward run is confirmed until its runtime exists and
+  // the mode flips. Opening a paid run waits on a server round-trip (burn the
+  // ticket, then read back the issued seed), which is a second or two of real
+  // latency — so without this the menu just sits there looking frozen, and the
+  // "START REWARD RUN" button stays live underneath, where a second click would
+  // open and burn a *second* run. This gates the button and shows a loading
+  // card so the wait reads as "starting", not "broken".
+  const [startingRun, setStartingRun] = useState(false);
+  // True when a reward run could not read the seed the server issued for it.
+  // The run is then never started: a claim only mints against the issued seed,
+  // so playing on from any local substitute would be a game the player can win
+  // and never be paid for. The card below says so plainly and offers a reload.
+  const [seedError, setSeedError] = useState(false);
   const [activeDifficulty, setActiveDifficulty] =
     useState<TetrisDifficulty>(todaysDifficulty);
   const [practiceDifficultyName, setPracticeDifficultyName] =
@@ -161,7 +177,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   // instead of something the player can only infer from a missing coin.
   const [verifyDiag, setVerifyDiag] = useState<string | null>(null);
 
-  // The simulation state lives in `gameRef`, not in React state: a step is
+// The simulation state lives in `gameRef`, not in React state: a step is
   // driven from a fixed-step accumulator, and re-rendering between ticks would
   // mean the log and the game could disagree for a frame.
   const gameRef = useRef<TetrisRuntime | null>(null);
@@ -198,21 +214,43 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
   const held = useHeldKeys();
 
   // Read the bag seed the server issued for the run that is open.
-  // Returns null on any error — the caller decides what to do (practice falls back to local).
+  // Returns null on any error — a reward run then refuses to start rather than
+  // ever dealing a bag the server did not issue.
+  // Retries until the returned runKey is recent (within ~10s), to avoid racing the
+  // server's active_runs row creation (dispatchAction returns before the worker
+  // has written the new run's seed).
   const fetchRunSeed = useCallback(async (jwt: string | undefined): Promise<number | null> => {
     if (!jwt) return null;
-    try {
-      const res = await postEconomyWrite({
-        token: jwt,
-        intent: "run-seed",
-      });
-      // run-seed returns { seed, runKey, cabinet } directly in data, not the economy envelope
-      const payload = res.data as { seed?: number } | undefined;
-      if (!payload?.seed) return null;
-      return Number(payload.seed);
-    } catch {
-      return null;
+    const startedAt = Date.now();
+    const maxWaitMs = 10_000;
+    // Tight on purpose: the seed is written after the ticket burn settles, so
+    // this poll is usually waiting on that round-trip. A coarse interval then
+    // adds its own latency on top once the row lands — up to a full interval of
+    // extra silence before the game starts.
+    const pollIntervalMs = 150;
+
+    while (Date.now() - startedAt < maxWaitMs) {
+      try {
+        const res = await postEconomyWrite({
+          token: jwt,
+          intent: "run-seed",
+        });
+        // run-seed returns { seed, runKey, cabinet } directly in data
+        const payload = res.data as { seed?: number; runKey?: number } | undefined;
+        if (payload?.seed && payload?.runKey) {
+          const runAgeMs = Date.now() - payload.runKey;
+          if (runAgeMs <= 15_000) {
+            // Fresh run (opened within the last 15s) — this is our seed.
+            return Number(payload.seed);
+          }
+          // Stale runKey (old run): wait for the new one to be written.
+        }
+      } catch {
+        // Ignore transient errors, retry.
+      }
+      await new Promise((r) => setTimeout(r, pollIntervalMs));
     }
+    return null;
   }, []);
 
   const returnToMenu = useCallback(() => {
@@ -220,6 +258,7 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     setMode(null);
     setRuntime(null);
     gameRef.current = null;
+    setSeedError(false);
   }, []);
 
   const handleInGameExit = useCallback(() => {
@@ -238,6 +277,14 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
     ) => {
       if (nextMode === "reward" && !hasRewardRun) return;
 
+      // From here the paid run is already being opened on the server (the
+      // confirm handler burned the ticket / spent the allowance before calling
+      // in), so flip the loading card immediately — before the seed round-trip
+      // below — so the menu never sits frozen while we wait. Cleared once the
+      // runtime exists and the mode flips.
+      if (nextMode === "reward") setStartingRun(true);
+      setSeedError(false);
+
       const chosenPracticeName =
         practiceDifficultyOverride ?? practiceDifficultyName;
       const selectedPracticeDifficulty =
@@ -253,19 +300,21 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       // two games, and the claim would describe the one nobody played.
       //
       // Reward run: the bag seed is *issued* by the server at run-open and read
-      // back here. Practice: a local seed, because it is never verified.
+      // back here — never derived locally, because the claim only mints against
+      // the issued seed. If that round-trip fails, stop and say so: a local
+      // substitute would play fine and pay nothing. Practice: a local seed,
+      // because it is never verified.
       // The seed is baked into the runtime rather than passed per step, so a
       // park resumed after midnight keeps dealing from the run's own bag.
       let bagSeed: number;
       if (nextMode === "reward") {
         const issued = await fetchRunSeed(bootstrap?.jwt);
-        if (issued !== null) {
-          bagSeed = issued;
-        } else {
-          // Fallback: the server has no issued seed for this run. Use the day
-          // hash so the run is still reproducible and the claim can verify.
-          bagSeed = getTetrisDaySeed();
+        if (issued === null) {
+          setStartingRun(false);
+          setSeedError(true);
+          return;
         }
+        bagSeed = issued;
       } else {
         bagSeed = getTetrisPracticeSeed();
       }
@@ -274,6 +323,10 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
       setRuntime({ ...fresh });
 
       setMode(nextMode);
+      // The lobby only renders while `mode` is null, so once it flips the
+      // loading card is gone regardless — but clear the flag anyway so a later
+      // return-to-menu never inherits a stale "starting" state.
+      setStartingRun(false);
       setActiveDifficulty(runDifficulty);
       setShowPracticeDifficultyPrompt(false);
       rewardGrantedRef.current = false;
@@ -745,6 +798,9 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
         verify: claim,
       });
     });
+    // Force hasRewardRun to recompute on the next render so the
+    // portalGameState (ticket balance, daily mint ledger) is read fresh.
+    setJustWon(1);
   }, [mode, portalService, runtime]);
 
   const renderedBoard = useMemo(() => {
@@ -836,22 +892,24 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
 
           <button
             onClick={rewardRun.start}
-            disabled={!hasRewardRun}
+            disabled={!hasRewardRun || startingRun}
             className={`w-full px-6 py-4 rounded-lg font-bold transition-all shadow-lg text-lg ${
-              hasRewardRun
+              hasRewardRun && !startingRun
                 ? "bg-green-500 text-white hover:bg-green-600 active:scale-95"
                 : "bg-gray-300 text-gray-500 cursor-not-allowed"
             }`}
           >
-            <div>START REWARD RUN</div>
+            <div>{startingRun ? "STARTING…" : "START REWARD RUN"}</div>
             <div className="mt-2 text-xs opacity-90">
               {!hasRewardRun
                 ? "No reward runs left today — buy Play Tickets in the shop."
-                : rewardRun.freeAvailable
-                  ? isVip
-                    ? "VIP: reward run available for Tetris today."
-                    : "Reward run available for the arcade today."
-                  : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
+                : startingRun
+                  ? "Opening your run on the server…"
+                  : rewardRun.freeAvailable
+                    ? isVip
+                      ? "VIP: reward run available for Tetris today."
+                      : "Reward run available for the arcade today."
+                    : `Uses 1 Play Ticket (you have ${rewardRun.tickets}).`}
             </div>
           </button>
 
@@ -921,6 +979,41 @@ export const TetrisGame: React.FC<{ onClose?: () => void }> = ({ onClose }) => {
                     CANCEL
                   </Button>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {startingRun && (
+            <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-white/30 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-white/20 border-t-white" />
+                <h3 className="text-lg font-bold">Starting your run…</h3>
+                <p className="text-sm text-slate-300">
+                  Opening a reward run on the server. Hold tight — this only
+                  takes a moment.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {seedError && (
+            <div className="fixed inset-0 z-40 bg-black/60 flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded border border-red-500/50 bg-slate-900 p-6 space-y-3 text-white text-center">
+                <h3 className="text-lg font-bold text-red-400">
+                  Couldn&apos;t start your run
+                </h3>
+                <p className="text-sm text-slate-300">
+                  The server didn&apos;t send this run&apos;s seed, so we
+                  stopped instead of starting a game that couldn&apos;t be
+                  verified or paid out. Refresh the page and try again — if it
+                  keeps happening, your connection may be dropping.
+                </p>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="w-full px-6 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 active:scale-95 transition-all"
+                >
+                  REFRESH THE PAGE
+                </button>
               </div>
             </div>
           )}

@@ -98,6 +98,7 @@ import { decodeInputLog, encodeInputLog } from "@nightshade/shared/inputLog";
 // resume — see the header of solitaireReplay.js.
 import {
   SolitaireReplayInputError,
+  assertIssuedSeed,
   runSolitaireReplay,
   solitaireReplayOutcome,
   validateSolitaireReplay,
@@ -149,7 +150,19 @@ import {
   startPacmanReplay,
   stepPacmanReplay,
   validatePacmanReplay,
-} from "./pacmanReplay.js";
+} from "./pacmanReplay.js"
+// Barley Breaker's verifier — the same streamed-tick shape as Pac-Man's: a
+// zero-RNG engine imported straight from the client's `engine.ts`, the proof
+// a per-step input log, the difficulty re-derived from the date and baked into
+// the runtime. What differs is only what the byte means (direction, launch,
+// touch scrub — see the engine's header). See barleyBreakerReplay.js.
+import {
+  openBarleyBreakerChunkReplay,
+  barleyBreakerOutcome,
+  startBarleyBreakerReplay,
+  stepBarleyBreakerReplay,
+  validateBarleyBreakerReplay,
+} from "./barleyBreakerReplay.js";
 // Tetris verifier — tick-simulated like the brawler and Pac-Man. The engine uses
 // a seeded LCG for the piece bag, so the proof is (difficulty, seed, input log).
 import {
@@ -160,6 +173,32 @@ import {
   tetrisOutcome,
   validateTetrisReplay,
 } from "./tetrisReplay.js";
+// Frogger's verifier — the streamed-tick shape again, but the *seeded* one:
+// the engine's runtime RNG (elite re-rolls on every goblin wrap, fragile
+// re-rolls on every respawn, sink timers on every fragile step-on, plus the
+// opening layouts) draws from the seed issued at run-open, exactly as Tetris's
+// bag does, so the seed is read from `active_runs` and never from the claim.
+// See froggerReplay.js and the engine's header.
+import {
+  openFroggerChunkReplay,
+  froggerOutcome,
+  startFroggerReplay,
+  stepFroggerReplay,
+  validateFroggerReplay,
+} from "./froggerReplay.js";
+// Goblin Invaders' verifier — the streamed-tick shape again, and the seeded
+// one: the engine's runtime RNG (the mystery ship's respawn delay, direction
+// and points; the column each enemy shot is fired from) draws from the seed
+// issued at run-open, exactly as Frogger's rolls do, so the seed is read from
+// `active_runs` and never from the claim. See goblinInvadersReplay.js and the
+// engine's header.
+import {
+  openGoblinInvadersChunkReplay,
+  goblinInvadersOutcome,
+  startGoblinInvadersReplay,
+  stepGoblinInvadersReplay,
+  validateGoblinInvadersReplay,
+} from "./goblinInvadersReplay.js";
 
 const PORTAL_ID = "Nightshade-Arcade";
 
@@ -1795,17 +1834,29 @@ async function settleAttempt(env, nonce, state, detail) {
  *
  * Re-opening draws a fresh seed, which is correct: the older run's voucher was
  * consumed by the newer open, so the two runs are not the same run.
+ *
+ * ## The start token stored beside them
+ *
+ * `active_runs` is one row per farm, so the second open *overwrites* the first
+ * — and a seed poll can cross that overwrite: the client is still asking about
+ * its own run while the newer run's row has already replaced it, or has not
+ * landed yet. Freshness alone cannot answer "is this row mine?" — the previous
+ * run's row is fresh for exactly the window in which the mistake happens. The
+ * caller mints a random token with the open, this stores it, and `run-seed`
+ * hands the seed back only to the request presenting the same token. The row
+ * says *which* run; the token says *whose ask* it belongs to.
  */
-async function recordActiveRun(env, farmId, cabinet) {
+async function recordActiveRun(env, farmId, cabinet, runNonce) {
   const openedAt = Date.now();
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
 
   await env.LEDGER.prepare(
-    `INSERT INTO active_runs (farm_id, cabinet, opened_at, seed) VALUES (?, ?, ?, ?)
+    `INSERT INTO active_runs (farm_id, cabinet, opened_at, seed, run_nonce) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(farm_id) DO UPDATE SET
-       cabinet = excluded.cabinet, opened_at = excluded.opened_at, seed = excluded.seed`,
+       cabinet = excluded.cabinet, opened_at = excluded.opened_at, seed = excluded.seed,
+       run_nonce = excluded.run_nonce`,
   )
-    .bind(farmId, cabinet, openedAt, seed)
+    .bind(farmId, cabinet, openedAt, seed, runNonce ?? null)
     .run();
 
   return { runKey: openedAt, cabinet, seed };
@@ -1822,7 +1873,7 @@ async function recordActiveRun(env, farmId, cabinet) {
  */
 async function readActiveRun(env, farmId) {
   const row = await env.LEDGER.prepare(
-    `SELECT cabinet, opened_at, seed FROM active_runs WHERE farm_id = ?`,
+    `SELECT cabinet, opened_at, seed, run_nonce FROM active_runs WHERE farm_id = ?`,
   )
     .bind(farmId)
     .first();
@@ -1836,8 +1887,17 @@ async function readActiveRun(env, farmId) {
   // day hash here would hand back the one shared bag the column exists to
   // replace, and a run verified against a seed the client can predict is not a
   // certified run.
+  // `run_nonce` is the start token the run was opened with, null for a row a
+  // client that predates the token wrote — refused against a present one for
+  // the same reason: a seed fetch that cannot prove which open it is asking
+  // about must not be answered with a seed at all.
   return row
-    ? { cabinet: row.cabinet, runKey: row.opened_at, seed: row.seed ?? null }
+    ? {
+        cabinet: row.cabinet,
+        runKey: row.opened_at,
+        seed: row.seed ?? null,
+        runNonce: row.run_nonce ?? null,
+      }
     : null;
 }
 
@@ -2097,6 +2157,73 @@ function rangedAmounts(session, actionId, tokenKey, preferred = 1) {
   return { [tokenKey]: wanted };
 }
 
+/**
+ * Burn a lingering reward-attempt voucher before opening a new run.
+ *
+ * A voucher is minted when a run opens and destroyed when it settles — by
+ * `Claim-Raven-Coin` on a win, or by `Void-Reward-Attempt` on a loss or a
+ * walk-out. The client sends the void when the cabinet unmounts, which is
+ * usually soon enough — but "soon enough" is a race the player can lose: lose
+ * a run and start the next one quickly from the same cabinet, and the void has
+ * either not fired or not landed. The economy then refuses to mint a second
+ * voucher ("You already have that. Finish what you are holding first."), the
+ * run-open fails, no new `active_runs` row is written, and the seed poll for
+ * the new run times out against the dead run's stale row.
+ *
+ * The worker should not depend on that timing. Opening a new run *is* the
+ * statement that the previous one is over — nothing else opens a run — so any
+ * voucher still standing belongs to a run that can no longer be settled, and
+ * burning it here is exactly what the unmount void would have done, just at
+ * the moment it is provably safe. A run that was actually settled already
+ * destroyed its voucher, so this burns nothing on the normal path.
+ *
+ * Only ever the farm's own voucher, through the same ranged action the cleanup
+ * client uses — it can destroy, never mint.
+ */
+async function voidLingeringAttempt(env, session, farmId) {
+  const tokenKey = rewardAttemptKey(session);
+  if (!tokenKey) return;
+  try {
+    await callEconomy(env, session, {
+      type: "minigame.action",
+      action: "Void-Reward-Attempt",
+      amounts: rangedAmounts(session, "Void-Reward-Attempt", tokenKey),
+    });
+  } catch {
+    // Nothing standing (the common case) or a rule refusal — either way there
+    // is no voucher to clear, and the open below is what matters.
+  }
+}
+
+/**
+ * The start token this run-open was sent with, or `null` when it sent none.
+ *
+ * A token is a random string the browser mints at the moment of confirm and
+ * presents again when it asks for this run's seed — see `intentRunSeed`. It
+ * exists because `active_runs` is a single row per farm: a second open
+ * overwrites the first, so "the seed for the run open right now" is only a
+ * well-asked question when the asker can name which open it belongs to.
+ *
+ * `null` means an older bundle (or a caller that never mints one). Kept
+ * storable rather than rejected outright — a non-seeded cabinet never fetches
+ * a seed, so its opens are unaffected — but a **seeded** cabinet refuses such
+ * an open at validation time instead: the run it would burn a ticket on could
+ * never fetch its seed, and a refusal here costs nothing because nothing has
+ * been written yet.
+ *
+ * The length bounds mirror the request-nonce rule in `handleEconomyWrite`: the
+ * client's own token is 32 hex characters, and anything outside 8–64 is a
+ * caller sending something that was never this contract.
+ */
+function runOpenNonce(payload) {
+  const raw = typeof payload?.runNonce === "string" ? payload.runNonce.trim() : "";
+  if (!raw) return null;
+  if (raw.length < 8 || raw.length > 64) {
+    throw new HttpError(400, "Invalid run start token. Reload the arcade and try again.");
+  }
+  return raw;
+}
+
 /** Open a free run: burns the cabinet's token, mints the reward-attempt voucher. */
 function intentStartFreeRun({ actionId, farmId, session, env, payload }) {
   const cabinet = cabinetForAction(actionId);
@@ -2106,7 +2233,6 @@ function intentStartFreeRun({ actionId, farmId, session, env, payload }) {
   if (!tokenKey) {
     throw new HttpError(400, "This cabinet has no Free Run Token published.");
   }
-
   // A VIP's run-open names its cabinet in the action id, so the server already
   // knows it and takes it as authoritative. The **arcade-wide** open does not —
   // it is one allowance covering every machine, so the action id says only
@@ -2124,8 +2250,22 @@ function intentStartFreeRun({ actionId, farmId, session, env, payload }) {
     throw new HttpError(400, "Unknown cabinet.");
   }
 
+  // Read and enforced in the factory, not in `run`, so a seeded cabinet's
+  // tokenless open is refused before the token burn — see `runOpenNonce`. A
+  // non-seeded cabinet accepts `null` and simply stores it.
+  const runNonce = runOpenNonce(payload);
+  if (runNonce === null && SEEDED_CABINETS.has(openedOn)) {
+    throw new HttpError(
+      400,
+      "This build sent no start token for a seeded run, so its seed could never be issued. Reload the arcade, then start again.",
+    );
+  }
+
   return {
     async run() {
+      // Settle whatever run came before this one, then open. The order is the
+      // whole point: the new voucher cannot be minted while the old one stands.
+      await voidLingeringAttempt(env, session, farmId);
       // No ledger slot: the token is spent by the burn itself, and `max: 1` on
       // the token means absence *is* the signal that the allowance is gone.
       const data = await callEconomy(env, session, {
@@ -2133,7 +2273,7 @@ function intentStartFreeRun({ actionId, farmId, session, env, payload }) {
         action: actionId,
         amounts: rangedAmounts(session, actionId, tokenKey),
       });
-      await recordActiveRun(env, farmId, openedOn);
+      await recordActiveRun(env, farmId, openedOn, runNonce);
       return data;
     },
   };
@@ -2156,15 +2296,31 @@ function intentStartTicketRun({ farmId, session, env, payload }) {
     throw new HttpError(400, "Unknown cabinet.");
   }
 
+  // Refused before the ticket burn, for the same reason and with the same rule
+  // as the free open — see `runOpenNonce`.
+  const runNonce = runOpenNonce(payload);
+  if (runNonce === null && SEEDED_CABINETS.has(cabinetId)) {
+    throw new HttpError(
+      400,
+      "This build sent no start token for a seeded run, so its seed could never be issued. Reload the arcade, then start again.",
+    );
+  }
+
   const tokenKey = playTicketKey(session);
   return {
     async run() {
+      // Settle whatever run came before this one, then open — see
+      // `voidLingeringAttempt`. Without this, a loss followed by a quick
+      // restart refuses to mint the new voucher ("You already have that"),
+      // the run never opens, and the seed poll for it times out against the
+      // dead run's row.
+      await voidLingeringAttempt(env, session, farmId);
       const data = await callEconomy(env, session, {
         type: "minigame.action",
         action: "Start-Ticket-Run",
         amounts: rangedAmounts(session, "Start-Ticket-Run", tokenKey),
       });
-      await recordActiveRun(env, farmId, cabinetId);
+      await recordActiveRun(env, farmId, cabinetId, runNonce);
       return data;
     },
   };
@@ -2272,6 +2428,23 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
       error instanceof ReplayInputError ? error.message : "the replay could not be started";
     await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason });
     return { matched: null, reason };
+  }
+
+  // Bind the claim's declared seed to the number this worker issued when the
+  // run opened, for the streamed cabinets whose validator carries a seed — the
+  // brawler's does, and it is the only one: Tetris's payload has no seed field
+  // at all (the engine takes only the ledger's, see `startTetrisReplay`), and
+  // Pac-Man has no randomness to seed. The park path below is already bound
+  // because chunk 0 opens it from the ledger, but a claim can arrive with no
+  // park — and that is exactly the request where a client-chosen seed would
+  // otherwise pick its own match. Same contract, and same recorded refusal, as
+  // `issuedSeedProblem` in the turn-based verifiers.
+  if (engine.seeded && typeof validated.seed === "number") {
+    const seedProblem = issuedSeedProblem(validated.seed, runSeed);
+    if (seedProblem !== null) {
+      await recordReplayVerdict(env, { farmId, cabinet, matched: null, claimScore, reason: seedProblem });
+      return { matched: null, reason: seedProblem };
+    }
   }
 
   // Resumed rather than restarted when a previous request already parked this
@@ -2429,13 +2602,19 @@ async function runReplayVerification({ env, farmId, payload, cabinet, claimScore
  *  - **A completed replay** records the real verdict through
  *    `solitaireReplayOutcome` — the only path that may refuse the coin.
  *
- * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @param {{ env, farmId, payload, cabinet, claimScore, runSeed }} args
  * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
  */
-async function runSolitaireVerification({ env, farmId, payload, cabinet, claimScore }) {
+async function runSolitaireVerification({ env, farmId, payload, cabinet, claimScore, runSeed }) {
   let validated;
   try {
     validated = validateSolitaireReplay(payload?.replay);
+    // Bind the deal to the run. The claim's seed is the *resolved* one (the
+    // seed `createSolvableDeal` landed on after its forward walk), so this is
+    // a window check against the base the server issued at run-open, not an
+    // equality — see `assertIssuedSeed`. Inside the same try because an
+    // unbindable seed is a malformed submission, not a mismatched game.
+    assertIssuedSeed(validated.seed, runSeed);
   } catch (error) {
     const reason =
       error instanceof SolitaireReplayInputError
@@ -2476,6 +2655,44 @@ async function runSolitaireVerification({ env, farmId, payload, cabinet, claimSc
 }
 
 /**
+ * Bind a claim's seed to the seed this worker issued when the run was opened.
+ *
+ * ## Why most seeded cabinets need equality, not a window
+ *
+ * Every seeded cabinet *except* Solitaire deals directly from the issued seed:
+ * Tetris's piece bag and Go Fish's shuffle (the deck *and* every later dealer
+ * choice, which resume the same generator stream) are both pure functions of
+ * it, so a claim naming any other seed is naming a game the run was never
+ * dealt, and is refused outright. Solitaire is the one exception — its
+ * `createSolvableDeal` walks up to 100 seeds forward to a winnable board — and
+ * it binds with the window check in `solitaireReplay.js` instead of this.
+ *
+ * ## Why it returns a reason instead of throwing
+ *
+ * Each cabinet's replay module defines its own input-error class, and the claim
+ * path records *that* class as protocol noise (a distinct reason) rather than a
+ * mismatch. Returning the message lets each verifier throw its own error type
+ * while the shared binding logic stays in one place.
+ *
+ * @param {number} seed  The claim's `replay.seed` (already shape-checked).
+ * @param {number|null} runSeed  The seed the server issued for this run.
+ * @returns {string|null} A refusal reason, or `null` when the seed binds.
+ */
+function issuedSeedProblem(seed, runSeed) {
+  // Fails closed: a run opened before the seed column was populated has no seed
+  // to bind to, and a run verified against a client-chosen seed is not a
+  // certified run. The type check comes before any comparison so a missing seed
+  // (`null`) is refused rather than coerced toward `0`.
+  if (typeof runSeed !== "number" || !Number.isInteger(runSeed)) {
+    return "this run has no server-issued seed, so its result cannot be verified";
+  }
+  if (seed !== runSeed) {
+    return "the replay's seed was not issued for this run";
+  }
+  return null;
+}
+
+/**
  * Verify a Go Fish claim — validate, replay, and record the verdict.
  *
  * The Go Fish twin of `runSolitaireVerification`, for the same structural
@@ -2488,13 +2705,19 @@ async function runSolitaireVerification({ env, farmId, payload, cabinet, claimSc
  * verdict through `goFishReplayOutcome` — the only path that may refuse the
  * coin.
  *
- * @param {{ env, farmId, payload, cabinet, claimScore }} args
+ * @param {{ env, farmId, payload, cabinet, claimScore, runSeed }} args
  * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
  */
-async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore }) {
+async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore, runSeed }) {
   let validated;
   try {
     validated = validateGoFishReplay(payload?.replay);
+    // Bind the deal to the run. Go Fish deals directly from the seed, so the
+    // claim's seed must be the one the server issued — see `issuedSeedProblem`.
+    // Inside the same try because an unbindable seed is a malformed submission,
+    // not a mismatched game.
+    const seedProblem = issuedSeedProblem(validated.seed, runSeed);
+    if (seedProblem !== null) throw new GoFishReplayInputError(seedProblem);
   } catch (error) {
     const reason =
       error instanceof GoFishReplayInputError
@@ -2549,10 +2772,17 @@ async function runGoFishVerification({ env, farmId, payload, cabinet, claimScore
  * @param {{ env, farmId, payload, cabinet, claimScore }} args
  * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
  */
-async function runBlackjackVerification({ env, farmId, payload, cabinet, claimScore }) {
+async function runBlackjackVerification({ env, farmId, payload, cabinet, claimScore, runSeed }) {
   let validated;
   try {
     validated = validateBlackjackReplay(payload?.replay);
+    // Bind the shoes to the run. Blackjack shuffles directly from the seed
+    // (no walk window like Solitaire's solver search), so the claim's seed must
+    // be the one the server issued — see `issuedSeedProblem`. Inside the same
+    // try because an unbindable seed is a malformed submission, not a
+    // mismatched game.
+    const seedProblem = issuedSeedProblem(validated.seed, runSeed);
+    if (seedProblem !== null) throw new BlackjackReplayInputError(seedProblem);
   } catch (error) {
     const reason =
       error instanceof BlackjackReplayInputError
@@ -2607,10 +2837,17 @@ async function runBlackjackVerification({ env, farmId, payload, cabinet, claimSc
  * @param {{ env, farmId, payload, cabinet, claimScore }} args
  * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
  */
-async function runPokerVerification({ env, farmId, payload, cabinet, claimScore }) {
+async function runPokerVerification({ env, farmId, payload, cabinet, claimScore, runSeed }) {
   let validated;
   try {
     validated = validatePokerReplay(payload?.replay);
+    // Bind the decks to the run. Poker shuffles directly from the seed (one
+    // `createPokerState`, no solver search like Solitaire's walk), so the
+    // claim's seed must be the one the server issued — see
+    // `issuedSeedProblem`. Inside the same try because an unbindable seed is
+    // a malformed submission, not a mismatched game.
+    const seedProblem = issuedSeedProblem(validated.seed, runSeed);
+    if (seedProblem !== null) throw new PokerReplayInputError(seedProblem);
   } catch (error) {
     const reason =
       error instanceof PokerReplayInputError
@@ -2667,10 +2904,17 @@ async function runPokerVerification({ env, farmId, payload, cabinet, claimScore 
  * @param {{ env, farmId, payload, cabinet, claimScore }} args
  * @returns {Promise<{ matched: boolean|null, reason: string|null, replayScore?: number }>}
  */
-async function runUnoVerification({ env, farmId, payload, cabinet, claimScore }) {
+async function runUnoVerification({ env, farmId, payload, cabinet, claimScore, runSeed }) {
   let validated;
   try {
     validated = validateUnoReplay(payload?.replay);
+    // Bind the deal to the run. Uno deals directly from the seed (one
+    // `createInitialState`, no solver search like Solitaire's walk), so the
+    // claim's seed must be the one the server issued — see
+    // `issuedSeedProblem`. Inside the same try because an unbindable seed is
+    // a malformed submission, not a mismatched game.
+    const seedProblem = issuedSeedProblem(validated.seed, runSeed);
+    if (seedProblem !== null) throw new UnoReplayInputError(seedProblem);
   } catch (error) {
     const reason =
       error instanceof UnoReplayInputError
@@ -2745,11 +2989,13 @@ const WHOLE_LOG_VERIFIERS = {
  * `appendChunkInputs`, `isReplayComplete`, the `replay_state` rows) is shared
  * by every cabinet in it, because none of that knows what a tick *is*.
  *
- * The brawler is the *default* rather than a required key, for the reason the
- * whole-log dispatch defaults to the brawler verifier: a verified cabinet not
- * listed here fails closed, because the brawler's validator rejects every
- * replay shape that is not its own — no unknown cabinet can be processed by
- * the more lenient of the two by accident.
+ * The brawler has its own key now, because it joined Tetris in taking its seed
+ * from the ledger (`seeded: true` below). The *default* fallback in
+ * `tickEngineFor` is still the brawler's engine, for the reason the whole-log
+ * dispatch defaults to the brawler verifier: a verified cabinet not listed
+ * here fails closed, because the brawler's validator rejects every replay
+ * shape that is not its own — no unknown cabinet can be processed by the more
+ * lenient of the two by accident.
  */
 const TICK_ENGINES = {
   "pac-man": {
@@ -2759,6 +3005,18 @@ const TICK_ENGINES = {
     step: stepPacmanReplay,
     outcome: pacmanOutcome,
   },
+  "barley-breaker": {
+    validate: validateBarleyBreakerReplay,
+    start: startBarleyBreakerReplay,
+    openChunk: openBarleyBreakerChunkReplay,
+    step: stepBarleyBreakerReplay,
+    outcome: barleyBreakerOutcome,
+    // Unseeded, like Pac-Man's: the engine's rolls are a pure function of
+    // `(wave, row, col, salt)` and the run's difficulty is date-derived and
+    // baked in at run-open, so the log plus the difficulty *is* the run. The
+    // flag below exists for the two cabinets whose RNG a client could shop;
+    // there is nothing here to shop.
+  },
   "tetris": {
     validate: validateTetrisReplay,
     start: startTetrisReplay,
@@ -2767,10 +3025,49 @@ const TICK_ENGINES = {
     outcome: tetrisOutcome,
     // The bag is drawn by this cabinet's own RNG, and its seed is *issued*: read
     // from `active_runs.seed` rather than taken from the request. The flag is
-    // what says so, because the chunk path is shared — Pac-Man and the brawler
-    // have no bag of their own and still read `payload.seed`, and quietly
-    // switching them to a nullable ledger column would hand them a null seed
-    // without anyone noticing until their replays started disagreeing.
+    // what says so, because the chunk path is shared — Pac-Man has no bag of
+    // its own and still reads `payload.seed`, and quietly switching it to a
+    // nullable ledger column would hand it a null seed without anyone
+    // noticing until its replays started disagreeing.
+    seeded: true,
+  },
+  "frogger": {
+    validate: validateFroggerReplay,
+    start: startFroggerReplay,
+    openChunk: openFroggerChunkReplay,
+    step: stepFroggerReplay,
+    outcome: froggerOutcome,
+    // Same bargain as Tetris's bag, for an engine with even more runtime RNG:
+    // every goblin wrap, every fragile respawn and every fragile sink timer is
+    // a roll from this seed, so a seed the client chose is a traffic pattern
+    // the client chose. Issued — read from `active_runs.seed` at chunk-0 and
+    // at the claim, never from the request.
+    seeded: true,
+  },
+  "goblin-invaders": {
+    validate: validateGoblinInvadersReplay,
+    start: startGoblinInvadersReplay,
+    openChunk: openGoblinInvadersChunkReplay,
+    step: stepGoblinInvadersReplay,
+    outcome: goblinInvadersOutcome,
+    // Same bargain again: the mystery ship's respawn, direction and points and
+    // the source column of every enemy shot are rolls from this seed, so a
+    // seed the client chose is a run the client could shop for. Issued — read
+    // from `active_runs.seed` at chunk-0 and at the claim, never from the
+    // request.
+    seeded: true,
+  },
+  "sunflower-brawler": {
+    validate: validateReplay,
+    start: startReplay,
+    openChunk: openChunkReplay,
+    step: stepReplay,
+    outcome: replayOutcome,
+    // Same bargain as Tetris's bag: the simulation's RNG draws from this seed,
+    // so a seed the client chose is a run the client could shop for. Issued —
+    // read from `active_runs.seed` at chunk-0 and at the claim, never from the
+    // request. The chunk path already honours the flag; the engine's
+    // `startReplay` asserts the binding on its side.
     seeded: true,
   },
 };
@@ -3415,14 +3712,17 @@ const VERIFIED_CABINETS = new Set([
   "uno",
   "pac-man",
   "tetris",
+  "barley-breaker",
+  "frogger",
+  "goblin-invaders",
 ]);
 
 /**
  * Cabinets whose replays are *streamed* — the tick-simulated games that post
  * `verify-chunk` windows during play and park between requests (see
- * `openChunkReplay`). The brawler, Bumpkin-Man, and Tetris are the three so far;
- * all step through `TICK_ENGINES`, which chooses the engine by this same cabinet
- * name.
+ * `openChunkReplay`). The brawler, Pac-Man, Tetris, Barley Breaker, Frogger
+ * and Goblin Invaders are the six so far; all step through `TICK_ENGINES`,
+ * which chooses the engine by this same cabinet name.
  *
  * Membership in `VERIFIED_CABINETS` is about which *claim* route a cabinet
  * takes; this set is about the *chunk* route, and a cabinet can be verified
@@ -3431,7 +3731,14 @@ const VERIFIED_CABINETS = new Set([
  * The chunk intent checks this set so a run on a turn-based cabinet cannot
  * open a brawler-style park that nothing would ever drain.
  */
-const STREAMED_CABINETS = new Set(["sunflower-brawler", "pac-man", "tetris"]);
+const STREAMED_CABINETS = new Set([
+  "sunflower-brawler",
+  "pac-man",
+  "tetris",
+  "barley-breaker",
+  "frogger",
+  "goblin-invaders",
+]);
 
 const INTENTS = {
   "grant-free-run": intentGrantFreeRun,
@@ -3453,13 +3760,32 @@ const INTENTS = {
  * Cabinets whose randomness is **issued** — drawn here at run-open, stored in
  * `active_runs.seed`, and read back from there by the claim and by every chunk.
  *
- * A cabinet joins this when its engine has randomness that materially decides the
- * run, because only then is a seed something worth making unforgeable. One that
- * does not (Pac-Man has no RNG; the turn-based cabinets draw no pieces) gains
- * nothing but a round trip and a column to keep backfilled, so it keeps deriving
- * whatever it derives and reading `payload.seed` as before.
+ * A cabinet joins this when its engine has randomness that materially decides
+ * the run — the piece bag in Tetris, the shuffle in Solitaire — because only
+ * then is a seed something worth making unforgeable. A cabinet with none (Pac-Man
+ * has no RNG at all) gains nothing but a round trip and a column to keep
+ * backfilled, so it keeps deriving whatever it derives and reading
+ * `payload.seed` as before.
+ *
+ * ## The one cabinet that binds a *window*, not the seed itself
+ *
+ * Solitaire's `createSolvableDeal` walks up to 100 seeds forward from the base
+ * to find a winnable board, so its claim names the *resolved* seed rather than
+ * the issued one. The issued seed here is the base that walk starts from, and
+ * the worker's binding check (`assertIssuedSeed`) accepts any seed inside that
+ * walk window — exactly the space an honest client searches, and no more.
  */
-const SEEDED_CABINETS = new Set(["tetris"]);
+const SEEDED_CABINETS = new Set([
+  "tetris",
+  "solitaire",
+  "gofish",
+  "blackjack",
+  "uno",
+  "poker",
+  "sunflower-brawler",
+  "frogger",
+  "goblin-invaders",
+]);
 
 /**
  * Hand the client the bag seed this worker issued for the run that is open.
@@ -3486,14 +3812,45 @@ const SEEDED_CABINETS = new Set(["tetris"]);
  *
  * It touches no economy and mints nothing, so it takes no ledger slot and runs
  * no `callEconomy`. It is a read of a row the player already owns.
+ *
+ * ## Why the request names the run it is asking about
+ *
+ * `active_runs` is one row per farm, so a second open overwrites the first and
+ * the row alone cannot say *which* open a poll has come to ask about. The
+ * start token can: the browser mints one with each run-open, the open stores
+ * it, and this read is answered only for the token that matches the row's.
+ *
+ * That is what closes the stale-seed race. A poll crossing a re-open — its own
+ * run's row not yet written, the previous run's still inside the client's
+ * freshness window — presents a token the row does not hold, is refused, and
+ * keeps asking until the row that is actually its own arrives. Freshness then
+ * guards a row that is both recent *and* this caller's, rather than being
+ * asked to tell those two apart by the clock alone, which it never could: the
+ * previous run is fresh for exactly the window in which the mistake happens.
+ *
+ * Refusals here are ordinary: the client's seed poll retries on any error and
+ * stops with a plain "couldn't start your run" card if the match never comes.
  */
-function intentRunSeed({ farmId, env }) {
+function intentRunSeed({ farmId, env, payload }) {
   return {
     async run() {
       const openedOn = await readActiveRun(env, farmId);
       if (openedOn === null) {
         throw new HttpError(400, "No run is open. Start one before asking for its seed.");
       }
+
+      // The token first: everything below is a fact about the run *this caller
+      // opened*, and without the match the rest could be read about somebody
+      // else's — including a row written seconds ago by a second open this
+      // poll has not heard about.
+      const runNonce = typeof payload?.runNonce === "string" ? payload.runNonce.trim() : "";
+      if (!runNonce || runNonce !== openedOn.runNonce) {
+        throw new HttpError(
+          400,
+          "That start token does not match the run open on the server. If the run was just opened, its row may not have landed yet; otherwise start a new run.",
+        );
+      }
+
       if (!SEEDED_CABINETS.has(openedOn.cabinet)) {
         // Refused rather than answered with a number nobody will use. It also
         // keeps this intent from being a cabinet *oracle* for a farm with an open
