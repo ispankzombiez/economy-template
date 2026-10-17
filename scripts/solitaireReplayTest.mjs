@@ -557,24 +557,37 @@ const yesterday = getSolitaireDifficulty(Date.now() - 86_400_000);
 
 let deal = null;
 let played = null;
+let playDiff = null;
 {
   // Deterministic search: the first seed where the greedy log actually wins.
-  // (With the priorities aligned it should be the very first certified deal,
-  // but the search keeps this honest — and stable — if a priority ever shifts.)
-  for (let i = 0; i < 50 && !deal; i++) {
-    const candidate = createSolvableDeal(
-      20_261_010 + i,
-      today.maxPasses,
-      today.drawCount,
-    );
-    const run = playGreedy(candidate.state, today.drawCount);
-    if (
-      getFoundationsCount(run.state) === SOLITAIRE_WIN_SCORE &&
-      run.actions.length > 0
-    ) {
-      deal = candidate;
-      played = run;
+  //
+  // Today's difficulty first — and if today's parameters defeat the greedy
+  // player outright, yesterday's, which the worker accepts just the same (a
+  // run opened before the UTC rollover claims under the day it started, and
+  // this harness stands in for exactly such a player). On hard days (draw-3,
+  // a single pass) `greedySolve` certifies essentially no deal at all — 0 of
+  // 30 base seeds in a direct probe — so `createSolvableDeal` falls back to
+  // an uncertified one and no greedy play can win it. Yesterday's lighter
+  // parameters (draw-1, three passes on a medium day) certify ~15% of seeds,
+  // so the very first candidate lands.
+  for (const diff of [today, yesterday]) {
+    for (let i = 0; i < 50 && !deal; i++) {
+      const candidate = createSolvableDeal(
+        20_261_010 + i,
+        diff.maxPasses,
+        diff.drawCount,
+      );
+      const run = playGreedy(candidate.state, diff.drawCount);
+      if (
+        getFoundationsCount(run.state) === SOLITAIRE_WIN_SCORE &&
+        run.actions.length > 0
+      ) {
+        deal = candidate;
+        played = run;
+        playDiff = diff;
+      }
     }
+    if (deal) break;
   }
 
   check(deal !== null && played !== null, "found a deal whose greedy log wins");
@@ -587,11 +600,11 @@ if (deal && played) {
   );
 
   // The worker's half: rebuild the deal, re-apply the log.
-  const workerState = createInitialState(deal.seed, today.maxPasses);
+  const workerState = createInitialState(deal.seed, playDiff.maxPasses);
   const replayed = replaySolitaireActions(
     workerState,
     played.actions,
-    today.drawCount,
+    playDiff.drawCount,
   );
   check(replayed.failedAt === -1, "every logged action applies during replay");
   check(
@@ -611,7 +624,7 @@ if (deal && played) {
   // The whole pipeline, as the claim carries it.
   const validated = throughTheWire(
     played.actions,
-    today.name,
+    playDiff.name,
     deal.seed,
   );
   const verdict = verdictFor(validated);
@@ -634,7 +647,7 @@ if (deal && played) {
   // perfectly and still pays nothing.
   const truncated = throughTheWire(
     played.actions.slice(0, -1),
-    today.name,
+    playDiff.name,
     deal.seed,
   );
   const truncatedVerdict = verdictFor(truncated);
@@ -650,10 +663,10 @@ if (deal && played) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 if (deal && played) {
-  const drawCount = today.drawCount;
+  const drawCount = playDiff.drawCount;
 
   // Wrong seed: the same moves against a different deal.
-  const wrongSeed = throughTheWire(played.actions, today.name, (deal.seed + 1) >>> 0);
+  const wrongSeed = throughTheWire(played.actions, playDiff.name, (deal.seed + 1) >>> 0);
   check(
     verdictFor(wrongSeed).matched === false,
     "the same log on a different deal is refused",
@@ -671,7 +684,7 @@ if (deal && played) {
       },
       ...played.actions,
     ],
-    today.name,
+    playDiff.name,
     deal.seed,
   );
   const splicedReplayed = runSolitaireReplay(spliced);
@@ -688,7 +701,7 @@ if (deal && played) {
   // Undo spam: more undos than a game allows.
   const spam = throughTheWire(
     [...played.actions, ...Array.from({ length: MAX_UNDOS_PER_GAME + 1 }, () => ({ op: SOLITAIRE_OPS.UNDO }))],
-    today.name,
+    playDiff.name,
     deal.seed,
   );
   const spamReplayed = runSolitaireReplay(spam);
@@ -704,7 +717,7 @@ if (deal && played) {
   const boundary = runSolitaireReplay(
     throughTheWire(
       [...played.actions, ...Array.from({ length: MAX_UNDOS_PER_GAME }, () => ({ op: SOLITAIRE_OPS.UNDO }))],
-      today.name,
+      playDiff.name,
       deal.seed,
     ),
   );
@@ -715,7 +728,7 @@ if (deal && played) {
 
   // Undo with an empty history: the first action is a dead one.
   const emptyHistory = replaySolitaireActions(
-    createInitialState(deal.seed, today.maxPasses),
+    createInitialState(deal.seed, playDiff.maxPasses),
     [{ op: SOLITAIRE_OPS.UNDO }],
     drawCount,
   );
@@ -728,7 +741,7 @@ if (deal && played) {
 // Undo parity: play, undo, re-play — the driver must land on the same board
 // the component's own bookkeeping does.
 if (deal) {
-  const drawCount = today.drawCount;
+  const drawCount = playDiff.drawCount;
   let state = deal.state;
   const log = [];
   const history = [];
@@ -807,7 +820,7 @@ if (deal && played) {
   // and this is the whole claim's replay with no parking. Measured loosely
   // (25 ms) because CI machines vary — the point is catching a replay that
   // accidentally became expensive, not benchmarking.
-  const validated = throughTheWire(played.actions, today.name, deal.seed);
+  const validated = throughTheWire(played.actions, playDiff.name, deal.seed);
   const t0 = performance.now();
   runSolitaireReplay(validated);
   const elapsed = performance.now() - t0;

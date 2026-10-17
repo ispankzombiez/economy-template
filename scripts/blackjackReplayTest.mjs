@@ -196,26 +196,24 @@ function greedyAction(state) {
 function playGreedy(initial, cap = MAX_BLACKJACK_ACTIONS) {
   let state = initial;
   const hands = [];
-  const targetChips = state.difficulty.targetChips;
 
   while (!state.sessionOver && hands.length < MAX_BLACKJACK_HANDS) {
-    // Between hands: bet aggressively when behind, conservatively when ahead.
+    // Between hands: bet the table maximum, every hand.
+    //
+    // The sizing is arithmetic, not style. Chips grow by at most one bet per
+    // hand, so a session betting `b` caps out at `start + maxHands × b` — and
+    // the old rungs (10 behind, 25/50 ahead) topped out at 180/500 against
+    // easy's 200 and hard's 600. The target was unreachable before a single
+    // card was dealt except through blackjacks and doubles, which is why the
+    // search found no winning session at all on medium, hard, or expert days
+    // (and scraped by on easy only once in ~300 seeds). Betting the largest
+    // affordable amount every hand is the only sizing with a real path to the
+    // target on every difficulty.
     if (!state.currentHand) {
-      const chipsNeeded = targetChips - state.playerChips;
-      const handsLeft = state.difficulty.maxHands - state.handsPlayed;
-      // Target average win per hand needed
-      const avgNeeded = chipsNeeded / Math.max(handsLeft, 1);
-      
-      // Choose bet based on chips needed and hands left
-      let bet = 10;
       const affordable = BLACKJACK_BET_AMOUNTS.filter(b => b <= state.playerChips);
       if (affordable.length === 0) break;
-      
-      // If we need a lot per hand, bet higher
-      if (avgNeeded > 40) bet = affordable.find(b => b === 50) ?? affordable.find(b => b === 25) ?? affordable[affordable.length - 1];
-      else if (avgNeeded > 20) bet = affordable.find(b => b === 25) ?? affordable.find(b => b === 10) ?? affordable[0];
-      else bet = affordable.find(b => b === 10) ?? affordable[0];
-      
+      const bet = affordable[affordable.length - 1];
+
       state = startHand(state, bet);
       if (!state.currentHand) break;
       const betIdx = BLACKJACK_BET_AMOUNTS.findIndex(b => b === bet);
