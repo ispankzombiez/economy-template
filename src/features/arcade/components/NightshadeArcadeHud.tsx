@@ -14,11 +14,12 @@ import {
 import flowerIcon from "../assets/flower_token.webp";
 import { PortalBasketButton } from "./PortalBasketButton";
 import { ArcadeSettingsButton } from "./ArcadeSettingsButton";
+import { MarketplaceButton } from "./MarketplaceButton";
 import { requestClosePortal } from "lib/portal/closePortal";
 import { isHiddenBalanceItem } from "lib/portal/playerEconomyItemHelpers";
 import { SUNNYSIDE } from "example-assets/sunnyside";
 import { PIXEL_SCALE } from "lib/constants";
-import worldIcon from "example-assets/icons/world.png";
+import worldSmallIcon from "../assets/world_small.png";
 
 type NightshadeArcadeHudProps = {
   extraRavenCoins: number;
@@ -393,35 +394,44 @@ export const NightshadeArcadeHud: React.FC<NightshadeArcadeHudProps> = ({
   return (
     <>
       <HudContainer>
-        <div
-          id="travel"
-          className="absolute bottom-3 left-3 z-50 flex justify-center cursor-pointer hover:img-highlight"
-          style={{
-            width: `${PIXEL_SCALE * 22}px`,
-            height: `${PIXEL_SCALE * 23}px`,
-          }}
-          onClick={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            requestClosePortal();
-          }}
-        >
-          <img
-            src={SUNNYSIDE.ui.round_button}
-            className="absolute"
+        {/* Bottom-left: Travel/Globe button (bottom), Marketplace button (top) —
+            matching the main game's HUD exactly: space-y-2.5 between round buttons. */}
+        <div className="absolute bottom-3 left-3 z-50 flex flex-col items-center space-y-2.5">
+          <MarketplaceButton />
+          {/* `relative` is load-bearing: the plate and globe icon are
+              absolutely positioned, so they anchor to this button rather than
+              the column wrapper. Without it they land on the top (market)
+              button and steal its clicks. */}
+          <div
+            id="travel"
+            className="relative flex justify-center cursor-pointer hover:img-highlight"
             style={{
               width: `${PIXEL_SCALE * 22}px`,
+              height: `${PIXEL_SCALE * 23}px`,
             }}
-          />
-          <img
-            src={worldIcon}
-            style={{
-              width: `${PIXEL_SCALE * 12}px`,
-              left: `${PIXEL_SCALE * 5}px`,
-              top: `${PIXEL_SCALE * 4}px`,
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              requestClosePortal();
             }}
-            className="absolute"
-          />
+          >
+            <img
+              src={SUNNYSIDE.ui.round_button}
+              className="absolute"
+              style={{
+                width: `${PIXEL_SCALE * 22}px`,
+              }}
+            />
+            <img
+              src={worldSmallIcon}
+              style={{
+                width: `${PIXEL_SCALE * 12}px`,
+                left: `${PIXEL_SCALE * 5}px`,
+                top: `${PIXEL_SCALE * 4}px`,
+              }}
+              className="absolute"
+            />
+          </div>
         </div>
 
         {/* Identity block, top-left. The farm number is here because it is the

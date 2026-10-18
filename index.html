@@ -7,6 +7,13 @@
       content="width=device-width, initial-scale=1.0, viewport-fit=cover"
     />
     <title>The Nightshade Arcade</title>
+    <!--
+      DNS + TLS for sunflower-land.com is needed twice over: the arcade's own
+      Secondary font comes from testnet-assets on that host, and the embedded
+      marketplace iframe navigates there. Hinting the connection from the head
+      makes it ready before either is fetched.
+    -->
+    <link rel="preconnect" href="https://sunflower-land.com" crossorigin />
   </head>
   <body>
     <div id="root"></div>

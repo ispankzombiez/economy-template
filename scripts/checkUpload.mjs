@@ -109,8 +109,15 @@ if (existsSync(join(distDir, "index.html"))) {
   } else if (refs.length === 0) {
     problems.push("index.html references no scripts or stylesheets at all.");
   } else {
+    // Vite only ever emits root-/relative asset refs (prefixed with `base`),
+    // so a rooted ref proves the right build. `http(s)://` refs are external
+    // hints that Vite copies through untouched (e.g. the sunflower-land.com
+    // preconnect in <head>) — they cannot be wrong-base assets, so they pass.
     const notRooted = refs.filter(
-      (href) => !href.startsWith("/") && !href.startsWith("./"),
+      (href) =>
+        !href.startsWith("/") &&
+        !href.startsWith("./") &&
+        !/^https?:\/\//.test(href),
     );
     if (notRooted.length > 0) {
       problems.push(

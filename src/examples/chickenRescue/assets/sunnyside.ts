@@ -29,6 +29,12 @@ export const SUNNYSIDE = {
     // same icon players already know from the HUD. Same path on the same CDN.
     // (`hammer` above is the mark on the Developer row.)
     settings: `${B()}/icons/settings.png`,
+    // Marketplace / trade icon — matches the main game's market button in the
+    // bottom-left HUD (above the world/travel button).
+    tradeIcon: `${B()}/icons/trade.png`,
+    // World / travel / globe icon — the main game's higher-resolution world.webp
+    // used by the TravelButton in the bottom-left HUD.
+    worldIcon: `${B()}/icons/world.webp`,
   },
   decorations: {
     skull: `${B()}/decorations/skull.webp`,
